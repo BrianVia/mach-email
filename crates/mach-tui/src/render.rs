@@ -240,13 +240,12 @@ fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
         ]));
         lines.push(Line::raw(""));
 
-        let body = m
-            .body_plain
-            .as_deref()
-            .unwrap_or("(body not fetched — open online to backfill)");
-        for line in body.lines().take(if selected { 200 } else { 5 }) {
-            lines.push(line_with_osc8_links(line));
-        }
+        let body_lines = v.body_renderer.lines(m, inner.width.saturating_sub(2));
+        lines.extend(
+            body_lines
+                .into_iter()
+                .take(if selected { usize::MAX } else { 5 }),
+        );
         lines.push(Line::raw(""));
         lines.push(Line::styled("  ─────", Style::default().fg(DIM)));
         lines.push(Line::raw(""));
@@ -416,70 +415,6 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
     });
     let lines: Vec<Line> = std::iter::once(header).chain(rows).collect();
     f.render_widget(Paragraph::new(lines), chunks[1]);
-}
-
-/// Build a ratatui `Line` from a raw string, wrapping detected URLs in
-/// OSC 8 hyperlink escape sequences. Modern terminals (iTerm2, Kitty,
-/// Ghostty, WezTerm, recent Terminal.app) make those clickable even when
-/// the visible text wraps across multiple cells.
-///
-/// Escape format (per Hyperlink spec): `\x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\`.
-/// ratatui passes raw bytes from `Span::raw` to the terminal verbatim.
-fn line_with_osc8_links(s: &str) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut last = 0;
-    let bytes = s.as_bytes();
-    while last < bytes.len() {
-        // Find the next "http://" or "https://" occurrence at a word boundary.
-        let rest = &s[last..];
-        let pos_http = rest.find("http://");
-        let pos_https = rest.find("https://");
-        let next = match (pos_http, pos_https) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-        let Some(rel) = next else {
-            spans.push(Span::raw(rest.to_string()));
-            break;
-        };
-        let url_start = last + rel;
-        // Word boundary check — refuse to match mid-word like "ahttp".
-        if url_start > 0 {
-            let prev_char = s[..url_start].chars().last();
-            if let Some(c) = prev_char {
-                if c.is_alphanumeric() && c != '/' {
-                    // false positive — emit up through this point and continue.
-                    spans.push(Span::raw(s[last..url_start + 4].to_string()));
-                    last = url_start + 4;
-                    continue;
-                }
-            }
-        }
-        // Push text before the URL.
-        if url_start > last {
-            spans.push(Span::raw(s[last..url_start].to_string()));
-        }
-        // Find URL end — first whitespace or terminating char.
-        let url_end = s[url_start..]
-            .find(|c: char| {
-                c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`' | ')' | ']' | '}')
-            })
-            .map(|n| url_start + n)
-            .unwrap_or(s.len());
-        let url = &s[url_start..url_end];
-        // OSC 8 wrap: ESC ] 8 ; ; URL ESC \ TEXT ESC ] 8 ; ; ESC \
-        let wrapped = format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\");
-        spans.push(Span::styled(
-            wrapped,
-            Style::default()
-                .fg(ACCENT)
-                .add_modifier(Modifier::UNDERLINED),
-        ));
-        last = url_end;
-    }
-    Line::from(spans)
 }
 
 fn trunc(s: &str, max: usize) -> String {

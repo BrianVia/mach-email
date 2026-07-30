@@ -29,6 +29,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, warn};
 
 use crate::config::load_keymap;
+use crate::email_body::EmailBodyRenderer;
 use crate::keys::key_event_to_chord;
 use crate::render::draw;
 
@@ -74,6 +75,7 @@ pub struct ThreadView {
     pub thread_id: ThreadId,
     pub summary: ThreadSummary,
     pub messages: Vec<Message>,
+    pub body_renderer: EmailBodyRenderer,
     pub scroll: u16,
     /// Selected message index (for `$current_message` resolution).
     pub selected_message: usize,
@@ -442,6 +444,9 @@ fn handle_search_event(app: &mut App, event: SearchEvent) {
 }
 
 async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    if thread_scroll_key(app, &k) {
+        return;
+    }
     // Composer text input is special: most keys go to the field, not the
     // keymap. We only consult the keymap for specific control bindings.
     if let View::Composer(_) = &app.view {
@@ -496,6 +501,32 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
                 }
             }
         }
+    }
+}
+
+fn thread_scroll_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    let View::Thread(thread) = &mut app.view else {
+        return false;
+    };
+    match key.code {
+        KeyCode::PageDown => {
+            thread.scroll = thread.scroll.saturating_add(20);
+            true
+        }
+        KeyCode::PageUp => {
+            thread.scroll = thread.scroll.saturating_sub(20);
+            true
+        }
+        KeyCode::Home => {
+            thread.scroll = 0;
+            true
+        }
+        KeyCode::End => {
+            thread.scroll = u16::MAX;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -812,6 +843,7 @@ async fn open_thread(app: &mut App, id: ThreadId) {
         thread_id: id,
         summary,
         messages,
+        body_renderer: EmailBodyRenderer::default(),
         scroll: 0,
         selected_message: 0,
     });
@@ -831,6 +863,7 @@ fn advance_selection(app: &mut App, delta: i32) {
                 let next = (v.selected_message as i32 + delta).clamp(0, v.messages.len() as i32 - 1)
                     as usize;
                 v.selected_message = next;
+                v.scroll = 0;
             }
         }
         View::Search(v) => {

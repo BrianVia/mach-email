@@ -2507,6 +2507,7 @@ dependencies = [
  "crossterm",
  "directories",
  "futures",
+ "html2text",
  "mach-core",
  "mach-gmail",
  "mach-store",

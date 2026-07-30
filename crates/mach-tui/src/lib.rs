@@ -6,6 +6,7 @@
 
 mod app;
 mod config;
+mod email_body;
 mod keys;
 mod render;
 
