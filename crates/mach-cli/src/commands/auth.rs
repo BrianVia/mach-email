@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mach_gmail::{config::OAuthConfig, credentials, oauth};
+use mach_gmail::{config::OAuthConfig, credentials, oauth, GmailClient};
 
 pub async fn login() -> Result<()> {
     let config = OAuthConfig::from_env().context("OAuth client credentials not configured")?;
@@ -10,9 +10,25 @@ pub async fn login() -> Result<()> {
     let _ = crate::runtime::open_store().await?;
     let creds = oauth::login(&config).await?;
     credentials::save(&creds)?;
-    let _ = crate::runtime::open_store().await?;
+    let store = crate::runtime::open_store().await?;
     println!("✓ Logged in as {}", creds.email);
     println!("  Access token expires {}", creds.expires_at.to_rfc3339());
+    match GmailClient::from_stored_credentials(config, &creds.email) {
+        Ok(client) => {
+            if let Err(error) =
+                crate::commands::sync::bootstrap_account(false, &creds.email, client, store).await
+            {
+                eprintln!("⚠ Login succeeded, but initial mailbox bootstrap failed: {error:#}");
+                eprintln!("  Retry with `mach sync --account {}`.", creds.email);
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "⚠ Login succeeded, but initial mailbox bootstrap could not start: {error:#}"
+            );
+            eprintln!("  Retry with `mach sync --account {}`.", creds.email);
+        }
+    }
     Ok(())
 }
 

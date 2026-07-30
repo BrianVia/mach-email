@@ -120,7 +120,10 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
         return;
     }
 
-    let row_count = inner.height as usize;
+    let row_count = inner.height.saturating_sub(1) as usize;
+    if row_count == 0 {
+        return;
+    }
     // Adjust viewport so selected is visible. (Computed read-only here; the
     // viewport_top in state should be kept in sync on selection moves — for v1
     // we just recompute every draw which is cheap.)
@@ -132,60 +135,65 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
     }
     let end = (top + row_count).min(v.threads.len());
 
-    let lines: Vec<Line> = v.threads[top..end]
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let idx = top + i;
-            let selected = idx == v.selected;
-            let mut style = Style::default();
-            if selected {
-                style = style.bg(SELECTED_BG);
-            }
-            let unread_marker = if t.unread {
-                Span::styled("●", Style::default().fg(UNREAD_DOT))
-            } else {
-                Span::raw(" ")
-            };
-            let star_marker = if t.starred {
-                Span::styled("★", Style::default().fg(STARRED))
-            } else {
-                Span::raw(" ")
-            };
-            let from = trunc(
-                t.participants
-                    .first()
-                    .map(|s| s.as_str())
-                    .unwrap_or("(no sender)"),
-                28,
-            );
-            let subject_style = if t.unread {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            let subj = trunc(&t.subject, 50);
-            let snippet = trunc(&t.snippet, 60);
-            let when = pretty_when(&t.last_message_at);
-            let account = trunc(t.account_id.as_str(), 22);
+    let header = Line::from(vec![
+        Span::raw("       "),
+        Span::styled(format!("{:<22} ", "Account"), Style::default().fg(DIM)),
+        Span::styled(format!("{:>8} ", "Date"), Style::default().fg(DIM)),
+        Span::styled(format!("{:<28} ", "From"), Style::default().fg(DIM)),
+        Span::styled(format!("{:<50} ", "Subject"), Style::default().fg(DIM)),
+        Span::styled("Preview", Style::default().fg(DIM)),
+    ]);
+    let rows = v.threads[top..end].iter().enumerate().map(|(i, t)| {
+        let idx = top + i;
+        let selected = idx == v.selected;
+        let mut style = Style::default();
+        if selected {
+            style = style.bg(SELECTED_BG);
+        }
+        let unread_marker = if t.unread {
+            Span::styled("●", Style::default().fg(UNREAD_DOT))
+        } else {
+            Span::raw(" ")
+        };
+        let star_marker = if t.starred {
+            Span::styled("★", Style::default().fg(STARRED))
+        } else {
+            Span::raw(" ")
+        };
+        let from = trunc(
+            t.participants
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("(no sender)"),
+            28,
+        );
+        let subject_style = if t.unread {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let subj = trunc(&t.subject, 50);
+        let snippet = trunc(&t.snippet, 60);
+        let when = pretty_when(&t.last_message_at);
+        let account = trunc(t.account_id.as_str(), 22);
 
-            Line::from(vec![
-                Span::raw(" "),
-                unread_marker,
-                Span::raw(" "),
-                star_marker,
-                Span::raw(" "),
-                Span::styled(format!("{account:<22} "), Style::default().fg(DIM)),
-                Span::styled(format!("{from:<28} "), Style::default().fg(ACCENT)),
-                Span::styled(format!("{subj:<50} "), subject_style),
-                Span::styled(format!("{snippet} "), Style::default().fg(DIM)),
-                Span::styled(format!("{when:>8}"), Style::default().fg(DIM)),
-            ])
-            .style(style)
-        })
-        .collect();
+        Line::from(vec![
+            Span::raw(" "),
+            unread_marker,
+            Span::raw(" "),
+            star_marker,
+            Span::raw(" "),
+            Span::styled(format!("{account:<22} "), Style::default().fg(DIM)),
+            Span::styled(format!("{when:>8} "), Style::default().fg(DIM)),
+            Span::styled(format!("{from:<28} "), Style::default().fg(ACCENT)),
+            Span::styled(format!("{subj:<50} "), subject_style),
+            Span::styled(snippet, Style::default().fg(DIM)),
+        ])
+        .style(style)
+    });
+    let lines: Vec<Line> = std::iter::once(header).chain(rows).collect();
 
     let par = Paragraph::new(lines);
     f.render_widget(par, inner);

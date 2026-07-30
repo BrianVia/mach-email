@@ -49,19 +49,20 @@ cp .env.example .env
 # Fill in MACH_GOOGLE_CLIENT_ID and MACH_GOOGLE_CLIENT_SECRET.
 
 cargo run -p mach-cli -- auth login
-cargo run -p mach-cli -- sync --bootstrap
 cargo run -p mach-cli
 ```
 
-Repeat `mach auth login` for each Gmail address. Logins are additive. The
-default TUI merges every account into one time-sorted inbox and shows the
-owning address on each row:
+Repeat `mach auth login` for each Gmail address. Logins are additive and a new
+account is bootstrapped automatically. A later `mach sync` also bootstraps any
+account missing its initial cursor. The default TUI merges every account into
+one time-sorted inbox and shows the owning address and date on each row:
 
 ```sh
 mach                         # unified inbox
 mach --account me@work.com   # one account
 mach sync                    # sync every account
 mach sync --account me@work.com
+mach sync --bootstrap        # explicitly rebuild every account
 mach auth status
 mach auth logout --account me@work.com
 ```
