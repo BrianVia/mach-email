@@ -116,16 +116,21 @@ pub struct OutboxOp {
 #[async_trait]
 pub trait MailStore: Send + Sync {
     async fn get_thread(&self, id: &ThreadId) -> CoreResult<Option<ThreadSummary>>;
-    async fn list_threads_in_label(&self, label: &LabelId, limit: u32) -> CoreResult<Vec<ThreadSummary>>;
+    async fn list_threads_in_label(
+        &self,
+        label: &LabelId,
+        limit: u32,
+    ) -> CoreResult<Vec<ThreadSummary>>;
     async fn list_messages_in_thread(&self, id: &ThreadId) -> CoreResult<Vec<Message>>;
     async fn search_threads(&self, query: &str, limit: u32) -> CoreResult<Vec<ThreadSummary>>;
 
-    async fn modify_labels_local(
-        &self,
-        thread_ids: &[ThreadId],
-        add: &[LabelId],
-        remove: &[LabelId],
-    ) -> CoreResult<()>;
+    /// Apply a thread mutation to the local projection and durably enqueue
+    /// the matching remote operation as one atomic store transaction.
+    ///
+    /// Implementations must reject non-thread operations. Returning success
+    /// guarantees that the optimistic state and its recovery record either
+    /// both exist or neither exists.
+    async fn apply_thread_mutation(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64>;
 
     async fn list_labels(&self) -> CoreResult<Vec<Label>>;
 

@@ -1,10 +1,9 @@
-use chrono::Utc;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use mach_gmail::{config::OAuthConfig, credentials, oauth};
 
 pub async fn login() -> Result<()> {
-    let config = OAuthConfig::from_env()
-        .context("OAuth client credentials not configured")?;
+    let config = OAuthConfig::from_env().context("OAuth client credentials not configured")?;
     let creds = oauth::login(&config).await?;
     credentials::save(&creds)?;
     println!("✓ Logged in as {}", creds.email);

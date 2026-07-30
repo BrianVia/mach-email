@@ -178,7 +178,10 @@ fn decode_entities(s: &str) -> String {
 
 fn find_semicolon(bytes: &[u8], start: usize, max_scan: usize) -> Option<usize> {
     let end = (start + max_scan).min(bytes.len());
-    bytes[start..end].iter().position(|b| *b == b';').map(|p| start + p)
+    bytes[start..end]
+        .iter()
+        .position(|b| *b == b';')
+        .map(|p| start + p)
 }
 
 fn lookup_entity(name: &str) -> Option<String> {
@@ -202,7 +205,8 @@ fn lookup_entity(name: &str) -> Option<String> {
         // Numeric: &#NN; or &#xHH;
         num if num.starts_with('#') => {
             let rest = &num[1..];
-            let code = if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+            let code = if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X'))
+            {
                 u32::from_str_radix(hex, 16).ok()?
             } else {
                 rest.parse::<u32>().ok()?
@@ -233,10 +237,16 @@ fn walk(p: &MessagePayload, out: &mut ParsedBody) {
         if let Some(body) = &p.body {
             if let Some(att_id) = body.attachment_id.clone() {
                 if let Some(cid) = header_value(&p.headers, "Content-ID") {
-                    let cid = cid.trim().trim_start_matches('<').trim_end_matches('>').to_string();
+                    let cid = cid
+                        .trim()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .to_string();
                     let filename = header_value(&p.headers, "Content-Disposition")
                         .and_then(extract_filename)
-                        .or_else(|| header_value(&p.headers, "Content-Type").and_then(extract_filename));
+                        .or_else(|| {
+                            header_value(&p.headers, "Content-Type").and_then(extract_filename)
+                        });
                     out.inline_images.push(InlineImageRef {
                         content_id: cid,
                         attachment_id: att_id,
@@ -293,7 +303,10 @@ fn header_value(headers: &[crate::client::MessageHeader], name: &str) -> Option<
 fn extract_filename(header_value: String) -> Option<String> {
     for part in header_value.split(';') {
         let p = part.trim();
-        if let Some(rest) = p.strip_prefix("filename=").or_else(|| p.strip_prefix("name=")) {
+        if let Some(rest) = p
+            .strip_prefix("filename=")
+            .or_else(|| p.strip_prefix("name="))
+        {
             let rest = rest.trim().trim_matches('"');
             if !rest.is_empty() {
                 return Some(rest.to_string());
@@ -404,14 +417,8 @@ mod tests {
 
     #[test]
     fn image_marker_collapsed() {
-        assert_eq!(
-            clean("Hello\n[Image]\nWorld"),
-            "Hello\n🖼\nWorld"
-        );
-        assert_eq!(
-            clean("[Image: logo.png] inline"),
-            "🖼 inline"
-        );
+        assert_eq!(clean("Hello\n[Image]\nWorld"), "Hello\n🖼\nWorld");
+        assert_eq!(clean("[Image: logo.png] inline"), "🖼 inline");
     }
 
     #[test]

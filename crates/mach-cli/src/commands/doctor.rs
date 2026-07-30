@@ -24,18 +24,24 @@ pub async fn run(simulate_gap: bool) -> Result<()> {
     let cursor = store.get_history_cursor().await?;
     println!(
         "history cursor:  {}",
-        cursor.map(|c| c.to_string()).unwrap_or("(none — bootstrap first)".into())
+        cursor
+            .map(|c| c.to_string())
+            .unwrap_or("(none — bootstrap first)".into())
     );
 
     // OAuth env.
     let creds_ok = OAuthConfig::from_env().is_ok();
     println!(
         "MACH_GOOGLE_*    {}",
-        if creds_ok { "✓ set" } else { "✗ missing (read-only mode)" }
+        if creds_ok {
+            "✓ set"
+        } else {
+            "✗ missing (read-only mode)"
+        }
     );
 
     if creds_ok {
-        let client = GmailClient::from_keyring(OAuthConfig::from_env()?)?;
+        let client = GmailClient::from_stored_credentials(OAuthConfig::from_env()?)?;
         let email = client.email().await;
         println!("account:         {email}");
         match client.get_profile().await {

@@ -1,4 +1,5 @@
-//! Sync engine. v0 ships only the **bootstrap** path.
+//! Gmail cache synchronization: bootstrap, incremental history replay, and
+//! conservative gap recovery.
 //!
 //! Bootstrap: snapshot `historyId` *before* the listing pass, fetch labels
 //! and the last 30 days of threads, persist to the SQLite cache, store the
@@ -6,14 +7,6 @@
 //! messages forever — the bug almost every TUI mail client gets wrong on the
 //! first try. The order in [`bootstrap`] is deliberate.
 //!
-//! TODO (next session):
-//! * `incremental` — `users.history.list?startHistoryId=X` with the
-//!   `messageAdded`/`messageDeleted`/`labelAdded`/`labelRemoved` types.
-//! * `gap_recovery` — on 404 from the History API, re-bootstrap a 7-day
-//!   window and reconcile by `messageId` rather than nuking the cache.
-//! * `outbox_worker` — drain pending outbox ops, write back to Gmail with
-//!   deterministic op-ids so we can suppress our own echoes for 60s.
-
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -63,9 +56,7 @@ pub async fn bootstrap(
             id: l.id,
             name: l.name,
             system: l.label_type == "system",
-            color: l
-                .color
-                .and_then(|c| c.background_color.or(c.text_color)),
+            color: l.color.and_then(|c| c.background_color.or(c.text_color)),
         })
         .collect();
     stats.labels = labels.len() as u32;
@@ -125,6 +116,13 @@ pub async fn bootstrap(
     stats.messages = upserts.iter().map(|t| t.messages.len() as u32).sum();
     store.upsert_threads(upserts).await?;
 
+    if stats.failed_thread_fetches > 0 {
+        anyhow::bail!(
+            "bootstrap left {} thread(s) unresolved; cursor was not advanced",
+            stats.failed_thread_fetches
+        );
+    }
+
     // 6. Persist the cursor LAST — only after a successful write, so a
     //    crash mid-bootstrap on a fresh DB still triggers a re-bootstrap
     //    rather than an incremental sync against a half-populated cache.
@@ -136,16 +134,22 @@ pub async fn bootstrap(
 
 fn remote_thread_to_upsert(t: &RemoteThread) -> ThreadUpsert {
     let history_id: u64 = t.history_id.parse().unwrap_or(0);
-    let messages: Vec<MessageUpsert> =
-        t.messages.iter().map(remote_message_to_upsert).collect();
+    let messages: Vec<MessageUpsert> = t.messages.iter().map(remote_message_to_upsert).collect();
 
-    let last_message_at_ms = messages.iter().map(|m| m.internal_date_ms).max().unwrap_or(0);
+    let last_message_at_ms = messages
+        .iter()
+        .map(|m| m.internal_date_ms)
+        .max()
+        .unwrap_or(0);
     let last = t.messages.last();
     let subject = last
         .and_then(|m| m.header("Subject"))
         .unwrap_or("")
         .to_string();
-    let snippet = last.and_then(|m| m.snippet.as_deref()).unwrap_or("").to_string();
+    let snippet = last
+        .and_then(|m| m.snippet.as_deref())
+        .unwrap_or("")
+        .to_string();
 
     // Union of label IDs across all messages — that's how Gmail computes a
     // thread's effective labels. Dedup with a HashSet.
@@ -182,14 +186,8 @@ fn remote_thread_to_upsert(t: &RemoteThread) -> ThreadUpsert {
 }
 
 fn remote_message_to_upsert(m: &RemoteMessage) -> MessageUpsert {
-    let to_addrs = m
-        .header("To")
-        .map(parse_address_list)
-        .unwrap_or_default();
-    let cc_addrs = m
-        .header("Cc")
-        .map(parse_address_list)
-        .unwrap_or_default();
+    let to_addrs = m.header("To").map(parse_address_list).unwrap_or_default();
+    let cc_addrs = m.header("Cc").map(parse_address_list).unwrap_or_default();
 
     MessageUpsert {
         id: m.id.clone(),
@@ -211,7 +209,10 @@ fn remote_message_to_upsert(m: &RemoteMessage) -> MessageUpsert {
 /// produce wrong splits. Replace with `mail-parser` when we add full-format
 /// fetching.
 fn parse_address_list(raw: &str) -> Vec<String> {
-    raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -246,6 +247,7 @@ pub async fn incremental_sync(
 
     let mut next_token: Option<String> = None;
     let mut touched_threads: std::collections::HashSet<String> = Default::default();
+    let mut deleted_messages: std::collections::HashSet<String> = Default::default();
     let mut latest_history_id = cursor;
 
     loop {
@@ -262,17 +264,19 @@ pub async fn incremental_sync(
             for r in record
                 .messages_added
                 .iter()
-                .chain(&record.messages_deleted)
                 .chain(&record.labels_added)
                 .chain(&record.labels_removed)
             {
                 touched_threads.insert(r.message.thread_id.clone());
             }
+            for deleted in &record.messages_deleted {
+                touched_threads.insert(deleted.message.thread_id.clone());
+                deleted_messages.insert(deleted.message.id.clone());
+            }
         }
         if let Some(hid) = page.history_id {
-            if let Ok(parsed) = hid.parse::<u64>() {
-                latest_history_id = latest_history_id.max(parsed);
-            }
+            let parsed = hid.parse::<u64>().context("parsing history page cursor")?;
+            latest_history_id = latest_history_id.max(parsed);
         }
         match page.next_page_token {
             Some(t) => next_token = Some(t),
@@ -285,19 +289,31 @@ pub async fn incremental_sync(
     use futures::stream::{self, StreamExt};
     const FETCH_CONCURRENCY: usize = 10;
 
+    store
+        .delete_messages(deleted_messages.into_iter().collect())
+        .await?;
+
     let thread_ids: Vec<String> = touched_threads.into_iter().collect();
     let mut threads: Vec<RemoteThread> = Vec::with_capacity(thread_ids.len());
+    let mut failures = Vec::new();
     let client_for_stream = client.clone();
     let mut futs = stream::iter(thread_ids.into_iter())
         .map(move |id| {
             let client = client_for_stream.clone();
-            async move { client.get_thread_metadata(&id).await }
+            async move {
+                let result = client.get_thread_metadata_optional(&id).await;
+                (id, result)
+            }
         })
         .buffer_unordered(FETCH_CONCURRENCY);
-    while let Some(res) = futs.next().await {
-        match res {
-            Ok(t) => threads.push(t),
-            Err(e) => warn!(error = %e, "thread refetch failed during incremental"),
+    while let Some((id, result)) = futs.next().await {
+        match result {
+            Ok(Some(thread)) => threads.push(thread),
+            Ok(None) => store.delete_thread(id).await?,
+            Err(error) => {
+                warn!(thread_id = id, error = %error, "thread refetch failed during incremental");
+                failures.push((id, error.to_string()));
+            }
         }
     }
     stats.threads_refetched = threads.len() as u32;
@@ -305,6 +321,13 @@ pub async fn incremental_sync(
     if !threads.is_empty() {
         let upserts: Vec<ThreadUpsert> = threads.iter().map(remote_thread_to_upsert).collect();
         store.upsert_threads(upserts).await?;
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "incremental sync left {} thread(s) unresolved; cursor was not advanced",
+            failures.len()
+        );
     }
 
     store.set_history_cursor(latest_history_id).await?;
@@ -323,7 +346,10 @@ async fn gap_recover(
     info!("gap_recover: rebuilding the last 7 days");
 
     let profile = client.get_profile().await?;
-    let new_cursor: u64 = profile.history_id.parse().unwrap_or(0);
+    let new_cursor: u64 = profile
+        .history_id
+        .parse()
+        .context("parsing gap-recovery historyId")?;
 
     let mut stubs = Vec::new();
     let mut page_token: Option<String> = None;
@@ -342,6 +368,7 @@ async fn gap_recover(
 
     use futures::stream::{self, StreamExt};
     let mut threads: Vec<RemoteThread> = Vec::with_capacity(stubs.len());
+    let mut failed_fetches = 0usize;
     let client_for_stream = client.clone();
     let mut futs = stream::iter(stubs.into_iter().map(|s| s.id))
         .map(move |id| {
@@ -350,8 +377,12 @@ async fn gap_recover(
         })
         .buffer_unordered(10);
     while let Some(res) = futs.next().await {
-        if let Ok(t) = res {
-            threads.push(t);
+        match res {
+            Ok(thread) => threads.push(thread),
+            Err(error) => {
+                failed_fetches += 1;
+                warn!(error = %error, "thread fetch failed during gap recovery");
+            }
         }
     }
 
@@ -359,6 +390,11 @@ async fn gap_recover(
     let refetched = upserts.len() as u32;
     if !upserts.is_empty() {
         store.upsert_threads(upserts).await?;
+    }
+    if failed_fetches > 0 {
+        anyhow::bail!(
+            "gap recovery left {failed_fetches} thread(s) unresolved; cursor was not advanced"
+        );
     }
     store.set_history_cursor(new_cursor).await?;
 

@@ -3,7 +3,7 @@ import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keyma
 import {
   dispatchAction,
   fetchAccountStatus,
-  fetchKeymapToml,
+  fetchKeymapSources,
   listThreads,
   openThread as openThreadIpc,
   refetchThread as refetchThreadIpc,
@@ -26,7 +26,7 @@ const INBOX_LIMIT = 1000;
 type AppView =
   | { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number }
   | { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number }
-  | { kind: "composer" }
+  | { kind: "composer"; background: AppView }
   | {
       kind: "search";
       query: string;
@@ -53,9 +53,13 @@ export default function App() {
   // Boot: load keymap, load inbox.
   onMount(async () => {
     try {
-      const toml = await fetchKeymapToml();
+      const sources = await fetchKeymapSources();
       try {
-        setKeymap(Keymap.fromToml(toml));
+        const resolved = Keymap.fromToml(sources.defaults);
+        if (sources.user) {
+          resolved.merge(Keymap.fromToml(sources.user));
+        }
+        setKeymap(resolved);
       } catch (e) {
         console.error("[mach] keymap parse failed:", e);
         setBootError(`keymap parse: ${(e as Error).message ?? e}`);
@@ -181,7 +185,7 @@ export default function App() {
         moveSelection(-1);
         return;
       case "compose_new":
-        setView({ kind: "composer" });
+        setView({ kind: "composer", background: v });
         return;
       case "open_thread": {
         const id = (action.id as string) ?? "";
@@ -355,7 +359,12 @@ export default function App() {
           <ThreadReader v={view() as Extract<AppView, { kind: "thread" }>} />
         </Show>
         <Show when={view().kind === "composer"}>
-          <Composer onClose={() => setView({ kind: "inbox", label: "INBOX", threads: (view() as any).threads ?? [], selected: 0 })} />
+          <Composer
+            onClose={() => {
+              const current = view();
+              if (current.kind === "composer") setView(current.background);
+            }}
+          />
         </Show>
         <Show when={view().kind === "search"}>
           <SearchOverlay

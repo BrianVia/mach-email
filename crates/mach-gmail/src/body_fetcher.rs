@@ -78,11 +78,7 @@ impl BodyFetcher {
 }
 
 fn parse_message_into_update(m: &RemoteMessage) -> MessageBodyUpdate {
-    let parsed: ParsedBody = m
-        .payload
-        .as_ref()
-        .map(body::extract)
-        .unwrap_or_default();
+    let parsed: ParsedBody = m.payload.as_ref().map(body::extract).unwrap_or_default();
 
     // Prefer raw plain. Fall back to html→text via html2text inside
     // ParsedBody::effective_plain. We persist both: body_plain feeds the

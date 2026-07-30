@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::OAuthConfig;
 use crate::credentials::{self, StoredCredentials};
@@ -29,7 +29,7 @@ pub struct GmailClient {
 impl GmailClient {
     /// Construct from credentials already on disk. Errors if `mach auth login`
     /// hasn't been run yet.
-    pub fn from_keyring(config: OAuthConfig) -> Result<Arc<Self>> {
+    pub fn from_stored_credentials(config: OAuthConfig) -> Result<Arc<Self>> {
         let creds = credentials::load()
             .context("loading stored credentials")?
             .ok_or_else(|| anyhow!("no credentials — run `mach auth login` first"))?;
@@ -91,6 +91,31 @@ impl GmailClient {
         unreachable!()
     }
 
+    async fn get_json_optional<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+    ) -> Result<Option<T>> {
+        for attempt in 0..2u8 {
+            let token = self.access_token().await?;
+            let resp = self.http.get(url).bearer_auth(&token).send().await?;
+            match resp.status() {
+                StatusCode::OK => {
+                    return resp.json().await.context("parsing JSON response").map(Some)
+                }
+                StatusCode::NOT_FOUND => return Ok(None),
+                StatusCode::UNAUTHORIZED if attempt == 0 => {
+                    warn!("got 401, forcing token refresh and retrying");
+                    self.refresh().await?;
+                }
+                status => {
+                    let body = resp.text().await.unwrap_or_default();
+                    bail!("HTTP {status} from {url}: {body}");
+                }
+            }
+        }
+        unreachable!()
+    }
+
     pub async fn get_profile(&self) -> Result<Profile> {
         self.get_json(&format!("{BASE}/profile")).await
     }
@@ -135,9 +160,7 @@ impl GmailClient {
                 .with_decode_allow_trailing_bits(true),
         );
 
-        let url = format!(
-            "{BASE}/messages/{message_id}/attachments/{attachment_id}"
-        );
+        let url = format!("{BASE}/messages/{message_id}/attachments/{attachment_id}");
         let resp: AttachmentResponse = self.get_json(&url).await?;
         let bytes = B64URL
             .decode(resp.data.trim())
@@ -216,8 +239,7 @@ impl GmailClient {
                         // Empty body — synthesize null which deserializes
                         // happily into serde_json::Value::Null.
                         let null = serde_json::Value::Null;
-                        return serde_json::from_value(null)
-                            .context("parsing empty POST response");
+                        return serde_json::from_value(null).context("parsing empty POST response");
                     }
                     return resp.json().await.context("parsing POST response");
                 }
@@ -256,10 +278,7 @@ impl GmailClient {
         self.get_json_with_404(&url).await
     }
 
-    async fn get_json_with_404<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> Result<T> {
+    async fn get_json_with_404<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         for attempt in 0..2u8 {
             let token = self.access_token().await?;
             let resp = self.http.get(url).bearer_auth(&token).send().await?;
@@ -292,6 +311,21 @@ impl GmailClient {
              &metadataHeaders=Date"
         );
         self.get_json(&url).await
+    }
+
+    /// Fetch metadata while treating a 404 as a confirmed remote deletion.
+    /// Incremental sync uses this to distinguish missing threads from
+    /// transient failures that must prevent checkpoint advancement.
+    pub async fn get_thread_metadata_optional(&self, id: &str) -> Result<Option<RemoteThread>> {
+        let url = format!(
+            "{BASE}/threads/{id}?format=metadata\
+             &metadataHeaders=Subject\
+             &metadataHeaders=From\
+             &metadataHeaders=To\
+             &metadataHeaders=Cc\
+             &metadataHeaders=Date"
+        );
+        self.get_json_optional(&url).await
     }
 }
 
@@ -451,9 +485,4 @@ impl RemoteMessage {
     pub fn internal_date_ms(&self) -> i64 {
         self.internal_date.parse().unwrap_or(0)
     }
-}
-
-#[allow(dead_code)]
-fn _info_keeper() {
-    info!("placeholder");
 }

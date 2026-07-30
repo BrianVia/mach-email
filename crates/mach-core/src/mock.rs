@@ -98,12 +98,25 @@ impl MailStore for InMemoryStore {
         Ok(out)
     }
 
-    async fn modify_labels_local(
-        &self,
-        thread_ids: &[ThreadId],
-        add: &[LabelId],
-        remove: &[LabelId],
-    ) -> CoreResult<()> {
+    async fn apply_thread_mutation(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64> {
+        let (thread_ids, add, remove) = match kind {
+            OutboxOpKind::ModifyLabels {
+                thread_ids,
+                add,
+                remove,
+            } => (thread_ids.as_slice(), add.as_slice(), remove.as_slice()),
+            OutboxOpKind::Trash { thread_ids } => (
+                thread_ids.as_slice(),
+                &[LabelId::new("TRASH")][..],
+                &[LabelId::new("INBOX")][..],
+            ),
+            _ => {
+                return Err(crate::error::CoreError::InvalidAction(
+                    "apply_thread_mutation requires a thread operation".into(),
+                ))
+            }
+        };
+
         let mut inner = self.inner.lock().unwrap();
         for tid in thread_ids {
             if let Some(t) = inner.threads.get_mut(tid) {
@@ -119,7 +132,17 @@ impl MailStore for InMemoryStore {
                 t.starred = t.label_ids.iter().any(|l| l.as_str() == "STARRED");
             }
         }
-        Ok(())
+        inner.next_outbox_id += 1;
+        let id = inner.next_outbox_id;
+        inner.outbox.push(OutboxOp {
+            id,
+            op_id: op_id.clone(),
+            kind: kind.clone(),
+            created_at: Utc::now(),
+            attempts: 0,
+            last_error: None,
+        });
+        Ok(id)
     }
 
     async fn list_labels(&self) -> CoreResult<Vec<Label>> {
@@ -227,7 +250,11 @@ mod tests {
         assert_eq!(outcome.changed_threads.len(), 1);
         assert!(outcome.op_id.is_some());
 
-        let thread = store.get_thread(&ThreadId::new("t1")).await.unwrap().unwrap();
+        let thread = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!thread.label_ids.iter().any(|l| l.as_str() == "INBOX"));
 
         let outbox = store.outbox_snapshot();
@@ -249,7 +276,11 @@ mod tests {
             .await
             .unwrap();
 
-        let thread = store.get_thread(&ThreadId::new("t1")).await.unwrap().unwrap();
+        let thread = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!thread.unread);
         assert!(!thread.label_ids.iter().any(|l| l.as_str() == "UNREAD"));
     }
@@ -278,17 +309,29 @@ mod tests {
             })
             .await
             .unwrap();
-        let t = store.get_thread(&ThreadId::new("t1")).await.unwrap().unwrap();
+        let t = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!t.label_ids.iter().any(|l| l.as_str() == "INBOX"));
 
         // Undo → INBOX back.
         dispatcher.execute(Action::Undo).await.unwrap();
-        let t = store.get_thread(&ThreadId::new("t1")).await.unwrap().unwrap();
+        let t = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(t.label_ids.iter().any(|l| l.as_str() == "INBOX"));
 
         // Redo → INBOX gone again.
         dispatcher.execute(Action::Redo).await.unwrap();
-        let t = store.get_thread(&ThreadId::new("t1")).await.unwrap().unwrap();
+        let t = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!t.label_ids.iter().any(|l| l.as_str() == "INBOX"));
     }
 
@@ -310,17 +353,45 @@ mod tests {
 
         // Archive t1, undo it (so it's on redo), then archive t2.
         dispatcher
-            .execute(Action::Archive { thread_ids: vec![ThreadId::new("t1")] })
+            .execute(Action::Archive {
+                thread_ids: vec![ThreadId::new("t1")],
+            })
             .await
             .unwrap();
         dispatcher.execute(Action::Undo).await.unwrap();
         dispatcher
-            .execute(Action::Archive { thread_ids: vec![ThreadId::new("t2")] })
+            .execute(Action::Archive {
+                thread_ids: vec![ThreadId::new("t2")],
+            })
             .await
             .unwrap();
 
         // Redo should now be empty — the new archive invalidated it.
         let outcome = dispatcher.execute(Action::Redo).await.unwrap();
         assert!(outcome.message.contains("nothing"));
+    }
+
+    #[tokio::test]
+    async fn undo_does_not_reverse_a_preexisting_label() {
+        let store = Arc::new(InMemoryStore::new());
+        seed_thread(&store, "t1", &["INBOX", "STARRED"]);
+        let dispatcher = Dispatcher::new(store.clone());
+
+        dispatcher
+            .execute(Action::Star {
+                thread_ids: vec![ThreadId::new("t1")],
+                starred: true,
+            })
+            .await
+            .unwrap();
+        let outcome = dispatcher.execute(Action::Undo).await.unwrap();
+        assert!(outcome.message.contains("nothing"));
+
+        let thread = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(thread.starred);
     }
 }

@@ -25,6 +25,6 @@ async fn build_body_fetcher(
     store: Arc<mach_store::SqliteStore>,
 ) -> Result<mach_gmail::BodyFetcher> {
     let config = mach_gmail::config::OAuthConfig::from_env()?;
-    let client = mach_gmail::GmailClient::from_keyring(config)?;
+    let client = mach_gmail::GmailClient::from_stored_credentials(config)?;
     Ok(mach_gmail::BodyFetcher::new(client, store))
 }

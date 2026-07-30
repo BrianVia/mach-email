@@ -25,8 +25,8 @@ pub async fn run(action_json: &str) -> Result<()> {
         action_json.to_string()
     };
 
-    let action: Action = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing action JSON: {raw}"))?;
+    let action: Action =
+        serde_json::from_str(&raw).with_context(|| format!("parsing action JSON: {raw}"))?;
 
     let store = runtime::open_store()?;
     let dispatcher = mach_core::Dispatcher::new(store.clone());
@@ -65,7 +65,7 @@ async fn maybe_backfill_bodies(
         // Offline mode: no creds, just return cached state below.
         Err(_) => return Ok(()),
     };
-    let client = GmailClient::from_keyring(config)?;
+    let client = GmailClient::from_stored_credentials(config)?;
     let fetcher = BodyFetcher::new(client, store);
     fetcher.fetch_if_needed(&thread_id).await?;
     Ok(())

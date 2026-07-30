@@ -75,7 +75,7 @@ impl Dispatcher {
         // Compute the inverse BEFORE mutating so we don't lose info that
         // a later mutation might wipe (e.g. star toggle has the bool baked in).
         let inverse = if track_for_undo {
-            compute_inverse(&action)
+            self.compute_inverse(&action).await?
         } else {
             None
         };
@@ -100,7 +100,10 @@ impl Dispatcher {
                         .await
                 }
             }
-            Action::Star { thread_ids, starred } => {
+            Action::Star {
+                thread_ids,
+                starred,
+            } => {
                 let starred_lbl = LabelId::new("STARRED");
                 if starred {
                     self.modify_labels(&thread_ids, &[starred_lbl], &[], "star")
@@ -168,7 +171,10 @@ impl Dispatcher {
             });
         };
         drop(undo);
-        let redo_action = compute_inverse(&inverse).unwrap_or_else(|| inverse.clone());
+        let redo_action = self
+            .compute_inverse(&inverse)
+            .await?
+            .unwrap_or_else(|| inverse.clone());
         let outcome = Box::pin(self.execute_inner(inverse, false)).await?;
         let mut redo = self.redo_stack.lock().await;
         if redo.len() == UNDO_DEPTH {
@@ -191,7 +197,7 @@ impl Dispatcher {
             });
         };
         drop(redo);
-        let undo_inverse = compute_inverse(&action);
+        let undo_inverse = self.compute_inverse(&action).await?;
         let outcome = Box::pin(self.execute_inner(action, false)).await?;
         if let Some(inv) = undo_inverse {
             let mut undo = self.undo_stack.lock().await;
@@ -216,21 +222,12 @@ impl Dispatcher {
             )));
         }
         let op_id = OpId::new();
-
-        self.store
-            .modify_labels_local(thread_ids, add, remove)
-            .await?;
-
-        self.store
-            .enqueue_outbox(
-                &op_id,
-                &OutboxOpKind::ModifyLabels {
-                    thread_ids: thread_ids.to_vec(),
-                    add: add.to_vec(),
-                    remove: remove.to_vec(),
-                },
-            )
-            .await?;
+        let kind = OutboxOpKind::ModifyLabels {
+            thread_ids: thread_ids.to_vec(),
+            add: add.to_vec(),
+            remove: remove.to_vec(),
+        };
+        self.store.apply_thread_mutation(&op_id, &kind).await?;
 
         let _ = self
             .events
@@ -246,30 +243,17 @@ impl Dispatcher {
         })
     }
 
-    async fn trash(
-        &self,
-        thread_ids: &[crate::ids::ThreadId],
-    ) -> CoreResult<ActionOutcome> {
+    async fn trash(&self, thread_ids: &[crate::ids::ThreadId]) -> CoreResult<ActionOutcome> {
         if thread_ids.is_empty() {
             return Err(CoreError::InvalidAction(
                 "trash called with empty thread_ids".into(),
             ));
         }
         let op_id = OpId::new();
-
-        // Local: drop INBOX, add TRASH so the optimistic UI matches Gmail.
-        self.store
-            .modify_labels_local(thread_ids, &[LabelId::new("TRASH")], &[LabelId::new("INBOX")])
-            .await?;
-
-        self.store
-            .enqueue_outbox(
-                &op_id,
-                &OutboxOpKind::Trash {
-                    thread_ids: thread_ids.to_vec(),
-                },
-            )
-            .await?;
+        let kind = OutboxOpKind::Trash {
+            thread_ids: thread_ids.to_vec(),
+        };
+        self.store.apply_thread_mutation(&op_id, &kind).await?;
 
         let _ = self
             .events
@@ -315,7 +299,12 @@ impl Dispatcher {
             .events
             .send(StateEvent::ThreadsChanged(vec![new_id.clone()]));
         Ok(ActionOutcome {
-            action_name: if delta > 0 { "select_next" } else { "select_prev" }.into(),
+            action_name: if delta > 0 {
+                "select_next"
+            } else {
+                "select_prev"
+            }
+            .into(),
             op_id: None,
             changed_threads: vec![new_id],
             changed_drafts: Vec::new(),
@@ -366,40 +355,86 @@ impl Dispatcher {
             message: format!("{} result(s)", results.len()),
         })
     }
-}
 
-/// Compute the inverse Action for the user-facing mutations we support
-/// undo for. Returns `None` for actions without a clean inverse (snooze,
-/// drafts, sends, trash) — those just don't show up in the undo chain
-/// for v1.
-fn compute_inverse(action: &Action) -> Option<Action> {
-    match action {
-        Action::Archive { thread_ids } => Some(Action::AddLabel {
-            thread_ids: thread_ids.clone(),
-            label_id: LabelId::new("INBOX"),
-        }),
-        Action::MarkRead { thread_ids, read } => Some(Action::MarkRead {
-            thread_ids: thread_ids.clone(),
-            read: !read,
-        }),
-        Action::Star { thread_ids, starred } => Some(Action::Star {
-            thread_ids: thread_ids.clone(),
-            starred: !starred,
-        }),
-        Action::AddLabel {
-            thread_ids,
-            label_id,
-        } => Some(Action::RemoveLabel {
-            thread_ids: thread_ids.clone(),
-            label_id: label_id.clone(),
-        }),
-        Action::RemoveLabel {
-            thread_ids,
-            label_id,
-        } => Some(Action::AddLabel {
-            thread_ids: thread_ids.clone(),
-            label_id: label_id.clone(),
-        }),
-        _ => None,
+    /// Build an inverse from the state that actually exists before mutation.
+    /// This prevents undo from changing threads on which the original action
+    /// was a no-op (for example, starring an already-starred thread).
+    async fn compute_inverse(&self, action: &Action) -> CoreResult<Option<Action>> {
+        let inverse = match action {
+            Action::Archive { thread_ids } => {
+                let changed = self.with_label_state(thread_ids, "INBOX", true).await?;
+                (!changed.is_empty()).then(|| Action::AddLabel {
+                    thread_ids: changed,
+                    label_id: LabelId::new("INBOX"),
+                })
+            }
+            Action::MarkRead { thread_ids, read } => {
+                let changed = self.with_label_state(thread_ids, "UNREAD", *read).await?;
+                (!changed.is_empty()).then(|| Action::MarkRead {
+                    thread_ids: changed,
+                    read: !read,
+                })
+            }
+            Action::Star {
+                thread_ids,
+                starred,
+            } => {
+                let changed = self
+                    .with_label_state(thread_ids, "STARRED", !starred)
+                    .await?;
+                (!changed.is_empty()).then(|| Action::Star {
+                    thread_ids: changed,
+                    starred: !starred,
+                })
+            }
+            Action::AddLabel {
+                thread_ids,
+                label_id,
+            } => {
+                let changed = self
+                    .with_label_state(thread_ids, label_id.as_str(), false)
+                    .await?;
+                (!changed.is_empty()).then(|| Action::RemoveLabel {
+                    thread_ids: changed,
+                    label_id: label_id.clone(),
+                })
+            }
+            Action::RemoveLabel {
+                thread_ids,
+                label_id,
+            } => {
+                let changed = self
+                    .with_label_state(thread_ids, label_id.as_str(), true)
+                    .await?;
+                (!changed.is_empty()).then(|| Action::AddLabel {
+                    thread_ids: changed,
+                    label_id: label_id.clone(),
+                })
+            }
+            _ => None,
+        };
+        Ok(inverse)
+    }
+
+    async fn with_label_state(
+        &self,
+        thread_ids: &[ThreadId],
+        label: &str,
+        present: bool,
+    ) -> CoreResult<Vec<ThreadId>> {
+        let mut matching = Vec::new();
+        for id in thread_ids {
+            let Some(thread) = self.store.get_thread(id).await? else {
+                continue;
+            };
+            let has_label = thread
+                .label_ids
+                .iter()
+                .any(|candidate| candidate.as_str() == label);
+            if has_label == present {
+                matching.push(id.clone());
+            }
+        }
+        Ok(matching)
     }
 }

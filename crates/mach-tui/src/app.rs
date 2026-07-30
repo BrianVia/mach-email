@@ -16,18 +16,14 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
+use mach_core::ids::{LabelId, ThreadId};
+use mach_core::store::{MailStore, Message, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
     Action, Dispatcher,
 };
-use mach_core::ids::{LabelId, ThreadId};
-use mach_core::store::{MailStore, Message, ThreadSummary};
 use mach_store::SqliteStore;
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
-use tokio::sync::mpsc;
+use ratatui::{backend::CrosstermBackend, Terminal};
 use tracing::{debug, error, warn};
 
 use crate::config::load_keymap;
@@ -166,7 +162,10 @@ impl App {
     pub fn key_context(&self) -> KeyContext {
         match &self.view {
             View::Inbox(v) => KeyContext {
-                selection: v.current_thread_id().map(|t| vec![t.as_str().to_string()]).unwrap_or_default(),
+                selection: v
+                    .current_thread_id()
+                    .map(|t| vec![t.as_str().to_string()])
+                    .unwrap_or_default(),
                 current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
                 current_message: None,
                 current_draft: None,
@@ -179,7 +178,10 @@ impl App {
             },
             View::Composer(_) => KeyContext::default(),
             View::Search(v) => KeyContext {
-                selection: v.current_thread_id().map(|t| vec![t.as_str().to_string()]).unwrap_or_default(),
+                selection: v
+                    .current_thread_id()
+                    .map(|t| vec![t.as_str().to_string()])
+                    .unwrap_or_default(),
                 current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
                 ..Default::default()
             },
@@ -225,7 +227,7 @@ impl SearchView {
 
 async fn build_body_fetcher(store: Arc<SqliteStore>) -> Result<mach_gmail::BodyFetcher> {
     let config = mach_gmail::config::OAuthConfig::from_env()?;
-    let client = mach_gmail::GmailClient::from_keyring(config)?;
+    let client = mach_gmail::GmailClient::from_stored_credentials(config)?;
     Ok(mach_gmail::BodyFetcher::new(client, store))
 }
 
@@ -435,12 +437,15 @@ async fn search_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bo
     match k.code {
         KeyCode::Esc => {
             // Close search; restore background view.
-            let bg = std::mem::replace(&mut *s.background, View::Inbox(InboxView {
-                label: LabelId::new("INBOX"),
-                threads: Vec::new(),
-                selected: 0,
-                viewport_top: 0,
-            }));
+            let bg = std::mem::replace(
+                &mut *s.background,
+                View::Inbox(InboxView {
+                    label: LabelId::new("INBOX"),
+                    threads: Vec::new(),
+                    selected: 0,
+                    viewport_top: 0,
+                }),
+            );
             app.view = bg;
             true
         }
@@ -550,12 +555,15 @@ async fn execute_action(app: &mut App, action: Action) {
             return;
         }
         Action::Search { .. } => {
-            let bg = std::mem::replace(&mut app.view, View::Inbox(InboxView {
-                label: LabelId::new("INBOX"),
-                threads: Vec::new(),
-                selected: 0,
-                viewport_top: 0,
-            }));
+            let bg = std::mem::replace(
+                &mut app.view,
+                View::Inbox(InboxView {
+                    label: LabelId::new("INBOX"),
+                    threads: Vec::new(),
+                    selected: 0,
+                    viewport_top: 0,
+                }),
+            );
             app.view = View::Search(SearchView {
                 query: String::new(),
                 results: Vec::new(),
@@ -650,27 +658,18 @@ fn advance_selection(app: &mut App, delta: i32) {
         }
         View::Thread(v) => {
             if !v.messages.is_empty() {
-                let next = (v.selected_message as i32 + delta)
-                    .clamp(0, v.messages.len() as i32 - 1) as usize;
+                let next = (v.selected_message as i32 + delta).clamp(0, v.messages.len() as i32 - 1)
+                    as usize;
                 v.selected_message = next;
             }
         }
         View::Search(v) => {
             if !v.results.is_empty() {
-                let next = (v.selected as i32 + delta).clamp(0, v.results.len() as i32 - 1) as usize;
+                let next =
+                    (v.selected as i32 + delta).clamp(0, v.results.len() as i32 - 1) as usize;
                 v.selected = next;
             }
         }
         _ => {}
-    }
-}
-
-/// Drain a `mpsc::Receiver` of pending items without blocking. Used for
-/// burst-merging keystrokes into a single redraw. (Unused at v1 — kept for
-/// when we batch state events.)
-#[allow(dead_code)]
-fn try_drain<T>(rx: &mut mpsc::Receiver<T>, into: &mut Vec<T>) {
-    while let Ok(v) = rx.try_recv() {
-        into.push(v);
     }
 }

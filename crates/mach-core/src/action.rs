@@ -4,6 +4,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{DraftId, LabelId, MessageId, ThreadId};
 
+pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
+    "select_next",
+    "select_prev",
+    "open_thread",
+    "back_to_list",
+    "archive",
+    "trash",
+    "mark_read",
+    "star",
+    "add_label",
+    "remove_label",
+    "snooze",
+    "search",
+    "undo",
+    "redo",
+    "refresh",
+];
+
 /// Deterministic identifier for a single mutation. Stamped on every outbox op
 /// and used to suppress history events that echo our own writes back.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -31,25 +49,43 @@ impl Default for OpId {
 /// The single set of user-invokable commands. Every TUI keybinding, CLI verb,
 /// and MCP tool resolves to one of these.
 ///
-/// Adding a feature = one variant here + one match arm in `Dispatcher`. The
-/// new feature lights up across all three surfaces automatically because the
-/// schemars derive feeds both the MCP tool registry and the CLI's JSON dispatch.
+/// Shared action vocabulary for interactive and programmatic surfaces.
+/// Adapters may own presentation-only actions; durable mutations belong in
+/// `Dispatcher`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     // --- Navigation (TUI-only state, no remote effect) ---
     SelectNext,
     SelectPrev,
-    OpenThread { id: ThreadId },
+    OpenThread {
+        id: ThreadId,
+    },
     BackToList,
 
     // --- Inbox mutations (optimistic local + outbox) ---
-    Archive { thread_ids: Vec<ThreadId> },
-    Trash { thread_ids: Vec<ThreadId> },
-    MarkRead { thread_ids: Vec<ThreadId>, read: bool },
-    Star { thread_ids: Vec<ThreadId>, starred: bool },
-    AddLabel { thread_ids: Vec<ThreadId>, label_id: LabelId },
-    RemoveLabel { thread_ids: Vec<ThreadId>, label_id: LabelId },
+    Archive {
+        thread_ids: Vec<ThreadId>,
+    },
+    Trash {
+        thread_ids: Vec<ThreadId>,
+    },
+    MarkRead {
+        thread_ids: Vec<ThreadId>,
+        read: bool,
+    },
+    Star {
+        thread_ids: Vec<ThreadId>,
+        starred: bool,
+    },
+    AddLabel {
+        thread_ids: Vec<ThreadId>,
+        label_id: LabelId,
+    },
+    RemoveLabel {
+        thread_ids: Vec<ThreadId>,
+        label_id: LabelId,
+    },
 
     /// Snooze applies the `MACH/Snoozed/<rfc3339>` label and removes INBOX.
     /// A background sweep removes the label and re-applies INBOX when due.
@@ -60,15 +96,33 @@ pub enum Action {
 
     // --- Compose ---
     ComposeNew,
-    Reply { message_id: MessageId, all: bool },
-    Forward { message_id: MessageId },
-    SaveDraft { draft_id: DraftId, patch: DraftPatch },
-    SendDraft { draft_id: DraftId },
-    SendLater { draft_id: DraftId, at: DateTime<Utc> },
+    Reply {
+        message_id: MessageId,
+        all: bool,
+    },
+    Forward {
+        message_id: MessageId,
+    },
+    SaveDraft {
+        draft_id: DraftId,
+        patch: DraftPatch,
+    },
+    SendDraft {
+        draft_id: DraftId,
+    },
+    SendLater {
+        draft_id: DraftId,
+        at: DateTime<Utc>,
+    },
 
     // --- Discovery ---
-    Search { query: String, limit: u32 },
-    OpenLabel { label_id: LabelId },
+    Search {
+        query: String,
+        limit: u32,
+    },
+    OpenLabel {
+        label_id: LabelId,
+    },
 
     // --- Meta ---
     Undo,
@@ -123,6 +177,13 @@ impl Action {
                 | Action::SendDraft { .. }
                 | Action::SendLater { .. }
         )
+    }
+
+    /// Whether the shared dispatcher can execute this action without
+    /// presentation-specific state. MCP uses this to avoid advertising
+    /// reserved composition actions as working tools.
+    pub fn is_dispatcher_supported(&self) -> bool {
+        DISPATCHER_ACTION_NAMES.contains(&self.name())
     }
 }
 

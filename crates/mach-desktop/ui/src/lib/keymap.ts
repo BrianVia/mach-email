@@ -38,6 +38,17 @@ export class Keymap {
     return km;
   }
 
+  merge(overrides: Keymap) {
+    for (const [mode, bindings] of overrides.modes.entries()) {
+      if (!this.modes.has(mode)) this.modes.set(mode, new Map());
+      const current = this.modes.get(mode)!;
+      for (const [chord, template] of bindings.entries()) {
+        current.set(chord, template);
+      }
+    }
+    this.rebuildPrefixes();
+  }
+
   private rebuildPrefixes() {
     this.prefixes.clear();
     for (const [mode, m] of this.modes.entries()) {

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mach_core::{Action, Dispatcher};
+use mach_core::{action::DISPATCHER_ACTION_NAMES, Action, Dispatcher};
 use mach_gmail::BodyFetcher;
 use mach_store::SqliteStore;
 use schemars::schema_for;
@@ -31,19 +31,13 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Server {
     dispatcher: Dispatcher,
-    #[allow(dead_code)] // kept for future read endpoints (resources/list etc.)
-    store: Arc<SqliteStore>,
     body_fetcher: Option<Arc<BodyFetcher>>,
 }
 
 impl Server {
-    pub fn new(
-        store: Arc<SqliteStore>,
-        body_fetcher: Option<Arc<BodyFetcher>>,
-    ) -> Self {
+    pub fn new(store: Arc<SqliteStore>, body_fetcher: Option<Arc<BodyFetcher>>) -> Self {
         Self {
-            dispatcher: Dispatcher::new(store.clone()),
-            store,
+            dispatcher: Dispatcher::new(store),
             body_fetcher,
         }
     }
@@ -73,8 +67,7 @@ impl Server {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(error = %e, "malformed json from client");
-                    let err =
-                        rpc_error(Value::Null, -32700, &format!("Parse error: {e}"), None);
+                    let err = rpc_error(Value::Null, -32700, &format!("Parse error: {e}"), None);
                     write_line(&mut stdout, &err).await?;
                     continue;
                 }
@@ -100,10 +93,7 @@ impl Server {
 
     async fn handle(&self, method: &str, params: Value, id: Option<Value>) -> Option<Value> {
         // Notifications: no `id`, no response.
-        if id.is_none() {
-            return None;
-        }
-        let id = id.unwrap();
+        let id = id?;
         match method {
             "initialize" => Some(rpc_ok(id, self.initialize_result())),
             "ping" => Some(rpc_ok(id, json!({}))),
@@ -138,14 +128,15 @@ impl Server {
 
     fn tools_list(&self) -> Value {
         let action_schema = schema_for!(Action);
-        let schema_value = serde_json::to_value(&action_schema).unwrap_or(json!({}));
+        let mut schema_value = serde_json::to_value(&action_schema).unwrap_or(json!({}));
+        retain_dispatcher_actions(&mut schema_value);
         json!({
             "tools": [
                 {
                     "name": "mach",
                     "description": "Dispatch a mach Action against the local cache + outbox. \
                         Mutations apply optimistically and round-trip to Gmail on the next \
-                        `mach sync` (or auto-drain in the TUI/desktop). Search uses FTS5 \
+                        `mach sync`. Search uses FTS5 \
                         over the cached body index.",
                     "inputSchema": schema_value,
                 }
@@ -165,8 +156,14 @@ impl Server {
             .get("arguments")
             .cloned()
             .context("missing tool arguments")?;
-        let action: Action = serde_json::from_value(args)
-            .context("arguments did not match an Action variant")?;
+        let action: Action =
+            serde_json::from_value(args).context("arguments did not match an Action variant")?;
+        if !action.is_dispatcher_supported() {
+            anyhow::bail!(
+                "{} is reserved for an interactive surface and is not implemented by MCP",
+                action.name()
+            );
+        }
 
         // Same backfill semantics as the CLI's `mach do open_thread`.
         if let Action::OpenThread { id } = &action {
@@ -187,6 +184,22 @@ impl Server {
     }
 }
 
+fn retain_dispatcher_actions(schema: &mut Value) {
+    let Some(branches) = schema.get_mut("oneOf").and_then(Value::as_array_mut) else {
+        return;
+    };
+    branches.retain(|branch| {
+        schema_action_name(branch).is_some_and(|name| DISPATCHER_ACTION_NAMES.contains(&name))
+    });
+}
+
+fn schema_action_name(branch: &Value) -> Option<&str> {
+    branch
+        .pointer("/properties/kind/enum/0")
+        .or_else(|| branch.pointer("/properties/kind/const"))
+        .and_then(Value::as_str)
+}
+
 fn rpc_ok(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
@@ -205,4 +218,23 @@ async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> Result<()
     w.write_all(s.as_bytes()).await?;
     w.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_schema_only_exposes_dispatcher_actions() {
+        let mut schema = serde_json::to_value(schema_for!(Action)).unwrap();
+        retain_dispatcher_actions(&mut schema);
+        let branches = schema["oneOf"].as_array().unwrap();
+        let names: Vec<_> = branches.iter().filter_map(schema_action_name).collect();
+
+        assert_eq!(names.len(), DISPATCHER_ACTION_NAMES.len());
+        assert!(names
+            .iter()
+            .all(|name| DISPATCHER_ACTION_NAMES.contains(name)));
+        assert!(!names.contains(&"send_draft"));
+    }
 }

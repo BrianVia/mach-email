@@ -150,40 +150,38 @@ impl Template {
 fn substitute(v: &mut serde_json::Value, ctx: &KeyContext) -> Result<(), KeymapError> {
     use serde_json::Value;
     match v {
-        Value::String(s) if s.starts_with('$') => {
-            match s.as_str() {
-                "$selection" => {
-                    *v = Value::Array(
-                        ctx.selection
-                            .iter()
-                            .map(|s| Value::String(s.clone()))
-                            .collect(),
-                    );
-                }
-                "$current_thread" => {
-                    let id = ctx
-                        .current_thread
-                        .clone()
-                        .ok_or_else(|| KeymapError::MissingMacro("$current_thread".into()))?;
-                    *v = Value::String(id);
-                }
-                "$current_message" => {
-                    let id = ctx
-                        .current_message
-                        .clone()
-                        .ok_or_else(|| KeymapError::MissingMacro("$current_message".into()))?;
-                    *v = Value::String(id);
-                }
-                "$current_draft" => {
-                    let id = ctx
-                        .current_draft
-                        .clone()
-                        .ok_or_else(|| KeymapError::MissingMacro("$current_draft".into()))?;
-                    *v = Value::String(id);
-                }
-                other => return Err(KeymapError::MissingMacro(other.to_string())),
+        Value::String(s) if s.starts_with('$') => match s.as_str() {
+            "$selection" => {
+                *v = Value::Array(
+                    ctx.selection
+                        .iter()
+                        .map(|s| Value::String(s.clone()))
+                        .collect(),
+                );
             }
-        }
+            "$current_thread" => {
+                let id = ctx
+                    .current_thread
+                    .clone()
+                    .ok_or_else(|| KeymapError::MissingMacro("$current_thread".into()))?;
+                *v = Value::String(id);
+            }
+            "$current_message" => {
+                let id = ctx
+                    .current_message
+                    .clone()
+                    .ok_or_else(|| KeymapError::MissingMacro("$current_message".into()))?;
+                *v = Value::String(id);
+            }
+            "$current_draft" => {
+                let id = ctx
+                    .current_draft
+                    .clone()
+                    .ok_or_else(|| KeymapError::MissingMacro("$current_draft".into()))?;
+                *v = Value::String(id);
+            }
+            other => return Err(KeymapError::MissingMacro(other.to_string())),
+        },
         Value::Object(map) => {
             for (_, child) in map.iter_mut() {
                 substitute(child, ctx)?;
@@ -285,12 +283,7 @@ impl Keymap {
 
     /// `chord_so_far` is the accumulated chord string (e.g. `"g"` after
     /// the user pressed `g`, or `"g i"` after they pressed both).
-    pub fn resolve(
-        &self,
-        mode: Mode,
-        chord_so_far: &str,
-        ctx: &KeyContext,
-    ) -> Resolution {
+    pub fn resolve(&self, mode: Mode, chord_so_far: &str, ctx: &KeyContext) -> Resolution {
         let Some(bindings) = self.modes.get(&mode) else {
             return Resolution::Unbound;
         };
@@ -368,9 +361,9 @@ fn toml_to_json(v: &toml::Value) -> serde_json::Value {
     match v {
         T::String(s) => J::String(s.clone()),
         T::Integer(i) => J::Number((*i).into()),
-        T::Float(f) => {
-            serde_json::Number::from_f64(*f).map(J::Number).unwrap_or(J::Null)
-        }
+        T::Float(f) => serde_json::Number::from_f64(*f)
+            .map(J::Number)
+            .unwrap_or(J::Null),
         T::Boolean(b) => J::Bool(*b),
         T::Datetime(d) => J::String(d.to_string()),
         T::Array(a) => J::Array(a.iter().map(toml_to_json).collect()),
@@ -414,20 +407,26 @@ mod tests {
 
     #[test]
     fn parses_bare_action_shorthand() {
-        let km = Keymap::from_toml(r#"
+        let km = Keymap::from_toml(
+            r#"
             [normal]
             "j" = "select_next"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let r = km.resolve(Mode::Normal, "j", &KeyContext::default());
         assert!(matches!(r, Resolution::Action(Action::SelectNext)));
     }
 
     #[test]
     fn resolves_selection_macro() {
-        let km = Keymap::from_toml(r#"
+        let km = Keymap::from_toml(
+            r#"
             [normal]
             "e" = { kind = "archive", thread_ids = "$selection" }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let ctx = KeyContext {
             selection: vec!["t1".into(), "t2".into()],
             ..Default::default()
@@ -443,10 +442,13 @@ mod tests {
 
     #[test]
     fn resolves_current_message_macro() {
-        let km = Keymap::from_toml(r#"
+        let km = Keymap::from_toml(
+            r#"
             [reading]
             "r" = { kind = "reply", message_id = "$current_message", all = false }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let ctx = KeyContext {
             current_message: Some("m1".into()),
             ..Default::default()
@@ -463,12 +465,15 @@ mod tests {
 
     #[test]
     fn chord_prefix_returns_continuation_overlay() {
-        let km = Keymap::from_toml(r#"
+        let km = Keymap::from_toml(
+            r#"
             [normal]
             "g i" = { kind = "open_label", label_id = "INBOX" }
             "g s" = { kind = "open_label", label_id = "STARRED" }
             "g d" = { kind = "open_label", label_id = "DRAFT" }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let r = km.resolve(Mode::Normal, "g", &KeyContext::default());
         match r {
             Resolution::Prefix(cs) => {
@@ -482,15 +487,21 @@ mod tests {
 
     #[test]
     fn user_override_wins_over_default_per_binding() {
-        let mut km = Keymap::from_toml(r#"
+        let mut km = Keymap::from_toml(
+            r#"
             [normal]
             "j" = "select_next"
             "k" = "select_prev"
-        "#).unwrap();
-        let user = Keymap::from_toml(r#"
+        "#,
+        )
+        .unwrap();
+        let user = Keymap::from_toml(
+            r#"
             [normal]
             "j" = "select_prev"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         km.merge(user);
         assert!(matches!(
             km.resolve(Mode::Normal, "j", &KeyContext::default()),
@@ -505,20 +516,29 @@ mod tests {
 
     #[test]
     fn missing_macro_in_context_returns_unbound_not_panic() {
-        let km = Keymap::from_toml(r#"
+        let km = Keymap::from_toml(
+            r#"
             [reading]
             "r" = { kind = "reply", message_id = "$current_message", all = false }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // No current_message in ctx.
         let r = km.resolve(Mode::Reading, "r", &KeyContext::default());
-        assert!(matches!(r, Resolution::Unbound), "expected Unbound, got {r:?}");
+        assert!(
+            matches!(r, Resolution::Unbound),
+            "expected Unbound, got {r:?}"
+        );
     }
 
     #[test]
     fn unknown_chord_is_unbound() {
-        let km = Keymap::from_toml(r#"[normal]
+        let km = Keymap::from_toml(
+            r#"[normal]
             "j" = "select_next"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(
             km.resolve(Mode::Normal, "xyz", &KeyContext::default()),
             Resolution::Unbound
@@ -538,12 +558,15 @@ mod tests {
 
     #[test]
     fn bindings_for_returns_sorted_pairs() {
-        let km = Keymap::from_toml(r#"
+        let km = Keymap::from_toml(
+            r#"
             [normal]
             "j" = "select_next"
             "k" = "select_prev"
             "e" = { kind = "archive", thread_ids = "$selection" }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let b = km.bindings_for(Mode::Normal);
         assert_eq!(
             b,
@@ -558,10 +581,13 @@ mod tests {
     // The label-id type round-trips through string substitution cleanly.
     #[test]
     fn open_label_resolves_when_label_id_is_string_literal() {
-        let km = Keymap::from_toml(r#"
+        let km = Keymap::from_toml(
+            r#"
             [normal]
             "g i" = { kind = "open_label", label_id = "INBOX" }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         match km.resolve(Mode::Normal, "g i", &KeyContext::default()) {
             Resolution::Action(Action::OpenLabel { label_id }) => {
                 assert_eq!(label_id, LabelId::new("INBOX"));

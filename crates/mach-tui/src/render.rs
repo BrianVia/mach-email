@@ -20,7 +20,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ComposerField, ComposerView, InboxView, SearchView, SyncState, ThreadView, View};
+use crate::app::{
+    App, ComposerField, ComposerView, InboxView, SearchView, SyncState, ThreadView, View,
+};
 
 const ACCENT: Color = Color::Rgb(0x7c, 0x9c, 0xff);
 const DIM: Color = Color::Rgb(0x88, 0x88, 0x88);
@@ -64,13 +66,13 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
             "  mach  ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("│ {} ", app.status.account), Style::default().fg(DIM)),
+        Span::styled(
+            format!("│ {} ", app.status.account),
+            Style::default().fg(DIM),
+        ),
         Span::styled(context, Style::default().fg(Color::White)),
     ]);
-    f.render_widget(
-        Paragraph::new(bar).alignment(Alignment::Left),
-        area,
-    );
+    f.render_widget(Paragraph::new(bar).alignment(Alignment::Left), area);
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -82,7 +84,11 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let chord_hint = if !app.chord_buffer.is_empty() {
-        format!(" │ chord: {} → ({})", app.chord_buffer, app.last_chord_continuations.join(", "))
+        format!(
+            " │ chord: {} → ({})",
+            app.chord_buffer,
+            app.last_chord_continuations.join(", ")
+        )
     } else {
         format!(" │ {}", app.status.hint)
     };
@@ -147,11 +153,16 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
                 Span::raw(" ")
             };
             let from = trunc(
-                t.participants.first().map(|s| s.as_str()).unwrap_or("(no sender)"),
+                t.participants
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("(no sender)"),
                 28,
             );
             let subject_style = if t.unread {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -165,10 +176,10 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
                 Span::raw(" "),
                 star_marker,
                 Span::raw(" "),
-                Span::styled(format!("{:<28} ", from), Style::default().fg(ACCENT)),
-                Span::styled(format!("{:<50} ", subj), subject_style),
-                Span::styled(format!("{} ", snippet), Style::default().fg(DIM)),
-                Span::styled(format!("{:>8}", when), Style::default().fg(DIM)),
+                Span::styled(format!("{from:<28} "), Style::default().fg(ACCENT)),
+                Span::styled(format!("{subj:<50} "), subject_style),
+                Span::styled(format!("{snippet} "), Style::default().fg(DIM)),
+                Span::styled(format!("{when:>8}"), Style::default().fg(DIM)),
             ])
             .style(style)
         })
@@ -193,7 +204,9 @@ fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![Span::styled(
         v.summary.subject.clone(),
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     )]));
     lines.push(Line::raw(""));
 
@@ -225,10 +238,7 @@ fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
             lines.push(line_with_osc8_links(line));
         }
         lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "  ─────",
-            Style::default().fg(DIM),
-        ));
+        lines.push(Line::styled("  ─────", Style::default().fg(DIM)));
         lines.push(Line::raw(""));
     }
 
@@ -264,7 +274,7 @@ fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {
         };
         let value_style = Style::default().fg(Color::White);
         Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {} ", label), label_style),
+            Span::styled(format!(" {label} "), label_style),
             Span::styled(value.to_string(), value_style),
             if active {
                 Span::styled("▏", Style::default().fg(ACCENT))
@@ -315,7 +325,10 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
         .split(inner);
 
     let prompt = Paragraph::new(Line::from(vec![
-        Span::styled(" / ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " / ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(v.query.clone(), Style::default().fg(Color::White)),
         Span::styled("▏", Style::default().fg(ACCENT)),
     ]));
@@ -349,7 +362,10 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
             Line::from(vec![
                 Span::raw(if selected { " ▸ " } else { "   " }),
                 Span::styled(
-                    format!("{:<28} ", trunc(t.participants.first().map(|s| s.as_str()).unwrap_or(""), 28)),
+                    format!(
+                        "{:<28} ",
+                        trunc(t.participants.first().map(|s| s.as_str()).unwrap_or(""), 28)
+                    ),
                     Style::default().fg(ACCENT),
                 ),
                 Span::styled(
@@ -419,7 +435,9 @@ fn line_with_osc8_links(s: &str) -> Line<'static> {
         let wrapped = format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\");
         spans.push(Span::styled(
             wrapped,
-            Style::default().fg(ACCENT).add_modifier(Modifier::UNDERLINED),
+            Style::default()
+                .fg(ACCENT)
+                .add_modifier(Modifier::UNDERLINED),
         ));
         last = url_end;
     }

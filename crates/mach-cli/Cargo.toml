@@ -25,7 +25,5 @@ color-eyre.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tracing-appender.workspace = true
 directories.workspace = true
-figment.workspace = true
 dotenvy.workspace = true

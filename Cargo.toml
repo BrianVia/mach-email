@@ -40,7 +40,6 @@ color-eyre = "0.6"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "io-util", "io-std", "net"] }
@@ -52,7 +51,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Filesystem & config
 directories = "5"
-figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
 
 # Storage
@@ -61,10 +59,9 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 refinery = { version = "0.8", features = ["rusqlite"] }
 
-# HTTP / OAuth / keyring
+# HTTP / OAuth
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "stream"] }
 oauth2 = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
-keyring = "3"
 url = "2"
 webbrowser = "1"
 dotenvy = "0.15"
@@ -78,11 +75,9 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 # MIME
-mail-parser = "0.9"
 mail-builder = "0.4"
 
 # Misc
-notify = "6"
 html2text = "0.12"
 
 [profile.release]

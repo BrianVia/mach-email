@@ -70,6 +70,11 @@ export type AccountStatus = {
   online: boolean;
 };
 
+export type KeymapSources = {
+  defaults: string;
+  user: string | null;
+};
+
 // Backend Ok/Err discriminated union.
 type Out<T> = { ok: T } | { err: string };
 function unwrap<T>(o: Out<T>): T {
@@ -128,8 +133,8 @@ export async function searchThreads(
   return unwrap(r);
 }
 
-export async function fetchKeymapToml(): Promise<string> {
-  return invoke<string>("keymap_toml");
+export async function fetchKeymapSources(): Promise<KeymapSources> {
+  return invoke<KeymapSources>("keymap_sources");
 }
 
 export async function fetchAccountStatus(): Promise<AccountStatus> {

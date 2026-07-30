@@ -80,8 +80,8 @@ pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
 
     let mut buf = vec![0u8; 8192];
     let n = socket.read(&mut buf).await?;
-    let request = std::str::from_utf8(&buf[..n])
-        .map_err(|_| anyhow!("non-UTF-8 OAuth redirect request"))?;
+    let request =
+        std::str::from_utf8(&buf[..n]).map_err(|_| anyhow!("non-UTF-8 OAuth redirect request"))?;
 
     let first_line = request
         .lines()
@@ -106,13 +106,11 @@ pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
         }
     }
 
-    let success_body =
-        "<!doctype html><meta charset=utf-8><title>mach</title>\
+    let success_body = "<!doctype html><meta charset=utf-8><title>mach</title>\
          <body style='font:14px -apple-system,system-ui,sans-serif;padding:2rem;color:#111;'>\
          <h1 style='margin:0 0 .5rem;'>You're in.</h1>\
          <p>Account linked. You can close this tab.</p></body>";
-    let failure_body =
-        "<!doctype html><meta charset=utf-8><title>mach</title>\
+    let failure_body = "<!doctype html><meta charset=utf-8><title>mach</title>\
          <body style='font:14px -apple-system,system-ui,sans-serif;padding:2rem;color:#a00;'>\
          <h1 style='margin:0 0 .5rem;'>Login failed.</h1>\
          <p>Check the terminal for details.</p></body>";

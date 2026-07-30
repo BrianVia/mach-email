@@ -5,14 +5,7 @@ use serde::{Deserialize, Serialize};
 macro_rules! string_id {
     ($name:ident) => {
         #[derive(
-            Debug,
-            Clone,
-            PartialEq,
-            Eq,
-            Hash,
-            Serialize,
-            Deserialize,
-            schemars::JsonSchema,
+            Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
         )]
         #[serde(transparent)]
         pub struct $name(pub String);

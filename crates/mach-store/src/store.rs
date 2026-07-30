@@ -92,7 +92,7 @@ impl SqliteStore {
             for l in labels {
                 tx.execute(
                     "INSERT INTO labels (id, name, type, color) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(id) DO UPDATE SET
+                     ON CONFLICT(account_id, id) DO UPDATE SET
                        name  = excluded.name,
                        type  = excluded.type,
                        color = excluded.color",
@@ -206,6 +206,43 @@ impl SqliteStore {
         .await
         .map_err(map_err)?
     }
+
+    /// Remove messages explicitly reported as deleted by Gmail history.
+    ///
+    /// The caller subsequently refreshes every affected thread, so this owns
+    /// only the durable deletion—not reconstruction of the thread summary.
+    pub async fn delete_messages(&self, message_ids: Vec<String>) -> mach_core::CoreResult<()> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        let pool = self.pool.clone();
+        spawn_blocking(move || -> mach_core::CoreResult<()> {
+            let mut conn = pool.get().map_err(map_err)?;
+            let tx = conn.transaction().map_err(map_err)?;
+            for id in message_ids {
+                tx.execute("DELETE FROM messages WHERE id = ?1", params![id])
+                    .map_err(map_err)?;
+            }
+            tx.commit().map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    /// Remove a thread that Gmail confirms no longer exists. Message,
+    /// attachment, and FTS cleanup follows the schema's cascades/triggers.
+    pub async fn delete_thread(&self, thread_id: String) -> mach_core::CoreResult<()> {
+        let pool = self.pool.clone();
+        spawn_blocking(move || -> mach_core::CoreResult<()> {
+            let conn = pool.get().map_err(map_err)?;
+            conn.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
+                .map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
 }
 
 /// One thread whose `MACH/Snoozed/<rfc3339>` label is past its time. The
@@ -236,16 +273,18 @@ impl SqliteStore {
                 .map_err(map_err)?;
             let mut due = Vec::new();
             let rows = stmt
-                .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
                 .map_err(map_err)?;
             for row in rows {
                 let (id, labels_json) = row.map_err(map_err)?;
                 let labels: Vec<String> = serde_json::from_str(&labels_json).unwrap_or_default();
                 for l in labels {
-                    let Some(rest) = l.strip_prefix("MACH/Snoozed/") else { continue };
-                    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(rest) else { continue };
+                    let Some(rest) = l.strip_prefix("MACH/Snoozed/") else {
+                        continue;
+                    };
+                    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(rest) else {
+                        continue;
+                    };
                     if ts.timestamp_millis() <= now_ms {
                         due.push(DueSnooze {
                             thread_id: id.clone(),
@@ -377,7 +416,9 @@ fn dt_to_ms(dt: &DateTime<Utc>) -> i64 {
 }
 
 fn ms_to_dt(ms: i64) -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(ms).single().unwrap_or_else(Utc::now)
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .unwrap_or_else(Utc::now)
 }
 
 fn outbox_kind_name(kind: &OutboxOpKind) -> &'static str {
@@ -594,20 +635,31 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn modify_labels_local(
-        &self,
-        thread_ids: &[ThreadId],
-        add: &[LabelId],
-        remove: &[LabelId],
-    ) -> CoreResult<()> {
+    async fn apply_thread_mutation(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64> {
         let pool = self.pool.clone();
-        let thread_ids: Vec<ThreadId> = thread_ids.to_vec();
-        let add: Vec<LabelId> = add.to_vec();
-        let remove: Vec<LabelId> = remove.to_vec();
-        spawn_blocking(move || -> CoreResult<()> {
+        let op_id = op_id.clone();
+        let kind = kind.clone();
+        spawn_blocking(move || -> CoreResult<i64> {
+            let (thread_ids, add, remove) = match &kind {
+                OutboxOpKind::ModifyLabels {
+                    thread_ids,
+                    add,
+                    remove,
+                } => (thread_ids.as_slice(), add.as_slice(), remove.as_slice()),
+                OutboxOpKind::Trash { thread_ids } => (
+                    thread_ids.as_slice(),
+                    &[LabelId::new("TRASH")][..],
+                    &[LabelId::new("INBOX")][..],
+                ),
+                _ => {
+                    return Err(CoreError::InvalidAction(
+                        "apply_thread_mutation requires a thread operation".into(),
+                    ))
+                }
+            };
             let mut conn = pool.get().map_err(map_err)?;
             let tx = conn.transaction().map_err(map_err)?;
-            for tid in &thread_ids {
+            for tid in thread_ids {
                 let current_json: Option<String> = tx
                     .query_row(
                         "SELECT label_ids_json FROM threads WHERE id = ?1",
@@ -620,10 +672,10 @@ impl MailStore for SqliteStore {
                     Some(s) => serde_json::from_str(&s).unwrap_or_default(),
                     None => continue,
                 };
-                for r in &remove {
+                for r in remove {
                     labels.retain(|l| l != r);
                 }
-                for a in &add {
+                for a in add {
                     if !labels.contains(a) {
                         labels.push(a.clone());
                     }
@@ -645,8 +697,23 @@ impl MailStore for SqliteStore {
                 )
                 .map_err(map_err)?;
             }
+
+            let kind_name = outbox_kind_name(&kind);
+            let payload_json = serde_json::to_string(&kind)?;
+            tx.execute(
+                "INSERT INTO outbox (op_id, op_kind, payload_json, created_at, attempts, state)
+                 VALUES (?1, ?2, ?3, ?4, 0, 'pending')",
+                params![
+                    op_id.0,
+                    kind_name,
+                    payload_json,
+                    Utc::now().timestamp_millis()
+                ],
+            )
+            .map_err(map_err)?;
+            let outbox_id = tx.last_insert_rowid();
             tx.commit().map_err(map_err)?;
-            Ok(())
+            Ok(outbox_id)
         })
         .await
         .map_err(map_err)?
@@ -784,7 +851,7 @@ impl MailStore for SqliteStore {
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![max as i64], |r| Ok(r.get::<_, i64>("id")?))
+                .query_map(params![max as i64], |r| r.get::<_, i64>("id"))
                 .map_err(map_err)?;
             // We can't easily return CoreResult from query_map's closure, so
             // collect rowids first, then re-fetch with our deserializing helper.
@@ -898,7 +965,7 @@ impl MailStore for SqliteStore {
 mod tests {
     use super::*;
     use crate::open_in_memory;
-    use mach_core::{action::Action, dispatcher::Dispatcher, store::ThreadSummary};
+    use mach_core::{action::Action, dispatcher::Dispatcher};
     use std::sync::Arc;
 
     fn seed(pool: &DbPool, id: &str, subject: &str, body: &str, labels: &[&str]) {
@@ -946,13 +1013,97 @@ mod tests {
             .unwrap();
         assert!(outcome.op_id.is_some());
 
-        let t = store.get_thread(&ThreadId::new("t1")).await.unwrap().unwrap();
+        let t = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!t.label_ids.iter().any(|l| l.as_str() == "INBOX"));
 
         // Outbox got the op for the sync engine.
         let pending = store.drain_pending_outbox(10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert!(matches!(pending[0].kind, OutboxOpKind::ModifyLabels { .. }));
+    }
+
+    #[tokio::test]
+    async fn thread_mutation_rolls_back_when_outbox_insert_fails() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "t1", "hello", "hi there", &["INBOX", "UNREAD"]);
+        pool.get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_outbox BEFORE INSERT ON outbox
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected outbox failure');
+                 END;",
+            )
+            .unwrap();
+
+        let store = Arc::new(SqliteStore::new(pool));
+        let dispatcher = Dispatcher::new(store.clone());
+        let result = dispatcher
+            .execute(Action::Archive {
+                thread_ids: vec![ThreadId::new("t1")],
+            })
+            .await;
+        assert!(result.is_err());
+
+        let thread = store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "INBOX"));
+    }
+
+    #[tokio::test]
+    async fn label_upsert_matches_multi_account_primary_key() {
+        let pool = open_in_memory().unwrap();
+        let store = SqliteStore::new(pool);
+        let label = LabelUpsert {
+            id: "INBOX".into(),
+            name: "Inbox".into(),
+            system: true,
+            color: None,
+        };
+
+        store.upsert_labels(vec![label.clone()]).await.unwrap();
+        store
+            .upsert_labels(vec![LabelUpsert {
+                name: "Primary inbox".into(),
+                ..label
+            }])
+            .await
+            .unwrap();
+
+        let labels = store.list_labels().await.unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "Primary inbox");
+    }
+
+    #[tokio::test]
+    async fn history_deletions_remove_messages_and_threads() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "t1", "hello", "hi there", &["INBOX"]);
+        let store = SqliteStore::new(pool);
+
+        store.delete_messages(vec!["t1-m".into()]).await.unwrap();
+        assert!(store
+            .list_messages_in_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .is_empty());
+
+        store.delete_thread("t1".into()).await.unwrap();
+        assert!(store
+            .get_thread(&ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1032,8 +1183,4 @@ mod tests {
         assert_eq!(starred.len(), 1);
         assert_eq!(starred[0].id.as_str(), "t2");
     }
-
-    // Silence unused-import warnings on ThreadSummary in this module.
-    #[allow(dead_code)]
-    fn _use_thread_summary(_t: ThreadSummary) {}
 }

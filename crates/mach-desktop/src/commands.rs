@@ -7,8 +7,6 @@
 //! store directly without going through the Action surface — those don't
 //! need optimistic-update semantics.
 
-use std::sync::Arc;
-
 use mach_core::ids::{LabelId, ThreadId};
 use mach_core::store::MailStore;
 use mach_core::{Action, ActionOutcome};
@@ -31,9 +29,7 @@ impl<T> Out<T> {
         Out::Ok { ok: v }
     }
     fn err(e: impl std::fmt::Display) -> Self {
-        Out::Err {
-            err: e.to_string(),
-        }
+        Out::Err { err: e.to_string() }
     }
 }
 
@@ -42,8 +38,8 @@ pub async fn dispatch_action(
     state: State<'_, AppState>,
     action_json: String,
 ) -> Result<ActionOutcome, String> {
-    let action: Action = serde_json::from_str(&action_json)
-        .map_err(|e| format!("parsing action JSON: {e}"))?;
+    let action: Action =
+        serde_json::from_str(&action_json).map_err(|e| format!("parsing action JSON: {e}"))?;
 
     // Body backfill on open_thread, same shape as the CLI.
     if let Action::OpenThread { id } = &action {
@@ -145,8 +141,11 @@ pub async fn refetch_thread(
 }
 
 #[tauri::command]
-pub fn keymap_toml(state: State<'_, AppState>) -> String {
-    state.keymap_toml.clone()
+pub fn keymap_sources(state: State<'_, AppState>) -> serde_json::Value {
+    serde_json::json!({
+        "defaults": &state.default_keymap_toml,
+        "user": &state.user_keymap_toml,
+    })
 }
 
 #[tauri::command]
@@ -155,12 +154,4 @@ pub fn account_status(state: State<'_, AppState>) -> serde_json::Value {
         "email": state.account_email,
         "online": state.body_fetcher.is_some(),
     })
-}
-
-// Used only to keep dead_code lint quiet for the shared Out helpers above.
-#[allow(dead_code)]
-fn _force_use() {
-    let _ = Out::<()>::ok(());
-    let _ = Out::<()>::err("");
-    let _ = Arc::new(());
 }

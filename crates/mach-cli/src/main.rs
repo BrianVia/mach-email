@@ -1,5 +1,5 @@
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 mod commands;
 mod runtime;
@@ -46,8 +46,7 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum AuthCommand {
-    /// Run the installed-app OAuth flow and store the refresh token in the
-    /// system keyring.
+    /// Run the installed-app OAuth flow and store credentials in the app data directory.
     Login,
     /// Print the active account and token expiry.
     Status,

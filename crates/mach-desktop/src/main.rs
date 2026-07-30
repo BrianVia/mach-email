@@ -24,7 +24,8 @@ pub struct AppState {
     pub store: Arc<SqliteStore>,
     pub dispatcher: Dispatcher,
     pub body_fetcher: Option<Arc<BodyFetcher>>,
-    pub keymap_toml: String,
+    pub default_keymap_toml: String,
+    pub user_keymap_toml: Option<String>,
     pub account_email: String,
 }
 
@@ -34,21 +35,9 @@ fn db_path() -> Result<PathBuf> {
     Ok(dirs.data_dir().join("mach.db"))
 }
 
-fn load_keymap_toml() -> String {
-    let mut toml = mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string();
-    if let Some(dirs) = ProjectDirs::from("com", "via", "mach") {
-        let path = dirs.config_dir().join("keymap.toml");
-        if let Ok(s) = std::fs::read_to_string(&path) {
-            // We pass both files to the frontend so it can merge; the
-            // backend re-applies the same merge for dispatch validation.
-            // For now we just concatenate the user file *after* the
-            // default so toml's last-key-wins semantics naturally
-            // override defaults.
-            toml.push_str("\n# --- user override ---\n");
-            toml.push_str(&s);
-        }
-    }
-    toml
+fn load_user_keymap_toml() -> Option<String> {
+    let dirs = ProjectDirs::from("com", "via", "mach")?;
+    std::fs::read_to_string(dirs.config_dir().join("keymap.toml")).ok()
 }
 
 #[tokio::main]
@@ -70,8 +59,8 @@ async fn main() -> Result<()> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let pool = mach_store::open(&db)
-        .with_context(|| format!("opening sqlite at {}", db.display()))?;
+    let pool =
+        mach_store::open(&db).with_context(|| format!("opening sqlite at {}", db.display()))?;
     let store = Arc::new(SqliteStore::new(pool));
     let dispatcher = Dispatcher::new(store.clone());
 
@@ -90,7 +79,8 @@ async fn main() -> Result<()> {
         store,
         dispatcher,
         body_fetcher,
-        keymap_toml: load_keymap_toml(),
+        default_keymap_toml: mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string(),
+        user_keymap_toml: load_user_keymap_toml(),
         account_email,
     };
 
@@ -100,7 +90,6 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cache_dir).ok();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .register_asynchronous_uri_scheme_protocol("mach", {
             let cache_dir = cache_dir.clone();
             move |ctx, req, responder| {
@@ -119,7 +108,7 @@ async fn main() -> Result<()> {
             commands::open_thread,
             commands::refetch_thread,
             commands::search,
-            commands::keymap_toml,
+            commands::keymap_sources,
             commands::account_status,
         ])
         .run(tauri::generate_context!())
@@ -130,7 +119,7 @@ async fn main() -> Result<()> {
 
 async fn build_body_fetcher(store: Arc<SqliteStore>) -> Result<(BodyFetcher, String)> {
     let config = mach_gmail::config::OAuthConfig::from_env()?;
-    let client = GmailClient::from_keyring(config)?;
+    let client = GmailClient::from_stored_credentials(config)?;
     let email = client.email().await;
     Ok((BodyFetcher::new(client, store), email))
 }

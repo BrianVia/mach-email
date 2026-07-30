@@ -8,7 +8,7 @@ use crate::runtime;
 
 pub async fn run(bootstrap: bool) -> Result<()> {
     let config = OAuthConfig::from_env().context("OAuth client credentials not configured")?;
-    let client = GmailClient::from_keyring(config)?;
+    let client = GmailClient::from_stored_credentials(config)?;
     let store = runtime::open_store()?;
 
     if bootstrap {
@@ -37,24 +37,27 @@ pub async fn run(bootstrap: bool) -> Result<()> {
         for d in &due {
             let tid = ThreadId::new(d.thread_id.clone());
             // Add INBOX back, drop the MACH/Snoozed label.
-            let _ = dispatcher
+            dispatcher
                 .execute(Action::AddLabel {
                     thread_ids: vec![tid.clone()],
                     label_id: LabelId::new("INBOX"),
                 })
-                .await;
-            let _ = dispatcher
+                .await
+                .context("queueing INBOX restore for due snooze")?;
+            dispatcher
                 .execute(Action::RemoveLabel {
                     thread_ids: vec![tid],
                     label_id: LabelId::new(d.snoozed_label.clone()),
                 })
-                .await;
+                .await
+                .context("queueing snooze-label removal")?;
         }
         println!("⏰ Un-snoozed {} thread(s)", due.len());
     }
 
     // 2) Fire due send-later drafts.
     let due_sends = store.find_due_sends(now_ms).await?;
+    let mut fired_sends = 0usize;
     for s in &due_sends {
         match dispatcher
             .execute(Action::SendDraft {
@@ -64,6 +67,7 @@ pub async fn run(bootstrap: bool) -> Result<()> {
         {
             Ok(_) => {
                 store.mark_send_later(&s.send_later_id, "sent").await?;
+                fired_sends += 1;
             }
             Err(e) => {
                 eprintln!(
@@ -73,8 +77,8 @@ pub async fn run(bootstrap: bool) -> Result<()> {
             }
         }
     }
-    if !due_sends.is_empty() {
-        println!("✉ Fired {} send-later draft(s)", due_sends.len());
+    if fired_sends > 0 {
+        println!("✉ Fired {fired_sends} send-later draft(s)");
     }
 
     // 3) Drain pending outbox to Gmail.

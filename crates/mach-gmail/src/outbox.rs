@@ -6,8 +6,7 @@
 //! `failed` with the error string on persistent failure.
 //!
 //! Retry policy is lazy: we don't loop with backoff inside the worker.
-//! `drain_once` makes a single pass; the caller decides cadence (TUI calls
-//! it after each mutation + every 30s; desktop fires it on a tick).
+//! `drain_once` makes a single pass; currently `mach sync` is the caller.
 //!
 //! ECHO SUPPRESSION (planned, not yet implemented): when the sync engine
 //! receives `historyAdded`/`labelRemoved` events whose net effect matches
@@ -76,7 +75,11 @@ impl OutboxWorker {
 
     async fn execute_op(&self, op: &OutboxOp) -> Result<()> {
         match &op.kind {
-            OutboxOpKind::ModifyLabels { thread_ids, add, remove } => {
+            OutboxOpKind::ModifyLabels {
+                thread_ids,
+                add,
+                remove,
+            } => {
                 let add: Vec<String> = add.iter().map(|l| l.as_str().to_string()).collect();
                 let remove: Vec<String> = remove.iter().map(|l| l.as_str().to_string()).collect();
                 for tid in thread_ids {

@@ -16,13 +16,11 @@ chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-async-trait.workspace = true
 reqwest.workspace = true
 oauth2.workspace = true
 url.workspace = true
 directories.workspace = true
 webbrowser = { workspace = true }
-mail-parser.workspace = true
 mail-builder.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
