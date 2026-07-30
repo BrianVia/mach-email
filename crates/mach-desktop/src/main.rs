@@ -15,18 +15,20 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use mach_core::ids::AccountScope;
 use mach_core::Dispatcher;
-use mach_gmail::BodyFetcher;
+use mach_gmail::BodyFetcherPool;
 use mach_store::SqliteStore;
 use tracing::{info, warn};
 
 pub struct AppState {
     pub store: Arc<SqliteStore>,
+    pub scope: AccountScope,
     pub dispatcher: Dispatcher,
-    pub body_fetcher: Option<Arc<BodyFetcher>>,
+    pub body_fetchers: Arc<BodyFetcherPool>,
     pub default_keymap_toml: String,
     pub user_keymap_toml: Option<String>,
-    pub account_email: String,
+    pub account_emails: Vec<String>,
 }
 
 fn db_path() -> Result<PathBuf> {
@@ -62,27 +64,35 @@ async fn main() -> Result<()> {
     let pool =
         mach_store::open(&db).with_context(|| format!("opening sqlite at {}", db.display()))?;
     let store = Arc::new(SqliteStore::new(pool));
-    let dispatcher = Dispatcher::new(store.clone());
+    let accounts = mach_gmail::credentials::load_all()?;
+    if accounts.len() == 1 {
+        store
+            .claim_legacy_account(&mach_core::ids::AccountId::new(accounts[0].email.clone()))
+            .await?;
+    }
+    let scope = AccountScope::All;
+    let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone());
 
-    let (body_fetcher, account_email) = match BodyFetcher::from_stored_credentials(store.clone()) {
-        Ok(fetcher) => {
-            let email = fetcher.client().email().await;
-            info!(account = %email, "gmail client up");
-            (Some(Arc::new(fetcher)), email)
+    let body_fetchers = match BodyFetcherPool::from_stored_credentials(store.clone()) {
+        Ok(pool) => {
+            info!(accounts = pool.accounts().count(), "gmail clients up");
+            Arc::new(pool)
         }
         Err(e) => {
-            warn!(error = %e, "no body fetcher; running offline");
-            (None, "offline".into())
+            warn!(error = %e, "no body fetchers; running offline");
+            Arc::new(BodyFetcherPool::default())
         }
     };
+    let account_emails = accounts.into_iter().map(|account| account.email).collect();
 
     let state = AppState {
         store,
+        scope,
         dispatcher,
-        body_fetcher,
+        body_fetchers,
         default_keymap_toml: mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string(),
         user_keymap_toml: load_user_keymap_toml(),
-        account_email,
+        account_emails,
     };
 
     let cache_dir = ProjectDirs::from("com", "via", "mach")
@@ -135,7 +145,8 @@ async fn serve_mach_uri(
         .or_else(|| uri.strip_prefix("mach://localhost/attachment/"))
         .unwrap_or("");
     let mut parts = path.split('/');
-    let (Some(msg_id), Some(att_id)) = (parts.next(), parts.next()) else {
+    let (Some(account), Some(msg_id), Some(att_id)) = (parts.next(), parts.next(), parts.next())
+    else {
         return Response::builder()
             .status(400)
             .body(b"bad mach:// URI".to_vec())
@@ -143,7 +154,19 @@ async fn serve_mach_uri(
     };
 
     // Cache hit?
-    let cache_path = cache_dir.join(att_id);
+    let account_id = mach_core::ids::AccountId::new(account);
+    let Some(fetcher) = app
+        .state::<AppState>()
+        .body_fetchers
+        .get(&account_id)
+        .cloned()
+    else {
+        return Response::builder()
+            .status(503)
+            .body(b"offline - account unavailable".to_vec())
+            .unwrap();
+    };
+    let cache_path = cache_dir.join(format!("{account}-{att_id}"));
     if let Ok(bytes) = std::fs::read(&cache_path) {
         let mime = sniff_mime(&bytes);
         return Response::builder()
@@ -154,13 +177,6 @@ async fn serve_mach_uri(
     }
 
     // Cache miss — fetch via Gmail.
-    let state = app.state::<AppState>();
-    let Some(fetcher) = state.body_fetcher.as_ref() else {
-        return Response::builder()
-            .status(503)
-            .body(b"offline - cannot fetch attachment".to_vec())
-            .unwrap();
-    };
     let client = fetcher.client();
     match client.get_attachment_bytes(msg_id, att_id).await {
         Ok(bytes) => {

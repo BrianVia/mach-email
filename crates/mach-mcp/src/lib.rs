@@ -17,8 +17,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use mach_core::ids::AccountScope;
 use mach_core::{action::DISPATCHER_ACTION_NAMES, Action, Dispatcher};
-use mach_gmail::BodyFetcher;
+use mach_gmail::BodyFetcherPool;
 use mach_store::SqliteStore;
 use schemars::schema_for;
 use serde_json::{json, Value};
@@ -31,14 +32,18 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Server {
     dispatcher: Dispatcher,
-    body_fetcher: Option<Arc<BodyFetcher>>,
+    body_fetchers: Arc<BodyFetcherPool>,
 }
 
 impl Server {
-    pub fn new(store: Arc<SqliteStore>, body_fetcher: Option<Arc<BodyFetcher>>) -> Self {
+    pub fn new(
+        store: Arc<SqliteStore>,
+        body_fetchers: Arc<BodyFetcherPool>,
+        scope: AccountScope,
+    ) -> Self {
         Self {
-            dispatcher: Dispatcher::new(store),
-            body_fetcher,
+            dispatcher: Dispatcher::with_scope(store, scope),
+            body_fetchers,
         }
     }
 
@@ -167,7 +172,15 @@ impl Server {
 
         // Same backfill semantics as the CLI's `mach do open_thread`.
         if let Action::OpenThread { id } = &action {
-            if let Some(fetcher) = self.body_fetcher.as_ref() {
+            let summary = self
+                .dispatcher
+                .store()
+                .get_thread(self.dispatcher_scope(), id)
+                .await?;
+            if let Some(fetcher) = summary
+                .as_ref()
+                .and_then(|thread| self.body_fetchers.get(&thread.account_id))
+            {
                 let _ = fetcher.fetch_if_needed(id).await;
             }
         }
@@ -181,6 +194,10 @@ impl Server {
                 { "type": "text", "text": pretty }
             ]
         }))
+    }
+
+    fn dispatcher_scope(&self) -> &AccountScope {
+        self.dispatcher.scope()
     }
 }
 

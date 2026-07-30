@@ -169,6 +169,7 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
             let subj = trunc(&t.subject, 50);
             let snippet = trunc(&t.snippet, 60);
             let when = pretty_when(&t.last_message_at);
+            let account = trunc(t.account_id.as_str(), 22);
 
             Line::from(vec![
                 Span::raw(" "),
@@ -176,6 +177,7 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
                 Span::raw(" "),
                 star_marker,
                 Span::raw(" "),
+                Span::styled(format!("{account:<22} "), Style::default().fg(DIM)),
                 Span::styled(format!("{from:<28} "), Style::default().fg(ACCENT)),
                 Span::styled(format!("{subj:<50} "), subject_style),
                 Span::styled(format!("{snippet} "), Style::default().fg(DIM)),

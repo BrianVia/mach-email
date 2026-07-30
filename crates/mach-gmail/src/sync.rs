@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
+use mach_core::ids::AccountId;
 use mach_core::store::MailStore;
 use mach_store::{LabelUpsert, MessageUpsert, SqliteStore, ThreadUpsert};
 use tracing::{info, warn};
@@ -40,6 +41,7 @@ pub async fn bootstrap(
     //    that arrived during the listing pass would be invisible to subsequent
     //    incremental syncs.
     let profile = client.get_profile().await.context("get_profile")?;
+    let account = AccountId::new(profile.email.clone());
     let history_id: u64 = profile
         .history_id
         .parse()
@@ -60,7 +62,7 @@ pub async fn bootstrap(
         })
         .collect();
     stats.labels = labels.len() as u32;
-    store.upsert_labels(labels).await?;
+    store.upsert_labels(&account, labels).await?;
     info!(count = stats.labels, "labels stored");
 
     // 3. List thread stubs (paginated, no parallelism — pageToken is sequential).
@@ -114,7 +116,7 @@ pub async fn bootstrap(
     let upserts: Vec<ThreadUpsert> = threads.iter().map(remote_thread_to_upsert).collect();
     stats.threads = upserts.len() as u32;
     stats.messages = upserts.iter().map(|t| t.messages.len() as u32).sum();
-    store.upsert_threads(upserts).await?;
+    store.upsert_threads(&account, upserts).await?;
 
     if stats.failed_thread_fetches > 0 {
         anyhow::bail!(
@@ -126,7 +128,7 @@ pub async fn bootstrap(
     // 6. Persist the cursor LAST — only after a successful write, so a
     //    crash mid-bootstrap on a fresh DB still triggers a re-bootstrap
     //    rather than an incremental sync against a half-populated cache.
-    store.set_history_cursor(history_id).await?;
+    store.set_history_cursor(&account, history_id).await?;
 
     info!(?stats, "bootstrap complete");
     Ok(stats)
@@ -238,9 +240,10 @@ pub async fn incremental_sync(
 ) -> Result<IncrementalStats> {
     use mach_core::store::MailStore;
     let mut stats = IncrementalStats::default();
+    let account = AccountId::new(client.email().await);
 
     let cursor = store
-        .get_history_cursor()
+        .get_history_cursor(&account)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no history cursor — bootstrap first"))?;
     info!(cursor, "incremental sync starting");
@@ -255,7 +258,7 @@ pub async fn incremental_sync(
             Ok(p) => p,
             Err(e) if e.to_string().contains("404") => {
                 warn!("history gap detected — falling back to 7-day re-bootstrap");
-                return gap_recover(client, store).await;
+                return gap_recover(client, store, &account).await;
             }
             Err(e) => return Err(e),
         };
@@ -290,7 +293,7 @@ pub async fn incremental_sync(
     const FETCH_CONCURRENCY: usize = 10;
 
     store
-        .delete_messages(deleted_messages.into_iter().collect())
+        .delete_messages(&account, deleted_messages.into_iter().collect())
         .await?;
 
     let thread_ids: Vec<String> = touched_threads.into_iter().collect();
@@ -309,7 +312,7 @@ pub async fn incremental_sync(
     while let Some((id, result)) = futs.next().await {
         match result {
             Ok(Some(thread)) => threads.push(thread),
-            Ok(None) => store.delete_thread(id).await?,
+            Ok(None) => store.delete_thread(&account, id).await?,
             Err(error) => {
                 warn!(thread_id = id, error = %error, "thread refetch failed during incremental");
                 failures.push((id, error.to_string()));
@@ -320,7 +323,7 @@ pub async fn incremental_sync(
 
     if !threads.is_empty() {
         let upserts: Vec<ThreadUpsert> = threads.iter().map(remote_thread_to_upsert).collect();
-        store.upsert_threads(upserts).await?;
+        store.upsert_threads(&account, upserts).await?;
     }
 
     if !failures.is_empty() {
@@ -330,7 +333,9 @@ pub async fn incremental_sync(
         );
     }
 
-    store.set_history_cursor(latest_history_id).await?;
+    store
+        .set_history_cursor(&account, latest_history_id)
+        .await?;
     stats.new_cursor = latest_history_id;
     info!(?stats, "incremental sync complete");
     Ok(stats)
@@ -342,6 +347,7 @@ pub async fn incremental_sync(
 async fn gap_recover(
     client: Arc<GmailClient>,
     store: Arc<SqliteStore>,
+    account: &AccountId,
 ) -> Result<IncrementalStats> {
     info!("gap_recover: rebuilding the last 7 days");
 
@@ -389,14 +395,14 @@ async fn gap_recover(
     let upserts: Vec<ThreadUpsert> = threads.iter().map(remote_thread_to_upsert).collect();
     let refetched = upserts.len() as u32;
     if !upserts.is_empty() {
-        store.upsert_threads(upserts).await?;
+        store.upsert_threads(account, upserts).await?;
     }
     if failed_fetches > 0 {
         anyhow::bail!(
             "gap recovery left {failed_fetches} thread(s) unresolved; cursor was not advanced"
         );
     }
-    store.set_history_cursor(new_cursor).await?;
+    store.set_history_cursor(account, new_cursor).await?;
 
     Ok(IncrementalStats {
         events: 0,

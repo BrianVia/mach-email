@@ -7,7 +7,7 @@ use tracing::{debug, instrument};
 use crate::action::{Action, ActionOutcome, OpId};
 use crate::error::{CoreError, CoreResult};
 use crate::event::StateEvent;
-use crate::ids::{LabelId, ThreadId};
+use crate::ids::{AccountScope, LabelId, ThreadId};
 use crate::state::{AppState, View};
 use crate::store::{MailStore, OutboxOpKind};
 
@@ -27,6 +27,7 @@ const UNDO_DEPTH: usize = 20;
 /// wait on the network — that's the whole point.
 pub struct Dispatcher {
     store: Arc<dyn MailStore>,
+    scope: AccountScope,
     state: Mutex<AppState>,
     events: broadcast::Sender<StateEvent>,
     /// Serializes actions and owns the complete undo/redo invariant. Keeping
@@ -72,9 +73,14 @@ fn push_bounded(stack: &mut VecDeque<Action>, action: Action) {
 
 impl Dispatcher {
     pub fn new(store: Arc<dyn MailStore>) -> Self {
+        Self::with_scope(store, AccountScope::All)
+    }
+
+    pub fn with_scope(store: Arc<dyn MailStore>, scope: AccountScope) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             store,
+            scope,
             state: Mutex::new(AppState::default()),
             events,
             history: Mutex::new(ActionHistory::new()),
@@ -87,6 +93,10 @@ impl Dispatcher {
 
     pub fn store(&self) -> Arc<dyn MailStore> {
         Arc::clone(&self.store)
+    }
+
+    pub fn scope(&self) -> &AccountScope {
+        &self.scope
     }
 
     #[instrument(skip(self), fields(action = action.name()))]
@@ -242,7 +252,9 @@ impl Dispatcher {
             add: add.to_vec(),
             remove: remove.to_vec(),
         };
-        self.store.apply_thread_mutation(&op_id, &kind).await?;
+        self.store
+            .apply_thread_mutation(&self.scope, &op_id, &kind)
+            .await?;
 
         let _ = self
             .events
@@ -268,7 +280,9 @@ impl Dispatcher {
         let kind = OutboxOpKind::Trash {
             thread_ids: thread_ids.to_vec(),
         };
-        self.store.apply_thread_mutation(&op_id, &kind).await?;
+        self.store
+            .apply_thread_mutation(&self.scope, &op_id, &kind)
+            .await?;
 
         let _ = self
             .events
@@ -293,7 +307,10 @@ impl Dispatcher {
             .current_label
             .clone()
             .unwrap_or_else(|| LabelId::new("INBOX"));
-        let threads = self.store.list_threads_in_label(&label, 200).await?;
+        let threads = self
+            .store
+            .list_threads_in_label(&self.scope, &label, 200)
+            .await?;
         if threads.is_empty() {
             return Ok(ActionOutcome::empty(if delta > 0 {
                 "select_next"
@@ -331,10 +348,10 @@ impl Dispatcher {
     async fn open_thread(&self, id: ThreadId) -> CoreResult<ActionOutcome> {
         let summary = self
             .store
-            .get_thread(&id)
+            .get_thread(&self.scope, &id)
             .await?
             .ok_or_else(|| CoreError::NotFound(format!("thread {id}")))?;
-        let messages = self.store.list_messages_in_thread(&id).await?;
+        let messages = self.store.list_messages_in_thread(&self.scope, &id).await?;
 
         let mut state = self.state.lock().await;
         state.view = View::Thread(id.clone());
@@ -359,7 +376,7 @@ impl Dispatcher {
     }
 
     async fn search(&self, query: &str, limit: u32) -> CoreResult<ActionOutcome> {
-        let results = self.store.search_threads(query, limit).await?;
+        let results = self.store.search_threads(&self.scope, query, limit).await?;
         let data = serde_json::to_value(&results)?;
         Ok(ActionOutcome {
             action_name: "search".into(),
@@ -439,7 +456,7 @@ impl Dispatcher {
     ) -> CoreResult<Vec<ThreadId>> {
         let mut matching = Vec::new();
         for id in thread_ids {
-            let Some(thread) = self.store.get_thread(id).await? else {
+            let Some(thread) = self.store.get_thread(&self.scope, id).await? else {
                 continue;
             };
             let has_label = thread

@@ -16,7 +16,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use mach_core::ids::{LabelId, ThreadId};
+use mach_core::ids::{AccountScope, LabelId, ThreadId};
 use mach_core::store::{MailStore, Message, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
@@ -35,10 +35,11 @@ use crate::render::draw;
 pub struct App {
     pub keymap: Keymap,
     pub store: Arc<SqliteStore>,
+    pub scope: AccountScope,
     pub dispatcher: Dispatcher,
     /// Body fetcher is optional — if creds are missing we run offline,
     /// serving whatever's already cached.
-    pub body_fetcher: Option<Arc<mach_gmail::BodyFetcher>>,
+    pub body_fetchers: Arc<mach_gmail::BodyFetcherPool>,
 
     pub view: View,
     pub status: StatusLine,
@@ -114,30 +115,34 @@ pub enum SyncState {
 }
 
 impl App {
-    pub async fn new(store: Arc<SqliteStore>) -> Result<Self> {
+    pub async fn new(store: Arc<SqliteStore>, scope: AccountScope) -> Result<Self> {
         let keymap = load_keymap()?;
-        let dispatcher = Dispatcher::new(store.clone());
+        let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone());
 
         // Try to construct a body fetcher; if OAuth creds aren't set up,
         // boot offline. The user can still browse cached mail.
-        let body_fetcher = match mach_gmail::BodyFetcher::from_stored_credentials(store.clone()) {
-            Ok(b) => Some(Arc::new(b)),
-            Err(e) => {
-                warn!(error = %e, "no body fetcher; running offline");
-                None
-            }
-        };
+        let body_fetchers =
+            match mach_gmail::BodyFetcherPool::from_stored_credentials(store.clone()) {
+                Ok(pool) => Arc::new(pool),
+                Err(e) => {
+                    warn!(error = %e, "no body fetchers; running offline");
+                    Arc::new(mach_gmail::BodyFetcherPool::default())
+                }
+            };
 
-        let inbox = load_inbox(&store, "INBOX").await?;
+        let inbox = load_inbox(&store, &scope, "INBOX").await?;
         let view = View::Inbox(inbox);
 
-        let account = match &body_fetcher {
-            Some(b) => b.client().email().await,
-            None => "offline".into(),
+        let account = match &scope {
+            AccountScope::One(account) => account.to_string(),
+            AccountScope::All if !body_fetchers.is_empty() => {
+                format!("All accounts ({})", body_fetchers.accounts().count())
+            }
+            AccountScope::All => "offline".into(),
         };
         let status = StatusLine {
             account,
-            sync: if body_fetcher.is_some() {
+            sync: if !body_fetchers.is_empty() {
                 SyncState::Ok
             } else {
                 SyncState::Offline
@@ -148,8 +153,9 @@ impl App {
         Ok(Self {
             keymap,
             store,
+            scope,
             dispatcher,
-            body_fetcher,
+            body_fetchers,
             view,
             status,
             chord_buffer: String::new(),
@@ -225,10 +231,10 @@ impl SearchView {
     }
 }
 
-async fn load_inbox(store: &SqliteStore, label: &str) -> Result<InboxView> {
+async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> Result<InboxView> {
     let lid = LabelId::new(label);
     let threads = store
-        .list_threads_in_label(&lid, 200)
+        .list_threads_in_label(scope, &lid, 200)
         .await
         .context("listing inbox threads")?;
     Ok(InboxView {
@@ -240,8 +246,8 @@ async fn load_inbox(store: &SqliteStore, label: &str) -> Result<InboxView> {
 }
 
 /// Run the TUI to completion. Returns when the user quits.
-pub async fn run(store: Arc<SqliteStore>) -> Result<()> {
-    let mut app = App::new(store).await?;
+pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
+    let mut app = App::new(store, scope).await?;
 
     // Terminal setup.
     enable_raw_mode().context("enable_raw_mode")?;
@@ -490,7 +496,7 @@ async fn run_search(app: &mut App) {
         }
         return;
     }
-    match app.store.search_threads(&query, 50).await {
+    match app.store.search_threads(&app.scope, &query, 50).await {
         Ok(hits) => {
             if let View::Search(s) = &mut app.view {
                 s.results = hits;
@@ -514,7 +520,7 @@ async fn execute_action(app: &mut App, action: Action) {
                 // Already on inbox; nothing to do.
                 return;
             }
-            if let Ok(inbox) = load_inbox(&app.store, "INBOX").await {
+            if let Ok(inbox) = load_inbox(&app.store, &app.scope, "INBOX").await {
                 app.view = View::Inbox(inbox);
             }
             return;
@@ -542,7 +548,7 @@ async fn execute_action(app: &mut App, action: Action) {
             return;
         }
         Action::OpenLabel { label_id } => {
-            match load_inbox(&app.store, label_id.as_str()).await {
+            match load_inbox(&app.store, &app.scope, label_id.as_str()).await {
                 Ok(inbox) => app.view = View::Inbox(inbox),
                 Err(e) => warn!(error = %e, "open_label failed"),
             }
@@ -595,7 +601,7 @@ async fn execute_action(app: &mut App, action: Action) {
             // this thread, hand me the next one.
             if is_archive_or_trash && is_in_reading_mode {
                 let removed_id = outcome.changed_threads.first().cloned();
-                if let Ok(mut inbox) = load_inbox(&app.store, "INBOX").await {
+                if let Ok(mut inbox) = load_inbox(&app.store, &app.scope, "INBOX").await {
                     // Pick the thread that was *next* in the old list (so the
                     // selection points to what would have shown up underneath
                     // the cursor). Falls back to the head of the list.
@@ -616,20 +622,20 @@ async fn execute_action(app: &mut App, action: Action) {
 }
 
 async fn open_thread(app: &mut App, id: ThreadId) {
+    let Ok(Some(summary)) = app.store.get_thread(&app.scope, &id).await else {
+        warn!(thread_id = %id, "thread not found");
+        return;
+    };
     // Background body fetch if creds are available. We block here for the
     // sake of simplicity; for v1.5 we'll move this to a background task.
-    if let Some(fetcher) = &app.body_fetcher {
+    if let Some(fetcher) = app.body_fetchers.get(&summary.account_id) {
         if let Err(e) = fetcher.fetch_if_needed(&id).await {
             warn!(error = %e, "body backfill failed");
         }
     }
-    let Ok(Some(summary)) = app.store.get_thread(&id).await else {
-        warn!(thread_id = %id, "thread not found");
-        return;
-    };
     let messages = app
         .store
-        .list_messages_in_thread(&id)
+        .list_messages_in_thread(&AccountScope::One(summary.account_id.clone()), &id)
         .await
         .unwrap_or_default();
     app.view = View::Thread(ThreadView {

@@ -5,10 +5,14 @@
 //! decodes the MIME tree, persists `body_plain`/`body_html`, flips the
 //! `fetched_full` flag. Idempotent: subsequent calls are no-ops.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mach_core::{ids::ThreadId, store::MailStore};
+use mach_core::{
+    ids::{AccountId, AccountScope, ThreadId},
+    store::MailStore,
+};
 use mach_store::{MessageBodyUpdate, SqliteStore};
 use tracing::{debug, info};
 
@@ -16,8 +20,16 @@ use crate::body::{self, ParsedBody};
 use crate::client::{GmailClient, RemoteMessage};
 
 pub struct BodyFetcher {
+    account: AccountId,
     client: Arc<GmailClient>,
     store: Arc<SqliteStore>,
+}
+
+/// Account-indexed lazy body services. This is the only owner of choosing
+/// which Gmail client may hydrate a cached thread.
+#[derive(Default)]
+pub struct BodyFetcherPool {
+    fetchers: HashMap<AccountId, Arc<BodyFetcher>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,17 +41,21 @@ pub enum FetchOutcome {
 }
 
 impl BodyFetcher {
-    pub fn new(client: Arc<GmailClient>, store: Arc<SqliteStore>) -> Self {
-        Self { client, store }
+    pub fn new(account: AccountId, client: Arc<GmailClient>, store: Arc<SqliteStore>) -> Self {
+        Self {
+            account,
+            client,
+            store,
+        }
     }
 
     /// Build the online body service from configured OAuth client details and
     /// the persisted account credentials. Adapters decide whether failure
     /// means cached-only operation or a hard error.
-    pub fn from_stored_credentials(store: Arc<SqliteStore>) -> Result<Self> {
+    pub fn from_stored_credentials(account: &str, store: Arc<SqliteStore>) -> Result<Self> {
         let config = crate::config::OAuthConfig::from_env()?;
-        let client = GmailClient::from_stored_credentials(config)?;
-        Ok(Self::new(client, store))
+        let client = GmailClient::from_stored_credentials(config, account)?;
+        Ok(Self::new(AccountId::new(account), client, store))
     }
 
     pub fn client(&self) -> &Arc<GmailClient> {
@@ -51,7 +67,7 @@ impl BodyFetcher {
     pub async fn fetch_if_needed(&self, thread_id: &ThreadId) -> Result<FetchOutcome> {
         let messages = self
             .store
-            .list_messages_in_thread(thread_id)
+            .list_messages_in_thread(&AccountScope::One(self.account.clone()), thread_id)
             .await
             .context("listing messages from cache")?;
 
@@ -78,11 +94,36 @@ impl BodyFetcher {
 
         let touched = self
             .store
-            .update_message_bodies(updates)
+            .update_message_bodies(&self.account, updates)
             .await
             .context("persisting full bodies")?;
         info!(touched, "body backfill complete");
         Ok(FetchOutcome::Fetched(touched))
+    }
+}
+
+impl BodyFetcherPool {
+    pub fn from_stored_credentials(store: Arc<SqliteStore>) -> Result<Self> {
+        let accounts = crate::credentials::load_all()?;
+        let mut fetchers = HashMap::with_capacity(accounts.len());
+        for credentials in accounts {
+            let account = AccountId::new(credentials.email);
+            let fetcher = BodyFetcher::from_stored_credentials(account.as_str(), store.clone())?;
+            fetchers.insert(account, Arc::new(fetcher));
+        }
+        Ok(Self { fetchers })
+    }
+
+    pub fn get(&self, account: &AccountId) -> Option<&Arc<BodyFetcher>> {
+        self.fetchers.get(account)
+    }
+
+    pub fn accounts(&self) -> impl Iterator<Item = &AccountId> {
+        self.fetchers.keys()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fetchers.is_empty()
     }
 }
 

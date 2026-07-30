@@ -1,15 +1,43 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mach_core::ids::{LabelId, ThreadId};
+use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
 use mach_core::{Action, Dispatcher};
 use mach_gmail::{config::OAuthConfig, GmailClient, OutboxWorker};
 
 use crate::runtime;
 
-pub async fn run(bootstrap: bool) -> Result<()> {
+pub async fn run(bootstrap: bool, selected_account: Option<&str>) -> Result<()> {
     let config = OAuthConfig::from_env().context("OAuth client credentials not configured")?;
-    let client = GmailClient::from_stored_credentials(config)?;
-    let store = runtime::open_store()?;
+    let store = runtime::open_store().await?;
+    let accounts: Vec<_> = mach_gmail::credentials::load_all()?
+        .into_iter()
+        .filter(|credentials| selected_account.map_or(true, |email| credentials.email == email))
+        .collect();
+    if accounts.is_empty() {
+        anyhow::bail!("no matching Gmail accounts; run `mach auth login`");
+    }
+    let mut failures = Vec::new();
+    for credentials in accounts {
+        let email = credentials.email;
+        if let Err(error) = sync_account(bootstrap, &email, config.clone(), store.clone()).await {
+            eprintln!("[{email}] sync failed: {error:#}");
+            failures.push(email);
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!("sync failed for: {}", failures.join(", "));
+    }
+    Ok(())
+}
+
+async fn sync_account(
+    bootstrap: bool,
+    email: &str,
+    config: OAuthConfig,
+    store: std::sync::Arc<mach_store::SqliteStore>,
+) -> Result<()> {
+    let account = AccountId::new(email);
+    let client = GmailClient::from_stored_credentials(config, email)?;
 
     if bootstrap {
         let stats = mach_gmail::bootstrap(client, store).await?;
@@ -29,10 +57,10 @@ pub async fn run(bootstrap: bool) -> Result<()> {
     // Default `mach sync` = drain pending mutations + un-snooze + fire
     // due send-laters + pull new history.
     let now_ms = Utc::now().timestamp_millis();
-    let dispatcher = Dispatcher::new(store.clone());
+    let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account.clone()));
 
     // 1) Sweep snoozes that have come due.
-    let due = store.find_due_snoozes(now_ms).await?;
+    let due = store.find_due_snoozes(&account, now_ms).await?;
     if !due.is_empty() {
         for d in &due {
             let tid = ThreadId::new(d.thread_id.clone());
@@ -52,11 +80,11 @@ pub async fn run(bootstrap: bool) -> Result<()> {
                 .await
                 .context("queueing snooze-label removal")?;
         }
-        println!("⏰ Un-snoozed {} thread(s)", due.len());
+        println!("[{email}] ⏰ Un-snoozed {} thread(s)", due.len());
     }
 
     // 2) Fire due send-later drafts.
-    let due_sends = store.find_due_sends(now_ms).await?;
+    let due_sends = store.find_due_sends(&account, now_ms).await?;
     let mut fired_sends = 0usize;
     for s in &due_sends {
         match dispatcher
@@ -66,7 +94,9 @@ pub async fn run(bootstrap: bool) -> Result<()> {
             .await
         {
             Ok(_) => {
-                store.mark_send_later(&s.send_later_id, "sent").await?;
+                store
+                    .mark_send_later(&account, &s.send_later_id, "sent")
+                    .await?;
                 fired_sends += 1;
             }
             Err(e) => {
@@ -78,28 +108,28 @@ pub async fn run(bootstrap: bool) -> Result<()> {
         }
     }
     if fired_sends > 0 {
-        println!("✉ Fired {fired_sends} send-later draft(s)");
+        println!("[{email}] ✉ Fired {fired_sends} send-later draft(s)");
     }
 
     // 3) Drain pending outbox to Gmail.
-    let outbox = OutboxWorker::new(client.clone(), store.clone());
+    let outbox = OutboxWorker::new(account, client.clone(), store.clone());
     let drain = outbox.drain_once(200).await?;
     if drain.processed > 0 || drain.failed > 0 {
         println!(
-            "↑ Outbox: {} processed, {} failed",
-            drain.processed, drain.failed
+            "[{email}] ↑ Outbox: {} processed, {} failed",
+            drain.processed, drain.failed,
         );
     }
 
     let stats = mach_gmail::incremental_sync(client, store).await?;
     if stats.gap_recovered {
         println!(
-            "⚠ Gap recovery: rebuilt last 7 days ({} threads), cursor {}",
+            "[{email}] ⚠ Gap recovery: rebuilt last 7 days ({} threads), cursor {}",
             stats.threads_refetched, stats.new_cursor
         );
     } else {
         println!(
-            "✓ Incremental: {} events, {} threads refetched, cursor {}",
+            "[{email}] ✓ Incremental: {} events, {} threads refetched, cursor {}",
             stats.events, stats.threads_refetched, stats.new_cursor
         );
     }

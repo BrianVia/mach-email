@@ -5,10 +5,11 @@ It provides a terminal UI, JSON CLI, Tauri desktop application, and MCP
 server over one Rust core.
 
 The application is currently best treated as a personal read-and-triage
-client. Inbox browsing, search, archive, trash, read/unread, starring,
-labels, snooze, lazy body fetching, undo/redo, and manual Gmail sync are
-wired. Compose, reply, forward, draft persistence, send-later, automatic
-background sync, and multi-account routing are not yet complete.
+client. Unified multi-account inbox browsing, per-account filtering, search,
+archive, trash, read/unread, starring,
+labels, snooze, lazy body fetching, undo/redo, manual Gmail sync, and
+account-correct mutation routing are wired. Compose, reply, forward, draft
+persistence, send-later, and automatic background sync are not yet complete.
 
 ## Architecture
 
@@ -52,6 +53,19 @@ cargo run -p mach-cli -- sync --bootstrap
 cargo run -p mach-cli
 ```
 
+Repeat `mach auth login` for each Gmail address. Logins are additive. The
+default TUI merges every account into one time-sorted inbox and shows the
+owning address on each row:
+
+```sh
+mach                         # unified inbox
+mach --account me@work.com   # one account
+mach sync                    # sync every account
+mach sync --account me@work.com
+mach auth status
+mach auth logout --account me@work.com
+```
+
 Useful non-interactive commands:
 
 ```sh
@@ -93,8 +107,9 @@ and preserve a copy of the local SQLite database.
 
 ## Data and privacy
 
-OAuth credentials are stored as `credentials.json` in the platform
-application-data directory with mode `0600` on Unix. Email bodies and metadata
+OAuth credentials are stored as one file per account under `accounts/` in the
+platform application-data directory with mode `0600` on Unix. A historical
+single `credentials.json` is migrated automatically. Email bodies and metadata
 are cached locally in SQLite. The desktop renderer sanitizes HTML, but currently
 loads remote images; opening a message can therefore notify tracking servers.
 

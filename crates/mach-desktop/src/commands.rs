@@ -7,7 +7,7 @@
 //! store directly without going through the Action surface — those don't
 //! need optimistic-update semantics.
 
-use mach_core::ids::{LabelId, ThreadId};
+use mach_core::ids::{AccountScope, LabelId, ThreadId};
 use mach_core::store::MailStore;
 use mach_core::{Action, ActionOutcome};
 use serde::Serialize;
@@ -43,7 +43,15 @@ pub async fn dispatch_action(
 
     // Body backfill on open_thread, same shape as the CLI.
     if let Action::OpenThread { id } = &action {
-        if let Some(fetcher) = state.body_fetcher.as_ref() {
+        let summary = state
+            .store
+            .get_thread(&state.scope, id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(fetcher) = summary
+            .as_ref()
+            .and_then(|thread| state.body_fetchers.get(&thread.account_id))
+        {
             if let Err(e) = fetcher.fetch_if_needed(id).await {
                 warn!(error = %e, "body backfill failed");
             }
@@ -64,7 +72,11 @@ pub async fn list_threads(
     limit: u32,
 ) -> Result<Out<serde_json::Value>, String> {
     let lid = LabelId::new(label_id);
-    match state.store.list_threads_in_label(&lid, limit).await {
+    match state
+        .store
+        .list_threads_in_label(&state.scope, &lid, limit)
+        .await
+    {
         Ok(threads) => Ok(Out::ok(serde_json::to_value(threads).unwrap())),
         Err(e) => Ok(Out::err(e)),
     }
@@ -76,17 +88,18 @@ pub async fn open_thread(
     thread_id: String,
 ) -> Result<Out<serde_json::Value>, String> {
     let id = ThreadId::new(thread_id);
-    if let Some(fetcher) = state.body_fetcher.as_ref() {
+    let Ok(Some(summary)) = state.store.get_thread(&state.scope, &id).await else {
+        return Ok(Out::err("thread not found"));
+    };
+    let thread_scope = AccountScope::One(summary.account_id.clone());
+    if let Some(fetcher) = state.body_fetchers.get(&summary.account_id) {
         if let Err(e) = fetcher.fetch_if_needed(&id).await {
             warn!(error = %e, "body backfill failed (open_thread)");
         }
     }
-    let Ok(Some(summary)) = state.store.get_thread(&id).await else {
-        return Ok(Out::err("thread not found"));
-    };
     let messages = state
         .store
-        .list_messages_in_thread(&id)
+        .list_messages_in_thread(&thread_scope, &id)
         .await
         .unwrap_or_default();
     Ok(Out::ok(serde_json::json!({
@@ -101,7 +114,11 @@ pub async fn search(
     query: String,
     limit: u32,
 ) -> Result<Out<serde_json::Value>, String> {
-    match state.store.search_threads(&query, limit).await {
+    match state
+        .store
+        .search_threads(&state.scope, &query, limit)
+        .await
+    {
         Ok(threads) => Ok(Out::ok(serde_json::to_value(threads).unwrap())),
         Err(e) => Ok(Out::err(e)),
     }
@@ -116,22 +133,27 @@ pub async fn refetch_thread(
     thread_id: String,
 ) -> Result<Out<serde_json::Value>, String> {
     let id = ThreadId::new(thread_id);
-    if let Err(e) = state.store.invalidate_thread_bodies(&id).await {
+    let Ok(Some(summary)) = state.store.get_thread(&state.scope, &id).await else {
+        return Ok(Out::err("thread not found"));
+    };
+    let thread_scope = AccountScope::One(summary.account_id.clone());
+    if let Err(e) = state
+        .store
+        .invalidate_thread_bodies(&summary.account_id, &id)
+        .await
+    {
         return Ok(Out::err(e));
     }
-    if let Some(fetcher) = state.body_fetcher.as_ref() {
+    if let Some(fetcher) = state.body_fetchers.get(&summary.account_id) {
         if let Err(e) = fetcher.fetch_if_needed(&id).await {
             warn!(error = %e, "refetch_thread: body backfill failed");
         }
     } else {
         return Ok(Out::err("offline — cannot refetch"));
     }
-    let Ok(Some(summary)) = state.store.get_thread(&id).await else {
-        return Ok(Out::err("thread not found"));
-    };
     let messages = state
         .store
-        .list_messages_in_thread(&id)
+        .list_messages_in_thread(&thread_scope, &id)
         .await
         .unwrap_or_default();
     Ok(Out::ok(serde_json::json!({
@@ -151,7 +173,12 @@ pub fn keymap_sources(state: State<'_, AppState>) -> serde_json::Value {
 #[tauri::command]
 pub fn account_status(state: State<'_, AppState>) -> serde_json::Value {
     serde_json::json!({
-        "email": state.account_email,
-        "online": state.body_fetcher.is_some(),
+        "email": if state.account_emails.len() == 1 {
+            state.account_emails.first().cloned().unwrap_or_default()
+        } else {
+            format!("All accounts ({})", state.account_emails.len())
+        },
+        "accounts": state.account_emails,
+        "online": !state.body_fetchers.is_empty(),
     })
 }

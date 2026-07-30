@@ -14,7 +14,7 @@ use crate::runtime;
 /// messages haven't been fetched at `format=full` yet. The first call may
 /// take a beat (one round-trip to Gmail); subsequent calls are instant from
 /// the local cache.
-pub async fn run(action_json: &str) -> Result<()> {
+pub async fn run(action_json: &str, account: Option<&str>) -> Result<()> {
     let raw = if action_json == "-" {
         let mut buf = String::new();
         std::io::stdin()
@@ -28,15 +28,16 @@ pub async fn run(action_json: &str) -> Result<()> {
     let action: Action =
         serde_json::from_str(&raw).with_context(|| format!("parsing action JSON: {raw}"))?;
 
-    let store = runtime::open_store()?;
-    let dispatcher = mach_core::Dispatcher::new(store.clone());
+    let store = runtime::open_store().await?;
+    let scope = runtime::account_scope(account);
+    let dispatcher = mach_core::Dispatcher::with_scope(store.clone(), scope.clone());
 
     // If this is an `open_thread`, do a body backfill first (silent no-op
     // when bodies are already cached). We only spin up a Gmail client if
     // env credentials are available — keeps offline `mach do` working when
     // every thread the user touches is already cached.
     if let Action::OpenThread { id } = &action {
-        if let Err(e) = maybe_backfill_bodies(id.clone(), store.clone()).await {
+        if let Err(e) = maybe_backfill_bodies(&scope, id.clone(), store.clone()).await {
             // Don't fail the whole action — fall through with whatever
             // cached state we have. The CLI user gets the cached view + a
             // warning on stderr.
@@ -56,16 +57,21 @@ pub async fn run(action_json: &str) -> Result<()> {
 }
 
 async fn maybe_backfill_bodies(
+    scope: &mach_core::ids::AccountScope,
     thread_id: mach_core::ids::ThreadId,
     store: std::sync::Arc<mach_store::SqliteStore>,
 ) -> Result<()> {
+    use mach_core::store::MailStore;
     use mach_gmail::{config::OAuthConfig, BodyFetcher};
     // Preserve the intentional no-config offline mode while still surfacing
     // corrupt or unreadable persisted credentials to the caller.
     if OAuthConfig::from_env().is_err() {
         return Ok(());
     }
-    let fetcher = BodyFetcher::from_stored_credentials(store)?;
+    let Some(thread) = store.get_thread(scope, &thread_id).await? else {
+        return Ok(());
+    };
+    let fetcher = BodyFetcher::from_stored_credentials(thread.account_id.as_str(), store)?;
     fetcher.fetch_if_needed(&thread_id).await?;
     Ok(())
 }

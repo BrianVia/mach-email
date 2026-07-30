@@ -1,5 +1,11 @@
 # Multi-account support — plan
 
+> Implemented on 2026-07-30. The shipped design uses `AccountScope` for
+> unified/single-account reads, composite SQLite keys, per-account credential
+> files and Gmail clients, and account-bound cursors/outbox workers. This file
+> remains as historical design context; details below may differ from the
+> final implementation.
+
 Goal: support **N Gmail accounts in one mach install** with both a
 per-account toggle and an optional Unified pseudo-account view. Default
 UX is account-toggle; Unified is a switchable second mode.

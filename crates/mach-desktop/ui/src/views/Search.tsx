@@ -85,6 +85,9 @@ function SearchRow(props: { t: ThreadSummary; selected: boolean }) {
         {initials()}
       </span>
       <div class="flex-1 min-w-0">
+        <p class="text-fg-mute text-[10px] truncate">
+          {props.t.account_id}
+        </p>
         <p class="text-fg text-[13.5px] font-medium truncate">
           {props.t.subject}
         </p>

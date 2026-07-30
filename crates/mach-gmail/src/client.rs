@@ -29,10 +29,10 @@ pub struct GmailClient {
 impl GmailClient {
     /// Construct from credentials already on disk. Errors if `mach auth login`
     /// hasn't been run yet.
-    pub fn from_stored_credentials(config: OAuthConfig) -> Result<Arc<Self>> {
-        let creds = credentials::load()
+    pub fn from_stored_credentials(config: OAuthConfig, account: &str) -> Result<Arc<Self>> {
+        let creds = credentials::load(account)
             .context("loading stored credentials")?
-            .ok_or_else(|| anyhow!("no credentials — run `mach auth login` first"))?;
+            .ok_or_else(|| anyhow!("no credentials for {account} — run `mach auth login` first"))?;
         let http = Client::builder()
             .gzip(true)
             .user_agent(concat!("mach/", env!("CARGO_PKG_VERSION")))

@@ -21,6 +21,7 @@ const invoke: typeof tauriInvoke = async (cmd, args) => {
 };
 
 export type ThreadSummary = {
+  account_id: string;
   id: string;
   subject: string;
   snippet: string;
@@ -41,6 +42,7 @@ export type InlineImageRef = {
 };
 
 export type Message = {
+  account_id: string;
   id: string;
   thread_id: string;
   from: string;
@@ -67,6 +69,7 @@ export type ActionOutcome = {
 
 export type AccountStatus = {
   email: string;
+  accounts: string[];
   online: boolean;
 };
 

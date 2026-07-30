@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use mach_core::ids::AccountId;
 use mach_core::store::{MailStore, OutboxOp, OutboxOpKind};
 use mach_store::SqliteStore;
 use tracing::{debug, info, warn};
@@ -23,6 +24,7 @@ use tracing::{debug, info, warn};
 use crate::client::GmailClient;
 
 pub struct OutboxWorker {
+    account: AccountId,
     client: Arc<GmailClient>,
     store: Arc<SqliteStore>,
 }
@@ -34,8 +36,12 @@ pub struct DrainStats {
 }
 
 impl OutboxWorker {
-    pub fn new(client: Arc<GmailClient>, store: Arc<SqliteStore>) -> Self {
-        Self { client, store }
+    pub fn new(account: AccountId, client: Arc<GmailClient>, store: Arc<SqliteStore>) -> Self {
+        Self {
+            account,
+            client,
+            store,
+        }
     }
 
     /// Drain up to `max` pending ops. Returns stats. Idempotent: marking
@@ -43,7 +49,7 @@ impl OutboxWorker {
     pub async fn drain_once(&self, max: u32) -> Result<DrainStats> {
         let pending = self
             .store
-            .drain_pending_outbox(max)
+            .drain_pending_outbox(&self.account, max)
             .await
             .context("draining pending outbox")?;
         if pending.is_empty() {
@@ -103,7 +109,7 @@ impl OutboxWorker {
                 // Look up the draft locally, build the MIME, send.
                 let draft = self
                     .store
-                    .get_draft(draft_id)
+                    .get_draft(&self.account, draft_id)
                     .await?
                     .ok_or_else(|| anyhow!("draft {draft_id} not found"))?;
                 let raw = build_mime_raw(&draft)?;
@@ -113,7 +119,9 @@ impl OutboxWorker {
                     .await
                     .context("send_raw")?;
                 // Drop the local draft once Gmail accepted it.
-                self.store.delete_draft_local(draft_id).await?;
+                self.store
+                    .delete_draft_local(&self.account, draft_id)
+                    .await?;
                 Ok(())
             }
             OutboxOpKind::SaveDraft { .. } | OutboxOpKind::DeleteDraft { .. } => {

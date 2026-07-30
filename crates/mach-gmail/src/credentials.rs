@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -38,13 +39,22 @@ pub enum CredsError {
     NoDataDir,
 }
 
-fn credentials_path() -> Result<PathBuf, CredsError> {
+fn data_dir() -> Result<PathBuf, CredsError> {
     let dirs = ProjectDirs::from("com", "via", "mach").ok_or(CredsError::NoDataDir)?;
-    Ok(dirs.data_dir().join("credentials.json"))
+    Ok(dirs.data_dir().to_path_buf())
+}
+
+fn legacy_credentials_path() -> Result<PathBuf, CredsError> {
+    Ok(data_dir()?.join("credentials.json"))
+}
+
+fn credentials_path(account: &str) -> Result<PathBuf, CredsError> {
+    let filename = format!("{}.json", URL_SAFE_NO_PAD.encode(account.as_bytes()));
+    Ok(data_dir()?.join("accounts").join(filename))
 }
 
 pub fn save(creds: &StoredCredentials) -> Result<(), CredsError> {
-    let path = credentials_path()?;
+    let path = credentials_path(&creds.email)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -54,8 +64,9 @@ pub fn save(creds: &StoredCredentials) -> Result<(), CredsError> {
     Ok(())
 }
 
-pub fn load() -> Result<Option<StoredCredentials>, CredsError> {
-    let path = credentials_path()?;
+pub fn load(account: &str) -> Result<Option<StoredCredentials>, CredsError> {
+    migrate_legacy()?;
+    let path = credentials_path(account)?;
     match fs::read(&path) {
         Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -63,13 +74,65 @@ pub fn load() -> Result<Option<StoredCredentials>, CredsError> {
     }
 }
 
-pub fn delete() -> Result<(), CredsError> {
-    let path = credentials_path()?;
+pub fn load_all() -> Result<Vec<StoredCredentials>, CredsError> {
+    migrate_legacy()?;
+    let dir = data_dir()?.join("accounts");
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut accounts: Vec<StoredCredentials> = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        accounts.push(serde_json::from_slice(&fs::read(path)?)?);
+    }
+    accounts.sort_by(|left, right| left.email.cmp(&right.email));
+    Ok(accounts)
+}
+
+pub fn delete(account: &str) -> Result<(), CredsError> {
+    migrate_legacy()?;
+    let path = credentials_path(account)?;
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+pub fn delete_all() -> Result<(), CredsError> {
+    migrate_legacy()?;
+    let path = data_dir()?.join("accounts");
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn migrate_legacy() -> Result<(), CredsError> {
+    let legacy = legacy_credentials_path()?;
+    let bytes = match fs::read(&legacy) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let credentials: StoredCredentials = serde_json::from_slice(&bytes)?;
+    let destination = credentials_path(&credentials.email)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !destination.exists() {
+        fs::rename(&legacy, &destination)?;
+        set_mode_0600(&destination)?;
+    } else {
+        fs::remove_file(legacy)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

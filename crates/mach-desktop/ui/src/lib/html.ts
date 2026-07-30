@@ -25,7 +25,7 @@ export type RenderableHtml = {
  *   event attributes are stripped by DOMPurify.
  * - `<a>` tags get `target="_blank"` + `rel="noopener noreferrer"`.
  * - `<img src="cid:foo">` is rewritten to
- *   `mach://attachment/<msg_id>/<att_id>` so the Tauri protocol handler
+ *   `mach://attachment/<account>/<msg_id>/<att_id>` so the Tauri protocol handler
  *   fetches the bytes and serves them with the right Content-Type.
  * - Remote `<img src="https://...">` is left alone (auto-load, per
  *   project policy — privacy tradeoff the user accepted).
@@ -56,7 +56,10 @@ export function renderEmailHtml(m: Message): RenderableHtml {
     const cid = src.slice(4).toLowerCase().trim().replace(/^<|>$/g, "");
     const attId = cidMap.get(cid);
     if (attId) {
-      img.setAttribute("src", `mach://attachment/${m.id}/${attId}`);
+      img.setAttribute(
+        "src",
+        `mach://attachment/${m.account_id}/${m.id}/${attId}`,
+      );
       img.setAttribute("loading", "lazy");
     } else {
       // Couldn't resolve — leave a visible marker rather than a broken icon.

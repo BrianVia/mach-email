@@ -1,5 +1,6 @@
 use anyhow::Result;
 use directories::ProjectDirs;
+use mach_core::ids::AccountId;
 use mach_core::store::MailStore;
 use mach_gmail::{config::OAuthConfig, GmailClient};
 
@@ -8,7 +9,7 @@ use crate::runtime;
 /// Print environment + cache health. With `--simulate-gap`, deliberately
 /// wipe the sync cursor to force gap recovery on the next `mach sync` — a
 /// regression check for the most fragile branch of the sync engine.
-pub async fn run(simulate_gap: bool) -> Result<()> {
+pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<()> {
     println!("== mach doctor ==\n");
 
     // Project dirs.
@@ -20,14 +21,7 @@ pub async fn run(simulate_gap: bool) -> Result<()> {
     }
 
     // DB.
-    let store = runtime::open_store()?;
-    let cursor = store.get_history_cursor().await?;
-    println!(
-        "history cursor:  {}",
-        cursor
-            .map(|c| c.to_string())
-            .unwrap_or("(none — bootstrap first)".into())
-    );
+    let store = runtime::open_store().await?;
 
     // OAuth env.
     let creds_ok = OAuthConfig::from_env().is_ok();
@@ -40,25 +34,34 @@ pub async fn run(simulate_gap: bool) -> Result<()> {
         }
     );
 
-    if creds_ok {
-        let client = GmailClient::from_stored_credentials(OAuthConfig::from_env()?)?;
-        let email = client.email().await;
-        println!("account:         {email}");
-        match client.get_profile().await {
-            Ok(p) => println!("remote history:  {} (live)", p.history_id),
-            Err(e) => println!("⚠ remote check failed: {e}"),
+    let accounts: Vec<_> = mach_gmail::credentials::load_all()?
+        .into_iter()
+        .filter(|credentials| selected_account.map_or(true, |email| credentials.email == email))
+        .collect();
+    for credentials in accounts {
+        let account = AccountId::new(credentials.email);
+        println!("\naccount:         {account}");
+        let cursor = store.get_history_cursor(&account).await?;
+        println!(
+            "history cursor:  {}",
+            cursor
+                .map(|value| value.to_string())
+                .unwrap_or("(none — bootstrap first)".into())
+        );
+        let pending = store.drain_pending_outbox(&account, u32::MAX).await?.len();
+        println!("outbox pending:  {pending}");
+        if creds_ok {
+            let client =
+                GmailClient::from_stored_credentials(OAuthConfig::from_env()?, account.as_str())?;
+            match client.get_profile().await {
+                Ok(profile) => println!("remote history:  {} (live)", profile.history_id),
+                Err(error) => println!("⚠ remote check failed: {error}"),
+            }
         }
-    }
-
-    let pending = store.drain_pending_outbox(1).await?.len();
-    println!("outbox pending:  {pending}");
-
-    if simulate_gap {
-        println!("\n--simulate-gap: wiping history cursor to force gap recovery on next sync.");
-        // We set it to a clearly-stale value (1). Gmail will 404 the
-        // history endpoint and we'll fall through to the 7-day rebuild.
-        store.set_history_cursor(1).await?;
-        println!("✓ cursor reset to 1 — run `mach sync` to exercise gap recovery.");
+        if simulate_gap {
+            store.set_history_cursor(&account, 1).await?;
+            println!("✓ cursor reset to 1 — run `mach sync` to exercise gap recovery.");
+        }
     }
 
     Ok(())

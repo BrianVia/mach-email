@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::OpId;
 use crate::error::CoreResult;
-use crate::ids::{DraftId, LabelId, MessageId, ThreadId};
+use crate::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 
 /// A row in the inbox list. Denormalized for render speed — the projection
 /// the TUI actually paints comes straight from this struct, no joins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSummary {
+    pub account_id: AccountId,
     pub id: ThreadId,
     pub subject: String,
     pub snippet: String,
@@ -23,6 +24,7 @@ pub struct ThreadSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    pub account_id: AccountId,
     pub id: MessageId,
     pub thread_id: ThreadId,
     pub from: String,
@@ -58,6 +60,7 @@ pub struct InlineImageRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Label {
+    pub account_id: AccountId,
     pub id: LabelId,
     pub name: String,
     pub system: bool,
@@ -67,6 +70,7 @@ pub struct Label {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Draft {
+    pub account_id: AccountId,
     pub id: DraftId,
     pub gmail_draft_id: Option<String>,
     pub thread_id: Option<ThreadId>,
@@ -104,6 +108,7 @@ pub enum OutboxOpKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboxOp {
     pub id: i64,
+    pub account_id: AccountId,
     pub op_id: OpId,
     pub kind: OutboxOpKind,
     pub created_at: DateTime<Utc>,
@@ -115,14 +120,28 @@ pub struct OutboxOp {
 /// engine reads pending outbox ops and pushes them upstream.
 #[async_trait]
 pub trait MailStore: Send + Sync {
-    async fn get_thread(&self, id: &ThreadId) -> CoreResult<Option<ThreadSummary>>;
+    async fn get_thread(
+        &self,
+        scope: &AccountScope,
+        id: &ThreadId,
+    ) -> CoreResult<Option<ThreadSummary>>;
     async fn list_threads_in_label(
         &self,
+        scope: &AccountScope,
         label: &LabelId,
         limit: u32,
     ) -> CoreResult<Vec<ThreadSummary>>;
-    async fn list_messages_in_thread(&self, id: &ThreadId) -> CoreResult<Vec<Message>>;
-    async fn search_threads(&self, query: &str, limit: u32) -> CoreResult<Vec<ThreadSummary>>;
+    async fn list_messages_in_thread(
+        &self,
+        scope: &AccountScope,
+        id: &ThreadId,
+    ) -> CoreResult<Vec<Message>>;
+    async fn search_threads(
+        &self,
+        scope: &AccountScope,
+        query: &str,
+        limit: u32,
+    ) -> CoreResult<Vec<ThreadSummary>>;
 
     /// Apply a thread mutation to the local projection and durably enqueue
     /// the matching remote operation as one atomic store transaction.
@@ -130,22 +149,36 @@ pub trait MailStore: Send + Sync {
     /// Implementations must reject non-thread operations. Returning success
     /// guarantees that the optimistic state and its recovery record either
     /// both exist or neither exists.
-    async fn apply_thread_mutation(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64>;
+    async fn apply_thread_mutation(
+        &self,
+        scope: &AccountScope,
+        op_id: &OpId,
+        kind: &OutboxOpKind,
+    ) -> CoreResult<i64>;
 
-    async fn list_labels(&self) -> CoreResult<Vec<Label>>;
+    async fn list_labels(&self, scope: &AccountScope) -> CoreResult<Vec<Label>>;
 
-    async fn get_draft(&self, id: &DraftId) -> CoreResult<Option<Draft>>;
+    async fn get_draft(&self, account: &AccountId, id: &DraftId) -> CoreResult<Option<Draft>>;
     async fn save_draft_local(&self, draft: &Draft) -> CoreResult<()>;
-    async fn delete_draft_local(&self, id: &DraftId) -> CoreResult<()>;
+    async fn delete_draft_local(&self, account: &AccountId, id: &DraftId) -> CoreResult<()>;
 
-    async fn enqueue_outbox(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64>;
-    async fn drain_pending_outbox(&self, max: u32) -> CoreResult<Vec<OutboxOp>>;
+    async fn enqueue_outbox(
+        &self,
+        account: &AccountId,
+        op_id: &OpId,
+        kind: &OutboxOpKind,
+    ) -> CoreResult<i64>;
+    async fn drain_pending_outbox(
+        &self,
+        account: &AccountId,
+        max: u32,
+    ) -> CoreResult<Vec<OutboxOp>>;
     async fn mark_outbox_done(&self, id: i64) -> CoreResult<()>;
     async fn mark_outbox_failed(&self, id: i64, error: &str) -> CoreResult<()>;
 
     /// Currently-stored sync cursor for the active account, if any.
-    async fn get_history_cursor(&self) -> CoreResult<Option<u64>>;
-    async fn set_history_cursor(&self, cursor: u64) -> CoreResult<()>;
+    async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>>;
+    async fn set_history_cursor(&self, account: &AccountId, cursor: u64) -> CoreResult<()>;
 }
 
 /// Talks to Gmail. Kept as a trait so we can mock the network in tests

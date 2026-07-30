@@ -3,7 +3,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use mach_core::{
     action::OpId,
     error::{CoreError, CoreResult},
-    ids::{DraftId, LabelId, MessageId, ThreadId},
+    ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId},
     store::{Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, ThreadSummary},
 };
 use rusqlite::{params, OptionalExtension, Row};
@@ -82,25 +82,54 @@ pub struct MessageBodyUpdate {
 }
 
 impl SqliteStore {
+    /// Assign rows imported from the pre-multi-account schema to the only
+    /// credential that existed at upgrade time. Safe to call repeatedly.
+    pub async fn claim_legacy_account(&self, account: &AccountId) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        spawn_blocking(move || -> CoreResult<()> {
+            let mut conn = pool.get().map_err(map_err)?;
+            let tx = conn.transaction().map_err(map_err)?;
+            for table in ["threads", "labels", "drafts", "outbox", "sync_state"] {
+                tx.execute(
+                    &format!("UPDATE {table} SET account_id = ?1 WHERE account_id = '__legacy__'"),
+                    params![account.as_str()],
+                )
+                .map_err(map_err)?;
+            }
+            tx.commit().map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     /// Replace the labels table contents wholesale. Cheaper than diffing on
     /// bootstrap; for incremental updates the sync engine should patch.
-    pub async fn upsert_labels(&self, labels: Vec<LabelUpsert>) -> mach_core::CoreResult<()> {
+    pub async fn upsert_labels(
+        &self,
+        account: &AccountId,
+        labels: Vec<LabelUpsert>,
+    ) -> mach_core::CoreResult<()> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> mach_core::CoreResult<()> {
             let mut conn = pool.get().map_err(map_err)?;
             let tx = conn.transaction().map_err(map_err)?;
             for l in labels {
                 tx.execute(
-                    "INSERT INTO labels (id, name, type, color) VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO labels (account_id, id, name, type, color)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(account_id, id) DO UPDATE SET
                        name  = excluded.name,
                        type  = excluded.type,
                        color = excluded.color",
                     params![
+                        account.as_str(),
                         l.id,
                         l.name,
                         if l.system { "system" } else { "user" },
-                        l.color
+                        l.color,
                     ],
                 )
                 .map_err(map_err)?;
@@ -115,8 +144,13 @@ impl SqliteStore {
     /// Insert or replace threads + their messages. The thread row's
     /// `unread`/`starred` are derived from the union of its messages' labels;
     /// we compute that here so the inbox-list query stays lookup-free.
-    pub async fn upsert_threads(&self, threads: Vec<ThreadUpsert>) -> mach_core::CoreResult<()> {
+    pub async fn upsert_threads(
+        &self,
+        account: &AccountId,
+        threads: Vec<ThreadUpsert>,
+    ) -> mach_core::CoreResult<()> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> mach_core::CoreResult<()> {
             let mut conn = pool.get().map_err(map_err)?;
             let tx = conn.transaction().map_err(map_err)?;
@@ -127,11 +161,11 @@ impl SqliteStore {
                 let label_ids_json = serde_json::to_string(&t.label_ids)?;
                 let now = Utc::now().timestamp_millis();
                 tx.execute(
-                    "INSERT INTO threads (id, history_id, snippet, subject, participants_json,
+                    "INSERT INTO threads (account_id, id, history_id, snippet, subject, participants_json,
                                           last_message_at, message_count, unread, starred,
                                           label_ids_json, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                     ON CONFLICT(id) DO UPDATE SET
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ON CONFLICT(account_id, id) DO UPDATE SET
                        history_id        = excluded.history_id,
                        snippet           = excluded.snippet,
                        subject           = excluded.subject,
@@ -143,6 +177,7 @@ impl SqliteStore {
                        label_ids_json    = excluded.label_ids_json,
                        updated_at        = excluded.updated_at",
                     params![
+                        account.as_str(),
                         t.id,
                         t.history_id as i64,
                         t.snippet,
@@ -167,11 +202,11 @@ impl SqliteStore {
                     };
                     let label_json = serde_json::to_string(&m.label_ids)?;
                     tx.execute(
-                        "INSERT INTO messages (id, thread_id, history_id, internal_date,
+                        "INSERT INTO messages (account_id, id, thread_id, history_id, internal_date,
                                                from_addr, to_addrs, cc_addrs, subject,
                                                snippet, body_plain, label_ids_json, fetched_full)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                         ON CONFLICT(id) DO UPDATE SET
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                         ON CONFLICT(account_id, id) DO UPDATE SET
                            history_id     = excluded.history_id,
                            internal_date  = excluded.internal_date,
                            from_addr      = excluded.from_addr,
@@ -183,6 +218,7 @@ impl SqliteStore {
                            label_ids_json = excluded.label_ids_json,
                            fetched_full   = MAX(excluded.fetched_full, messages.fetched_full)",
                         params![
+                            account.as_str(),
                             m.id,
                             m.thread_id,
                             m.history_id as i64,
@@ -211,17 +247,25 @@ impl SqliteStore {
     ///
     /// The caller subsequently refreshes every affected thread, so this owns
     /// only the durable deletion—not reconstruction of the thread summary.
-    pub async fn delete_messages(&self, message_ids: Vec<String>) -> mach_core::CoreResult<()> {
+    pub async fn delete_messages(
+        &self,
+        account: &AccountId,
+        message_ids: Vec<String>,
+    ) -> mach_core::CoreResult<()> {
         if message_ids.is_empty() {
             return Ok(());
         }
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> mach_core::CoreResult<()> {
             let mut conn = pool.get().map_err(map_err)?;
             let tx = conn.transaction().map_err(map_err)?;
             for id in message_ids {
-                tx.execute("DELETE FROM messages WHERE id = ?1", params![id])
-                    .map_err(map_err)?;
+                tx.execute(
+                    "DELETE FROM messages WHERE account_id = ?1 AND id = ?2",
+                    params![account.as_str(), id],
+                )
+                .map_err(map_err)?;
             }
             tx.commit().map_err(map_err)?;
             Ok(())
@@ -232,12 +276,20 @@ impl SqliteStore {
 
     /// Remove a thread that Gmail confirms no longer exists. Message,
     /// attachment, and FTS cleanup follows the schema's cascades/triggers.
-    pub async fn delete_thread(&self, thread_id: String) -> mach_core::CoreResult<()> {
+    pub async fn delete_thread(
+        &self,
+        account: &AccountId,
+        thread_id: String,
+    ) -> mach_core::CoreResult<()> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> mach_core::CoreResult<()> {
             let conn = pool.get().map_err(map_err)?;
-            conn.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
-                .map_err(map_err)?;
+            conn.execute(
+                "DELETE FROM threads WHERE account_id = ?1 AND id = ?2",
+                params![account.as_str(), thread_id],
+            )
+            .map_err(map_err)?;
             Ok(())
         })
         .await
@@ -249,6 +301,7 @@ impl SqliteStore {
 /// scheduler reads these in `find_due_snoozes` and un-snoozes them.
 #[derive(Debug, Clone)]
 pub struct DueSnooze {
+    pub account_id: AccountId,
     pub thread_id: String,
     pub snoozed_label: String,
 }
@@ -256,6 +309,7 @@ pub struct DueSnooze {
 /// One scheduled send. `send_later_due` returns these in `find_due_sends`.
 #[derive(Debug, Clone)]
 pub struct DueSend {
+    pub account_id: AccountId,
     pub send_later_id: String,
     pub draft_id: String,
 }
@@ -264,16 +318,23 @@ impl SqliteStore {
     /// Return all snoozed threads whose `MACH/Snoozed/<rfc3339>` label is
     /// past `now`. Walks every thread row, parses the JSON label array,
     /// extracts the matching label. O(threads) — fine at personal scale.
-    pub async fn find_due_snoozes(&self, now_ms: i64) -> mach_core::CoreResult<Vec<DueSnooze>> {
+    pub async fn find_due_snoozes(
+        &self,
+        account: &AccountId,
+        now_ms: i64,
+    ) -> mach_core::CoreResult<Vec<DueSnooze>> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> mach_core::CoreResult<Vec<DueSnooze>> {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
-                .prepare_cached("SELECT id, label_ids_json FROM threads")
+                .prepare_cached("SELECT id, label_ids_json FROM threads WHERE account_id = ?1")
                 .map_err(map_err)?;
             let mut due = Vec::new();
             let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .query_map(params![account.as_str()], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
                 .map_err(map_err)?;
             for row in rows {
                 let (id, labels_json) = row.map_err(map_err)?;
@@ -287,6 +348,7 @@ impl SqliteStore {
                     };
                     if ts.timestamp_millis() <= now_ms {
                         due.push(DueSnooze {
+                            account_id: account.clone(),
                             thread_id: id.clone(),
                             snoozed_label: l.clone(),
                         });
@@ -300,19 +362,25 @@ impl SqliteStore {
     }
 
     /// Return scheduled sends whose `send_at` is past `now`.
-    pub async fn find_due_sends(&self, now_ms: i64) -> mach_core::CoreResult<Vec<DueSend>> {
+    pub async fn find_due_sends(
+        &self,
+        account: &AccountId,
+        now_ms: i64,
+    ) -> mach_core::CoreResult<Vec<DueSend>> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> mach_core::CoreResult<Vec<DueSend>> {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT id, draft_id FROM send_later
-                     WHERE state = 'scheduled' AND send_at <= ?1",
+                     WHERE account_id = ?1 AND state = 'scheduled' AND send_at <= ?2",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![now_ms], |r| {
+                .query_map(params![account.as_str(), now_ms], |r| {
                     Ok(DueSend {
+                        account_id: account.clone(),
                         send_later_id: r.get::<_, String>(0)?,
                         draft_id: r.get::<_, String>(1)?,
                     })
@@ -327,15 +395,21 @@ impl SqliteStore {
     }
 
     /// Mark a `send_later` row done (sent) or failed.
-    pub async fn mark_send_later(&self, id: &str, state: &str) -> mach_core::CoreResult<()> {
+    pub async fn mark_send_later(
+        &self,
+        account: &AccountId,
+        id: &str,
+        state: &str,
+    ) -> mach_core::CoreResult<()> {
         let pool = self.pool.clone();
+        let account = account.clone();
         let id = id.to_string();
         let state = state.to_string();
         spawn_blocking(move || -> mach_core::CoreResult<()> {
             let conn = pool.get().map_err(map_err)?;
             conn.execute(
-                "UPDATE send_later SET state = ?1 WHERE id = ?2",
-                params![state, id],
+                "UPDATE send_later SET state = ?1 WHERE account_id = ?2 AND id = ?3",
+                params![state, account.as_str(), id],
             )
             .map_err(map_err)?;
             Ok(())
@@ -349,9 +423,11 @@ impl SqliteStore {
     /// parser and inline-image extraction.
     pub async fn invalidate_thread_bodies(
         &self,
+        account: &AccountId,
         thread_id: &mach_core::ids::ThreadId,
     ) -> mach_core::CoreResult<usize> {
         let pool = self.pool.clone();
+        let account = account.clone();
         let tid = thread_id.as_str().to_string();
         spawn_blocking(move || -> mach_core::CoreResult<usize> {
             let conn = pool.get().map_err(map_err)?;
@@ -362,8 +438,8 @@ impl SqliteStore {
                            body_html          = NULL,
                            inline_images_json = NULL,
                            fetched_full       = 0
-                     WHERE thread_id = ?1",
-                    params![tid],
+                     WHERE account_id = ?1 AND thread_id = ?2",
+                    params![account.as_str(), tid],
                 )
                 .map_err(map_err)?;
             Ok(n)
@@ -378,9 +454,11 @@ impl SqliteStore {
     /// trigger.
     pub async fn update_message_bodies(
         &self,
+        account: &AccountId,
         updates: Vec<MessageBodyUpdate>,
     ) -> mach_core::CoreResult<usize> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> mach_core::CoreResult<usize> {
             let mut conn = pool.get().map_err(map_err)?;
             let tx = conn.transaction().map_err(map_err)?;
@@ -393,8 +471,14 @@ impl SqliteStore {
                              body_html          = ?2,
                              inline_images_json = ?3,
                              fetched_full       = 1
-                         WHERE id = ?4",
-                        params![u.body_plain, u.body_html, u.inline_images_json, u.id],
+                         WHERE account_id = ?4 AND id = ?5",
+                        params![
+                            u.body_plain,
+                            u.body_html,
+                            u.inline_images_json,
+                            account.as_str(),
+                            u.id
+                        ],
                     )
                     .map_err(map_err)?;
                 touched += n;
@@ -435,6 +519,7 @@ fn row_to_thread(row: &Row) -> rusqlite::Result<ThreadSummary> {
     let participants_json: String = row.get("participants_json")?;
     let label_ids_json: String = row.get("label_ids_json")?;
     Ok(ThreadSummary {
+        account_id: AccountId::new(row.get::<_, String>("account_id")?),
         id: ThreadId::new(row.get::<_, String>("id")?),
         subject: row.get("subject")?,
         snippet: row.get("snippet")?,
@@ -458,6 +543,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
     Ok(Message {
+        account_id: AccountId::new(row.get::<_, String>("account_id")?),
         id: MessageId::new(row.get::<_, String>("id")?),
         thread_id: ThreadId::new(row.get::<_, String>("thread_id")?),
         from: row.get("from_addr")?,
@@ -480,6 +566,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
 fn row_to_label(row: &Row) -> rusqlite::Result<Label> {
     let label_type: String = row.get("type")?;
     Ok(Label {
+        account_id: AccountId::new(row.get::<_, String>("account_id")?),
         id: LabelId::new(row.get::<_, String>("id")?),
         name: row.get("name")?,
         system: label_type == "system",
@@ -493,6 +580,7 @@ fn row_to_draft(row: &Row) -> rusqlite::Result<Draft> {
     let cc_addrs: String = row.get("cc_addrs")?;
     let bcc_addrs: String = row.get("bcc_addrs")?;
     Ok(Draft {
+        account_id: AccountId::new(row.get::<_, String>("account_id")?),
         id: DraftId::new(row.get::<_, String>("id")?),
         gmail_draft_id: row.get("gmail_draft_id")?,
         thread_id: row
@@ -515,6 +603,7 @@ fn row_to_outbox(row: &Row) -> CoreResult<OutboxOp> {
     let kind: OutboxOpKind = serde_json::from_str(&payload_json)?;
     Ok(OutboxOp {
         id: row.get("id").map_err(map_err)?,
+        account_id: AccountId::new(row.get::<_, String>("account_id").map_err(map_err)?),
         op_id: OpId(row.get::<_, String>("op_id").map_err(map_err)?),
         kind,
         created_at: ms_to_dt(row.get("created_at").map_err(map_err)?),
@@ -525,21 +614,35 @@ fn row_to_outbox(row: &Row) -> CoreResult<OutboxOp> {
 
 #[async_trait]
 impl MailStore for SqliteStore {
-    async fn get_thread(&self, id: &ThreadId) -> CoreResult<Option<ThreadSummary>> {
+    async fn get_thread(
+        &self,
+        scope: &AccountScope,
+        id: &ThreadId,
+    ) -> CoreResult<Option<ThreadSummary>> {
         let pool = self.pool.clone();
         let id = id.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
         spawn_blocking(move || -> CoreResult<Option<ThreadSummary>> {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, subject, snippet, participants_json, last_message_at,
+                    "SELECT account_id, id, subject, snippet, participants_json, last_message_at,
                             message_count, unread, starred, label_ids_json
-                     FROM threads WHERE id = ?1",
+                     FROM threads
+                     WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
+                     LIMIT 2",
                 )
                 .map_err(map_err)?;
-            stmt.query_row(params![id.as_str()], row_to_thread)
-                .optional()
-                .map_err(map_err)
+            let mut rows = stmt
+                .query_map(params![id.as_str(), account], row_to_thread)
+                .map_err(map_err)?;
+            let first = rows.next().transpose().map_err(map_err)?;
+            if rows.next().transpose().map_err(map_err)?.is_some() {
+                return Err(CoreError::InvalidAction(format!(
+                    "thread {id} exists in multiple accounts; choose one account"
+                )));
+            }
+            Ok(first)
         })
         .await
         .map_err(map_err)?
@@ -547,11 +650,13 @@ impl MailStore for SqliteStore {
 
     async fn list_threads_in_label(
         &self,
+        scope: &AccountScope,
         label: &LabelId,
         limit: u32,
     ) -> CoreResult<Vec<ThreadSummary>> {
         let pool = self.pool.clone();
         let label = label.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
         spawn_blocking(move || -> CoreResult<Vec<ThreadSummary>> {
             let conn = pool.get().map_err(map_err)?;
             // Filter via JSON containment. With label-id strings always quoted
@@ -559,16 +664,17 @@ impl MailStore for SqliteStore {
             let needle = format!("\"{}\"", label.as_str());
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, subject, snippet, participants_json, last_message_at,
+                    "SELECT account_id, id, subject, snippet, participants_json, last_message_at,
                             message_count, unread, starred, label_ids_json
                      FROM threads
                      WHERE label_ids_json LIKE '%' || ?1 || '%'
+                       AND (?2 IS NULL OR account_id = ?2)
                      ORDER BY last_message_at DESC
-                     LIMIT ?2",
+                     LIMIT ?3",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![needle, limit as i64], row_to_thread)
+                .query_map(params![needle, account, limit as i64], row_to_thread)
                 .map_err(map_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_err)?;
@@ -578,21 +684,32 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn list_messages_in_thread(&self, id: &ThreadId) -> CoreResult<Vec<Message>> {
+    async fn list_messages_in_thread(
+        &self,
+        scope: &AccountScope,
+        id: &ThreadId,
+    ) -> CoreResult<Vec<Message>> {
+        let thread = self.get_thread(scope, id).await?;
+        let Some(thread) = thread else {
+            return Ok(Vec::new());
+        };
         let pool = self.pool.clone();
         let id = id.clone();
+        let account = thread.account_id;
         spawn_blocking(move || -> CoreResult<Vec<Message>> {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
+                    "SELECT account_id, id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
                             subject, snippet, body_plain, body_html, label_ids_json,
                             fetched_full, inline_images_json
-                     FROM messages WHERE thread_id = ?1 ORDER BY internal_date",
+                     FROM messages
+                     WHERE account_id = ?1 AND thread_id = ?2
+                     ORDER BY internal_date",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![id.as_str()], row_to_message)
+                .query_map(params![account.as_str(), id.as_str()], row_to_message)
                 .map_err(map_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_err)?;
@@ -602,8 +719,14 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn search_threads(&self, query: &str, limit: u32) -> CoreResult<Vec<ThreadSummary>> {
+    async fn search_threads(
+        &self,
+        scope: &AccountScope,
+        query: &str,
+        limit: u32,
+    ) -> CoreResult<Vec<ThreadSummary>> {
         let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
         // FTS5 treats `-`, `:`, `"`, `*` and `()` as operators. For now we
         // treat the user's input as literal text by wrapping in a phrase
         // (doubled-quote escaping). When we add a real advanced-search
@@ -613,19 +736,20 @@ impl MailStore for SqliteStore {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT t.id, t.subject, t.snippet, t.participants_json, t.last_message_at,
+                    "SELECT t.account_id, t.id, t.subject, t.snippet, t.participants_json, t.last_message_at,
                             t.message_count, t.unread, t.starred, t.label_ids_json
                      FROM messages_fts f
                      JOIN messages m ON m.rowid = f.rowid
-                     JOIN threads t  ON t.id    = m.thread_id
+                     JOIN threads t ON t.account_id = m.account_id AND t.id = m.thread_id
                      WHERE messages_fts MATCH ?1
-                     GROUP BY t.id
+                       AND (?2 IS NULL OR t.account_id = ?2)
+                     GROUP BY t.account_id, t.id
                      ORDER BY MAX(t.last_message_at) DESC
-                     LIMIT ?2",
+                     LIMIT ?3",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![&query, limit as i64], row_to_thread)
+                .query_map(params![&query, account, limit as i64], row_to_thread)
                 .map_err(map_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_err)?;
@@ -635,8 +759,14 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn apply_thread_mutation(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64> {
+    async fn apply_thread_mutation(
+        &self,
+        scope: &AccountScope,
+        op_id: &OpId,
+        kind: &OutboxOpKind,
+    ) -> CoreResult<i64> {
         let pool = self.pool.clone();
+        let selected_account = scope.account().cloned();
         let op_id = op_id.clone();
         let kind = kind.clone();
         spawn_blocking(move || -> CoreResult<i64> {
@@ -659,18 +789,59 @@ impl MailStore for SqliteStore {
             };
             let mut conn = pool.get().map_err(map_err)?;
             let tx = conn.transaction().map_err(map_err)?;
+            let account = match selected_account {
+                Some(account) => account,
+                None => {
+                    let mut resolved: Option<AccountId> = None;
+                    for tid in thread_ids {
+                        let mut stmt = tx
+                            .prepare_cached(
+                                "SELECT account_id FROM threads WHERE id = ?1 LIMIT 2",
+                            )
+                            .map_err(map_err)?;
+                        let accounts = stmt
+                            .query_map(params![tid.as_str()], |row| row.get::<_, String>(0))
+                            .map_err(map_err)?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .map_err(map_err)?;
+                        if accounts.len() != 1 {
+                            return Err(CoreError::InvalidAction(format!(
+                                "thread {tid} is missing or exists in multiple accounts; choose one account"
+                            )));
+                        }
+                        let candidate = AccountId::new(accounts[0].clone());
+                        if resolved
+                            .as_ref()
+                            .is_some_and(|existing| existing != &candidate)
+                        {
+                            return Err(CoreError::InvalidAction(
+                                "mutation spans multiple accounts; choose one account".into(),
+                            ));
+                        }
+                        resolved = Some(candidate);
+                    }
+                    resolved.ok_or_else(|| {
+                        CoreError::InvalidAction("mutation has no target account".into())
+                    })?
+                }
+            };
             for tid in thread_ids {
                 let current_json: Option<String> = tx
                     .query_row(
-                        "SELECT label_ids_json FROM threads WHERE id = ?1",
-                        params![tid.as_str()],
+                        "SELECT label_ids_json FROM threads
+                         WHERE account_id = ?1 AND id = ?2",
+                        params![account.as_str(), tid.as_str()],
                         |r| r.get(0),
                     )
                     .optional()
                     .map_err(map_err)?;
                 let mut labels: Vec<LabelId> = match current_json {
                     Some(s) => serde_json::from_str(&s).unwrap_or_default(),
-                    None => continue,
+                    None => {
+                        return Err(CoreError::NotFound(format!(
+                            "thread {tid} in account {account}"
+                        )))
+                    }
                 };
                 for r in remove {
                     labels.retain(|l| l != r);
@@ -686,12 +857,13 @@ impl MailStore for SqliteStore {
                 tx.execute(
                     "UPDATE threads
                      SET label_ids_json = ?1, unread = ?2, starred = ?3, updated_at = ?4
-                     WHERE id = ?5",
+                     WHERE account_id = ?5 AND id = ?6",
                     params![
                         labels_json,
                         unread as i64,
                         starred as i64,
                         Utc::now().timestamp_millis(),
+                        account.as_str(),
                         tid.as_str()
                     ],
                 )
@@ -701,9 +873,11 @@ impl MailStore for SqliteStore {
             let kind_name = outbox_kind_name(&kind);
             let payload_json = serde_json::to_string(&kind)?;
             tx.execute(
-                "INSERT INTO outbox (op_id, op_kind, payload_json, created_at, attempts, state)
-                 VALUES (?1, ?2, ?3, ?4, 0, 'pending')",
+                "INSERT INTO outbox
+                   (account_id, op_id, op_kind, payload_json, created_at, attempts, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 'pending')",
                 params![
+                    account.as_str(),
                     op_id.0,
                     kind_name,
                     payload_json,
@@ -719,18 +893,21 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn list_labels(&self) -> CoreResult<Vec<Label>> {
+    async fn list_labels(&self, scope: &AccountScope) -> CoreResult<Vec<Label>> {
         let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
         spawn_blocking(move || -> CoreResult<Vec<Label>> {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, name, type, color, unread_count, total_count
-                     FROM labels ORDER BY name",
+                    "SELECT account_id, id, name, type, color, unread_count, total_count
+                     FROM labels
+                     WHERE ?1 IS NULL OR account_id = ?1
+                     ORDER BY account_id, name",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map([], row_to_label)
+                .query_map(params![account], row_to_label)
                 .map_err(map_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_err)?;
@@ -740,19 +917,20 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn get_draft(&self, id: &DraftId) -> CoreResult<Option<Draft>> {
+    async fn get_draft(&self, account: &AccountId, id: &DraftId) -> CoreResult<Option<Draft>> {
         let pool = self.pool.clone();
+        let account = account.clone();
         let id = id.clone();
         spawn_blocking(move || -> CoreResult<Option<Draft>> {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, gmail_draft_id, thread_id, in_reply_to_message_id,
+                    "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
                             to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at
-                     FROM drafts WHERE id = ?1",
+                     FROM drafts WHERE account_id = ?1 AND id = ?2",
                 )
                 .map_err(map_err)?;
-            stmt.query_row(params![id.as_str()], row_to_draft)
+            stmt.query_row(params![account.as_str(), id.as_str()], row_to_draft)
                 .optional()
                 .map_err(map_err)
         })
@@ -766,11 +944,11 @@ impl MailStore for SqliteStore {
         spawn_blocking(move || -> CoreResult<()> {
             let conn = pool.get().map_err(map_err)?;
             conn.execute(
-                "INSERT INTO drafts (id, gmail_draft_id, thread_id, in_reply_to_message_id,
+                "INSERT INTO drafts (account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
                                      to_addrs, cc_addrs, bcc_addrs, subject, body_md,
                                      updated_at, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'draft')
-                 ON CONFLICT(id) DO UPDATE SET
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'draft')
+                 ON CONFLICT(account_id, id) DO UPDATE SET
                    gmail_draft_id         = excluded.gmail_draft_id,
                    thread_id              = excluded.thread_id,
                    in_reply_to_message_id = excluded.in_reply_to_message_id,
@@ -781,6 +959,7 @@ impl MailStore for SqliteStore {
                    body_md                = excluded.body_md,
                    updated_at             = excluded.updated_at",
                 params![
+                    draft.account_id.as_str(),
                     draft.id.as_str(),
                     draft.gmail_draft_id,
                     draft.thread_id.as_ref().map(|t| t.as_str().to_string()),
@@ -803,30 +982,42 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn delete_draft_local(&self, id: &DraftId) -> CoreResult<()> {
+    async fn delete_draft_local(&self, account: &AccountId, id: &DraftId) -> CoreResult<()> {
         let pool = self.pool.clone();
+        let account = account.clone();
         let id = id.clone();
         spawn_blocking(move || -> CoreResult<()> {
             let conn = pool.get().map_err(map_err)?;
-            conn.execute("DELETE FROM drafts WHERE id = ?1", params![id.as_str()])
-                .map_err(map_err)?;
+            conn.execute(
+                "DELETE FROM drafts WHERE account_id = ?1 AND id = ?2",
+                params![account.as_str(), id.as_str()],
+            )
+            .map_err(map_err)?;
             Ok(())
         })
         .await
         .map_err(map_err)?
     }
 
-    async fn enqueue_outbox(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64> {
+    async fn enqueue_outbox(
+        &self,
+        account: &AccountId,
+        op_id: &OpId,
+        kind: &OutboxOpKind,
+    ) -> CoreResult<i64> {
         let pool = self.pool.clone();
+        let account = account.clone();
         let op_id = op_id.clone();
         let kind_name = outbox_kind_name(kind);
         let payload_json = serde_json::to_string(kind)?;
         spawn_blocking(move || -> CoreResult<i64> {
             let conn = pool.get().map_err(map_err)?;
             conn.execute(
-                "INSERT INTO outbox (op_id, op_kind, payload_json, created_at, attempts, state)
-                 VALUES (?1, ?2, ?3, ?4, 0, 'pending')",
+                "INSERT INTO outbox
+                   (account_id, op_id, op_kind, payload_json, created_at, attempts, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 'pending')",
                 params![
+                    account.as_str(),
                     op_id.0,
                     kind_name,
                     payload_json,
@@ -840,18 +1031,26 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn drain_pending_outbox(&self, max: u32) -> CoreResult<Vec<OutboxOp>> {
+    async fn drain_pending_outbox(
+        &self,
+        account: &AccountId,
+        max: u32,
+    ) -> CoreResult<Vec<OutboxOp>> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> CoreResult<Vec<OutboxOp>> {
             let conn = pool.get().map_err(map_err)?;
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, op_id, op_kind, payload_json, created_at, attempts, last_error
-                     FROM outbox WHERE state = 'pending' ORDER BY id LIMIT ?1",
+                    "SELECT id FROM outbox
+                     WHERE account_id = ?1 AND state = 'pending'
+                     ORDER BY id LIMIT ?2",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![max as i64], |r| r.get::<_, i64>("id"))
+                .query_map(params![account.as_str(), max as i64], |r| {
+                    r.get::<_, i64>("id")
+                })
                 .map_err(map_err)?;
             // We can't easily return CoreResult from query_map's closure, so
             // collect rowids first, then re-fetch with our deserializing helper.
@@ -863,7 +1062,8 @@ impl MailStore for SqliteStore {
             let mut out = Vec::with_capacity(ids.len());
             let mut detail = conn
                 .prepare_cached(
-                    "SELECT id, op_id, op_kind, payload_json, created_at, attempts, last_error
+                    "SELECT id, account_id, op_id, op_kind, payload_json, created_at,
+                            attempts, last_error
                      FROM outbox WHERE id = ?1",
                 )
                 .map_err(map_err)?;
@@ -923,14 +1123,15 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn get_history_cursor(&self) -> CoreResult<Option<u64>> {
+    async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> CoreResult<Option<u64>> {
             let conn = pool.get().map_err(map_err)?;
             let cur: Option<i64> = conn
                 .query_row(
-                    "SELECT history_id FROM sync_state WHERE account_id = 'default'",
-                    [],
+                    "SELECT history_id FROM sync_state WHERE account_id = ?1",
+                    params![account.as_str()],
                     |r| r.get(0),
                 )
                 .optional()
@@ -941,17 +1142,22 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn set_history_cursor(&self, cursor: u64) -> CoreResult<()> {
+    async fn set_history_cursor(&self, account: &AccountId, cursor: u64) -> CoreResult<()> {
         let pool = self.pool.clone();
+        let account = account.clone();
         spawn_blocking(move || -> CoreResult<()> {
             let conn = pool.get().map_err(map_err)?;
             conn.execute(
                 "INSERT INTO sync_state (account_id, history_id, last_incremental_at)
-                 VALUES ('default', ?1, ?2)
+                 VALUES (?1, ?2, ?3)
                  ON CONFLICT(account_id) DO UPDATE SET
                    history_id          = excluded.history_id,
                    last_incremental_at = excluded.last_incremental_at",
-                params![cursor as i64, Utc::now().timestamp_millis()],
+                params![
+                    account.as_str(),
+                    cursor as i64,
+                    Utc::now().timestamp_millis()
+                ],
             )
             .map_err(map_err)?;
             Ok(())
@@ -968,16 +1174,36 @@ mod tests {
     use mach_core::{action::Action, dispatcher::Dispatcher};
     use std::sync::Arc;
 
+    fn account() -> AccountId {
+        AccountId::new("test@example.com")
+    }
+
+    fn scope() -> AccountScope {
+        AccountScope::One(account())
+    }
+
     fn seed(pool: &DbPool, id: &str, subject: &str, body: &str, labels: &[&str]) {
+        seed_for(pool, &account(), id, subject, body, labels);
+    }
+
+    fn seed_for(
+        pool: &DbPool,
+        account: &AccountId,
+        id: &str,
+        subject: &str,
+        body: &str,
+        labels: &[&str],
+    ) {
         let conn = pool.get().unwrap();
         let labels_json = serde_json::to_string(&labels.to_vec()).unwrap();
         let now = Utc::now().timestamp_millis();
         conn.execute(
-            "INSERT INTO threads (id, history_id, snippet, subject, participants_json,
+            "INSERT INTO threads (account_id, id, history_id, snippet, subject, participants_json,
                                   last_message_at, message_count, unread, starred,
                                   label_ids_json, updated_at)
-             VALUES (?1, 1, ?2, ?3, '[]', ?4, 1, ?5, ?6, ?7, ?4)",
+             VALUES (?1, ?2, 1, ?3, ?4, '[]', ?5, 1, ?6, ?7, ?8, ?5)",
             params![
+                account.as_str(),
                 id,
                 body,
                 subject,
@@ -989,11 +1215,20 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages (id, thread_id, history_id, internal_date, from_addr,
+            "INSERT INTO messages (account_id, id, thread_id, history_id, internal_date, from_addr,
                                    to_addrs, subject, snippet, body_plain, label_ids_json,
                                    fetched_full)
-             VALUES (?1, ?2, 1, ?3, 'alice@example.com', '[\"me@example.com\"]', ?4, ?5, ?6, ?7, 1)",
-            params![format!("{id}-m"), id, now, subject, body, body, labels_json],
+             VALUES (?1, ?2, ?3, 1, ?4, 'alice@example.com', '[\"me@example.com\"]', ?5, ?6, ?7, ?8, 1)",
+            params![
+                account.as_str(),
+                format!("{id}-m"),
+                id,
+                now,
+                subject,
+                body,
+                body,
+                labels_json
+            ],
         )
         .unwrap();
     }
@@ -1003,7 +1238,7 @@ mod tests {
         let pool = open_in_memory().unwrap();
         seed(&pool, "t1", "hello", "hi there", &["INBOX", "UNREAD"]);
         let store = Arc::new(SqliteStore::new(pool.clone()));
-        let dispatcher = Dispatcher::new(store.clone());
+        let dispatcher = Dispatcher::with_scope(store.clone(), scope());
 
         let outcome = dispatcher
             .execute(Action::Archive {
@@ -1014,14 +1249,14 @@ mod tests {
         assert!(outcome.op_id.is_some());
 
         let t = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&scope(), &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();
         assert!(!t.label_ids.iter().any(|l| l.as_str() == "INBOX"));
 
         // Outbox got the op for the sync engine.
-        let pending = store.drain_pending_outbox(10).await.unwrap();
+        let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert!(matches!(pending[0].kind, OutboxOpKind::ModifyLabels { .. }));
     }
@@ -1041,7 +1276,7 @@ mod tests {
             .unwrap();
 
         let store = Arc::new(SqliteStore::new(pool));
-        let dispatcher = Dispatcher::new(store.clone());
+        let dispatcher = Dispatcher::with_scope(store.clone(), scope());
         let result = dispatcher
             .execute(Action::Archive {
                 thread_ids: vec![ThreadId::new("t1")],
@@ -1050,7 +1285,7 @@ mod tests {
         assert!(result.is_err());
 
         let thread = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&scope(), &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();
@@ -1071,16 +1306,22 @@ mod tests {
             color: None,
         };
 
-        store.upsert_labels(vec![label.clone()]).await.unwrap();
         store
-            .upsert_labels(vec![LabelUpsert {
-                name: "Primary inbox".into(),
-                ..label
-            }])
+            .upsert_labels(&account(), vec![label.clone()])
+            .await
+            .unwrap();
+        store
+            .upsert_labels(
+                &account(),
+                vec![LabelUpsert {
+                    name: "Primary inbox".into(),
+                    ..label
+                }],
+            )
             .await
             .unwrap();
 
-        let labels = store.list_labels().await.unwrap();
+        let labels = store.list_labels(&scope()).await.unwrap();
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].name, "Primary inbox");
     }
@@ -1091,16 +1332,19 @@ mod tests {
         seed(&pool, "t1", "hello", "hi there", &["INBOX"]);
         let store = SqliteStore::new(pool);
 
-        store.delete_messages(vec!["t1-m".into()]).await.unwrap();
+        store
+            .delete_messages(&account(), vec!["t1-m".into()])
+            .await
+            .unwrap();
         assert!(store
-            .list_messages_in_thread(&ThreadId::new("t1"))
+            .list_messages_in_thread(&scope(), &ThreadId::new("t1"))
             .await
             .unwrap()
             .is_empty());
 
-        store.delete_thread("t1".into()).await.unwrap();
+        store.delete_thread(&account(), "t1".into()).await.unwrap();
         assert!(store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&scope(), &ThreadId::new("t1"))
             .await
             .unwrap()
             .is_none());
@@ -1119,7 +1363,10 @@ mod tests {
         seed(&pool, "t2", "Lunch?", "Sushi or salad.", &["INBOX"]);
 
         let store = SqliteStore::new(pool);
-        let hits = store.search_threads("quarterly", 10).await.unwrap();
+        let hits = store
+            .search_threads(&scope(), "quarterly", 10)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id.as_str(), "t1");
     }
@@ -1131,6 +1378,7 @@ mod tests {
         let op_id = OpId::new();
         let id = store
             .enqueue_outbox(
+                &account(),
                 &op_id,
                 &OutboxOpKind::ModifyLabels {
                     thread_ids: vec![ThreadId::new("t1")],
@@ -1142,12 +1390,12 @@ mod tests {
             .unwrap();
         assert!(id > 0);
 
-        let pending = store.drain_pending_outbox(10).await.unwrap();
+        let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].op_id, op_id);
 
         store.mark_outbox_done(id).await.unwrap();
-        let pending = store.drain_pending_outbox(10).await.unwrap();
+        let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert!(pending.is_empty());
     }
 
@@ -1155,11 +1403,21 @@ mod tests {
     async fn history_cursor_persists() {
         let pool = open_in_memory().unwrap();
         let store = SqliteStore::new(pool);
-        assert!(store.get_history_cursor().await.unwrap().is_none());
-        store.set_history_cursor(12345).await.unwrap();
-        assert_eq!(store.get_history_cursor().await.unwrap(), Some(12345));
-        store.set_history_cursor(99999).await.unwrap();
-        assert_eq!(store.get_history_cursor().await.unwrap(), Some(99999));
+        assert!(store
+            .get_history_cursor(&account())
+            .await
+            .unwrap()
+            .is_none());
+        store.set_history_cursor(&account(), 12345).await.unwrap();
+        assert_eq!(
+            store.get_history_cursor(&account()).await.unwrap(),
+            Some(12345)
+        );
+        store.set_history_cursor(&account(), 99999).await.unwrap();
+        assert_eq!(
+            store.get_history_cursor(&account()).await.unwrap(),
+            Some(99999)
+        );
     }
 
     #[tokio::test]
@@ -1171,16 +1429,147 @@ mod tests {
 
         let store = SqliteStore::new(pool);
         let inbox = store
-            .list_threads_in_label(&LabelId::new("INBOX"), 10)
+            .list_threads_in_label(&scope(), &LabelId::new("INBOX"), 10)
             .await
             .unwrap();
         assert_eq!(inbox.len(), 2);
 
         let starred = store
-            .list_threads_in_label(&LabelId::new("STARRED"), 10)
+            .list_threads_in_label(&scope(), &LabelId::new("STARRED"), 10)
             .await
             .unwrap();
         assert_eq!(starred.len(), 1);
         assert_eq!(starred[0].id.as_str(), "t2");
+    }
+
+    #[tokio::test]
+    async fn unified_reads_merge_accounts_and_qualified_reads_disambiguate_ids() {
+        let pool = open_in_memory().unwrap();
+        let first = AccountId::new("first@example.com");
+        let second = AccountId::new("second@example.com");
+        seed_for(
+            &pool,
+            &first,
+            "shared-id",
+            "First mailbox",
+            "one",
+            &["INBOX"],
+        );
+        seed_for(
+            &pool,
+            &second,
+            "shared-id",
+            "Second mailbox",
+            "two",
+            &["INBOX"],
+        );
+        let store = SqliteStore::new(pool);
+
+        let unified = store
+            .list_threads_in_label(&AccountScope::All, &LabelId::new("INBOX"), 10)
+            .await
+            .unwrap();
+        assert_eq!(unified.len(), 2);
+        assert!(store
+            .get_thread(&AccountScope::All, &ThreadId::new("shared-id"))
+            .await
+            .is_err());
+
+        let selected = store
+            .get_thread(
+                &AccountScope::One(second.clone()),
+                &ThreadId::new("shared-id"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.account_id, second);
+        assert_eq!(selected.subject, "Second mailbox");
+    }
+
+    #[tokio::test]
+    async fn scoped_mutation_and_outbox_never_cross_accounts() {
+        let pool = open_in_memory().unwrap();
+        let first = AccountId::new("first@example.com");
+        let second = AccountId::new("second@example.com");
+        seed_for(&pool, &first, "shared-id", "First", "one", &["INBOX"]);
+        seed_for(&pool, &second, "shared-id", "Second", "two", &["INBOX"]);
+        let store = Arc::new(SqliteStore::new(pool));
+        let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(first.clone()));
+
+        dispatcher
+            .execute(Action::Archive {
+                thread_ids: vec![ThreadId::new("shared-id")],
+            })
+            .await
+            .unwrap();
+
+        let archived = store
+            .get_thread(
+                &AccountScope::One(first.clone()),
+                &ThreadId::new("shared-id"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let untouched = store
+            .get_thread(
+                &AccountScope::One(second.clone()),
+                &ThreadId::new("shared-id"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!archived.label_ids.contains(&LabelId::new("INBOX")));
+        assert!(untouched.label_ids.contains(&LabelId::new("INBOX")));
+        assert_eq!(
+            store.drain_pending_outbox(&first, 10).await.unwrap().len(),
+            1
+        );
+        assert!(store
+            .drain_pending_outbox(&second, 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_cursors_are_independent_per_account() {
+        let store = SqliteStore::new(open_in_memory().unwrap());
+        let first = AccountId::new("first@example.com");
+        let second = AccountId::new("second@example.com");
+        store.set_history_cursor(&first, 10).await.unwrap();
+        store.set_history_cursor(&second, 20).await.unwrap();
+        assert_eq!(store.get_history_cursor(&first).await.unwrap(), Some(10));
+        assert_eq!(store.get_history_cursor(&second).await.unwrap(), Some(20));
+    }
+
+    #[tokio::test]
+    async fn legacy_rows_are_claimed_by_the_first_account() {
+        let pool = open_in_memory().unwrap();
+        let legacy = AccountId::new("__legacy__");
+        seed_for(&pool, &legacy, "t1", "Legacy", "body", &["INBOX"]);
+        let store = SqliteStore::new(pool);
+        let account = AccountId::new("owner@example.com");
+
+        store.claim_legacy_account(&account).await.unwrap();
+
+        let claimed = store
+            .get_thread(&AccountScope::One(account.clone()), &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.account_id, account);
+        assert_eq!(
+            store
+                .list_messages_in_thread(
+                    &AccountScope::One(claimed.account_id.clone()),
+                    &ThreadId::new("t1"),
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

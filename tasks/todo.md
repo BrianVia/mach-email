@@ -12,7 +12,7 @@ Status legend: ✅ done · 🔄 in progress · ⏳ pending · ❌ dropped.
 - ✅ **SQLite store** — STRICT tables, WAL, FTS5, refinery migrations.
 
 ### Gmail integration
-- ✅ **OAuth installed-app flow** — PKCE, loopback redirect, file-based credentials (`~/Library/Application Support/com.via.mach/credentials.json`, mode 0600).
+- ✅ **OAuth installed-app flow** — PKCE, loopback redirect, per-account file-based credentials in the platform app-data `accounts/` directory (mode 0600).
 - ✅ **HTTP client** — gzip, rustls, proactive token refresh, 401 retry.
 - ✅ **Bootstrap** — snapshots historyId, fetches labels + last-30-days threads (10x parallel).
 - ✅ **Body backfill (Milestone P)** — lazy `format=full` fetch on first thread open, MIME walker handles padded/unpadded base64url, falls back to `html2text` for HTML-only messages.
@@ -52,7 +52,7 @@ they emerge from feedback. They aren't blocking the v0.1 ship.
 
 ### Sync robustness
 - ⏳ **Echo suppression**: tag history events whose net effect matches a recent (<60s) own `op_id` and drop them. Prevents UI flicker after archive.
-- ⏳ **Auto re-auth on `invalid_grant`**: detect refresh failure → blow away `credentials.json` → auto-pop browser for re-login. Surface a "refresh token expires in <N>h" status pill 18h before due.
+- ⏳ **Auto re-auth on `invalid_grant`**: detect refresh failure → remove that account's credential file → auto-pop browser for re-login. Surface a "refresh token expires in <N>h" status pill 18h before due.
 - ⏳ **Periodic sync in TUI/Desktop**: background tokio task that fires `mach sync` equivalent every 60s; right now the user runs `mach sync` manually.
 - ⏳ **List-Unsubscribe**: parse the header → `unsubscribe` action.
 
@@ -63,7 +63,8 @@ they emerge from feedback. They aren't blocking the v0.1 ship.
 - ⏳ **HTML→Markdown round-trip for replies**.
 
 ### UX
-- ⏳ **Multi-account**.
+- ✅ **Multi-account**: additive OAuth logins, per-account sync/cursors/outbox,
+  unified inbox/search, and `--account <email>` filtering.
 - ⏳ **Pub/Sub watch** for push notifications (vs polling).
 - ⏳ **Calendar / contacts** integration.
 - ⏳ **Theme system**: ship 2-3 themes, not just one light + dark.
@@ -79,7 +80,7 @@ they emerge from feedback. They aren't blocking the v0.1 ship.
 - ⏳ **Fallback to remote `users.messages.list?q=` for older mail** beyond the 30-day cache window.
 
 ### Bug fixes discovered along the way
-- ✅ **keyring 3.x silently drops writes** on unsigned macOS binaries — switched to file storage at `credentials.json` (mode 0600). Documented in `crates/mach-gmail/src/credentials.rs`.
+- ✅ **keyring 3.x silently drops writes** on unsigned macOS binaries — switched to per-account file storage (mode 0600). Documented in `crates/mach-gmail/src/credentials.rs`.
 - ✅ **Gmail body base64 has padding sometimes** — original `URL_SAFE_NO_PAD` rejected it. Switched to `Indifferent` padding mode.
 - ✅ **FTS5 interpreted `-` as NOT operator** on hyphenated user queries — wrapped queries in `"…"` for literal-phrase matching.
 - ✅ **`open_thread` returned empty data** — was a TUI navigation action only; now populates `data: { thread, messages }` for CLI/MCP.
@@ -90,6 +91,6 @@ they emerge from feedback. They aren't blocking the v0.1 ship.
 
 - Desktop frontend: **SolidJS** (vs React; the VDOM cost matters at 16ms).
 - Default keymap: **Superhuman bindings** lifted verbatim; user can override per-binding.
-- Storage: file-backed `credentials.json` at OS data dir, mode 0600. (Keyring 3.x silently fails on unsigned macOS binaries.)
+- Storage: one file per account under the OS app-data `accounts/` directory, mode 0600. (Keyring 3.x silently fails on unsigned macOS binaries.)
 - Same SQLite DB shared across all surfaces (WAL handles concurrent processes).
 - One unified `Action` enum drives TUI / CLI / Desktop / MCP. Adding a feature = one variant + one dispatcher arm + one keymap binding.

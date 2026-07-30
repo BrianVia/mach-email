@@ -12,6 +12,10 @@ mod runtime;
 #[derive(Parser, Debug)]
 #[command(name = "mach", version, about, long_about = None)]
 struct Cli {
+    /// Limit reads and actions to one Gmail account. Omit for the unified inbox.
+    #[arg(long, global = true)]
+    account: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -48,10 +52,14 @@ enum Command {
 enum AuthCommand {
     /// Run the installed-app OAuth flow and store credentials in the app data directory.
     Login,
-    /// Print the active account and token expiry.
+    /// Print stored accounts and token expiry.
     Status,
     /// Forget stored credentials.
-    Logout,
+    Logout {
+        /// Remove every stored Gmail login.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[tokio::main]
@@ -66,15 +74,20 @@ async fn main() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
+    let account = cli.account.as_deref();
     match cli.command {
-        None => commands::tui::run().await,
-        Some(Command::Do { action }) => commands::do_cmd::run(&action).await,
-        Some(Command::Mcp) => commands::mcp::run().await,
+        None => commands::tui::run(account).await,
+        Some(Command::Do { action }) => commands::do_cmd::run(&action, account).await,
+        Some(Command::Mcp) => commands::mcp::run(account).await,
         Some(Command::Auth(AuthCommand::Login)) => commands::auth::login().await,
-        Some(Command::Auth(AuthCommand::Status)) => commands::auth::status().await,
-        Some(Command::Auth(AuthCommand::Logout)) => commands::auth::logout().await,
-        Some(Command::Sync { bootstrap }) => commands::sync::run(bootstrap).await,
-        Some(Command::Doctor { simulate_gap }) => commands::doctor::run(simulate_gap).await,
+        Some(Command::Auth(AuthCommand::Status)) => commands::auth::status(account).await,
+        Some(Command::Auth(AuthCommand::Logout { all })) => {
+            commands::auth::logout(account, all).await
+        }
+        Some(Command::Sync { bootstrap }) => commands::sync::run(bootstrap, account).await,
+        Some(Command::Doctor { simulate_gap }) => {
+            commands::doctor::run(simulate_gap, account).await
+        }
     }
 }
 

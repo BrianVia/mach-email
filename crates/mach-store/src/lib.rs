@@ -81,6 +81,7 @@ fn run_migrations(pool: &DbPool) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refinery::Target;
 
     #[test]
     fn migrations_create_expected_tables() {
@@ -105,5 +106,81 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_fts, 1, "messages_fts virtual table missing");
+    }
+
+    #[test]
+    fn v3_data_migrates_to_account_qualified_v4_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pragmas_memory(&mut conn).unwrap();
+        embedded::migrations::runner()
+            .set_target(Target::Version(3))
+            .run(&mut conn)
+            .unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO threads (
+                 id, history_id, snippet, subject, participants_json,
+                 last_message_at, message_count, unread, starred,
+                 label_ids_json, updated_at
+             ) VALUES (
+                 'thread-1', 12, 'migration body', 'Migrated subject', '[]',
+                 1000, 1, 1, 0, '[\"INBOX\"]', 1000
+             );
+             INSERT INTO messages (
+                 id, thread_id, history_id, internal_date, from_addr, to_addrs,
+                 subject, snippet, body_plain, label_ids_json, fetched_full
+             ) VALUES (
+                 'message-1', 'thread-1', 12, 1000, 'sender@example.com', '[]',
+                 'Migrated subject', 'migration body', 'searchable migration body',
+                 '[\"INBOX\"]', 1
+             );
+             INSERT INTO attachments (id, message_id, filename)
+                 VALUES ('attachment-1', 'message-1', 'old.txt');
+             INSERT INTO labels (id, name, type)
+                 VALUES ('INBOX', 'Inbox', 'system');
+             INSERT INTO drafts (id, thread_id, subject, updated_at)
+                 VALUES ('draft-1', 'thread-1', 'Draft', 1000);
+             INSERT INTO send_later (id, draft_id, send_at)
+                 VALUES ('later-1', 'draft-1', 2000);
+             INSERT INTO outbox (id, op_id, op_kind, payload_json, created_at)
+                 VALUES (1, 'op-1', 'archive', '{}', 1000);
+             INSERT INTO sync_state (account_id, history_id)
+                 VALUES ('default', 12);",
+        )
+        .unwrap();
+
+        embedded::migrations::runner().run(&mut conn).unwrap();
+
+        for table in [
+            "threads",
+            "messages",
+            "attachments",
+            "labels",
+            "drafts",
+            "send_later",
+            "outbox",
+            "sync_state",
+        ] {
+            let account: String = conn
+                .query_row(
+                    &format!("SELECT account_id FROM {table} LIMIT 1"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(account, "__legacy__", "{table} lost legacy ownership");
+        }
+
+        let hit: String = conn
+            .query_row(
+                "SELECT m.id
+                 FROM messages_fts
+                 JOIN messages m ON m.rowid = messages_fts.rowid
+                 WHERE messages_fts MATCH 'searchable'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hit, "message-1");
     }
 }

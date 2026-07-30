@@ -44,3 +44,22 @@ string_id!(ThreadId);
 string_id!(MessageId);
 string_id!(LabelId);
 string_id!(DraftId);
+string_id!(AccountId);
+
+/// Selects either the unified mailbox or one concrete Gmail account.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountScope {
+    #[default]
+    All,
+    One(AccountId),
+}
+
+impl AccountScope {
+    pub fn account(&self) -> Option<&AccountId> {
+        match self {
+            Self::All => None,
+            Self::One(account) => Some(account),
+        }
+    }
+}

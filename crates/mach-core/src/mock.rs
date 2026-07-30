@@ -10,7 +10,7 @@ use chrono::Utc;
 
 use crate::action::OpId;
 use crate::error::CoreResult;
-use crate::ids::{DraftId, LabelId, ThreadId};
+use crate::ids::{AccountId, AccountScope, DraftId, LabelId, ThreadId};
 use crate::store::{Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, ThreadSummary};
 
 #[derive(Default)]
@@ -20,13 +20,13 @@ pub struct InMemoryStore {
 
 #[derive(Default)]
 struct Inner {
-    threads: HashMap<ThreadId, ThreadSummary>,
-    messages_by_thread: HashMap<ThreadId, Vec<Message>>,
+    threads: HashMap<(AccountId, ThreadId), ThreadSummary>,
+    messages_by_thread: HashMap<(AccountId, ThreadId), Vec<Message>>,
     labels: Vec<Label>,
-    drafts: HashMap<DraftId, Draft>,
+    drafts: HashMap<(AccountId, DraftId), Draft>,
     outbox: Vec<OutboxOp>,
     next_outbox_id: i64,
-    history_cursor: Option<u64>,
+    history_cursors: HashMap<AccountId, u64>,
 }
 
 impl InMemoryStore {
@@ -39,8 +39,10 @@ impl InMemoryStore {
         let mut inner = self.inner.lock().unwrap();
         inner
             .messages_by_thread
-            .insert(summary.id.clone(), messages);
-        inner.threads.insert(summary.id.clone(), summary);
+            .insert((summary.account_id.clone(), summary.id.clone()), messages);
+        inner
+            .threads
+            .insert((summary.account_id.clone(), summary.id.clone()), summary);
     }
 
     pub fn outbox_snapshot(&self) -> Vec<OutboxOp> {
@@ -50,12 +52,28 @@ impl InMemoryStore {
 
 #[async_trait]
 impl MailStore for InMemoryStore {
-    async fn get_thread(&self, id: &ThreadId) -> CoreResult<Option<ThreadSummary>> {
-        Ok(self.inner.lock().unwrap().threads.get(id).cloned())
+    async fn get_thread(
+        &self,
+        scope: &AccountScope,
+        id: &ThreadId,
+    ) -> CoreResult<Option<ThreadSummary>> {
+        let inner = self.inner.lock().unwrap();
+        let mut matches = inner
+            .threads
+            .values()
+            .filter(|thread| thread.id == *id && scope_matches(scope, &thread.account_id));
+        let result = matches.next().cloned();
+        if matches.next().is_some() {
+            return Err(crate::error::CoreError::InvalidAction(format!(
+                "thread {id} exists in multiple accounts; choose one account"
+            )));
+        }
+        Ok(result)
     }
 
     async fn list_threads_in_label(
         &self,
+        scope: &AccountScope,
         label: &LabelId,
         limit: u32,
     ) -> CoreResult<Vec<ThreadSummary>> {
@@ -63,7 +81,7 @@ impl MailStore for InMemoryStore {
         let mut out: Vec<_> = inner
             .threads
             .values()
-            .filter(|t| t.label_ids.contains(label))
+            .filter(|t| scope_matches(scope, &t.account_id) && t.label_ids.contains(label))
             .cloned()
             .collect();
         out.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
@@ -71,25 +89,40 @@ impl MailStore for InMemoryStore {
         Ok(out)
     }
 
-    async fn list_messages_in_thread(&self, id: &ThreadId) -> CoreResult<Vec<Message>> {
+    async fn list_messages_in_thread(
+        &self,
+        scope: &AccountScope,
+        id: &ThreadId,
+    ) -> CoreResult<Vec<Message>> {
+        let thread = self.get_thread(scope, id).await?;
+        let Some(thread) = thread else {
+            return Ok(Vec::new());
+        };
         Ok(self
             .inner
             .lock()
             .unwrap()
             .messages_by_thread
-            .get(id)
+            .get(&(thread.account_id, id.clone()))
             .cloned()
             .unwrap_or_default())
     }
 
-    async fn search_threads(&self, query: &str, limit: u32) -> CoreResult<Vec<ThreadSummary>> {
+    async fn search_threads(
+        &self,
+        scope: &AccountScope,
+        query: &str,
+        limit: u32,
+    ) -> CoreResult<Vec<ThreadSummary>> {
         let inner = self.inner.lock().unwrap();
         let q = query.to_lowercase();
         let mut out: Vec<_> = inner
             .threads
             .values()
             .filter(|t| {
-                t.subject.to_lowercase().contains(&q) || t.snippet.to_lowercase().contains(&q)
+                scope_matches(scope, &t.account_id)
+                    && (t.subject.to_lowercase().contains(&q)
+                        || t.snippet.to_lowercase().contains(&q))
             })
             .cloned()
             .collect();
@@ -98,7 +131,12 @@ impl MailStore for InMemoryStore {
         Ok(out)
     }
 
-    async fn apply_thread_mutation(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64> {
+    async fn apply_thread_mutation(
+        &self,
+        scope: &AccountScope,
+        op_id: &OpId,
+        kind: &OutboxOpKind,
+    ) -> CoreResult<i64> {
         let (thread_ids, add, remove) = match kind {
             OutboxOpKind::ModifyLabels {
                 thread_ids,
@@ -117,9 +155,10 @@ impl MailStore for InMemoryStore {
             }
         };
 
+        let account = resolve_mutation_account(&self.inner, scope, thread_ids)?;
         let mut inner = self.inner.lock().unwrap();
         for tid in thread_ids {
-            if let Some(t) = inner.threads.get_mut(tid) {
+            if let Some(t) = inner.threads.get_mut(&(account.clone(), tid.clone())) {
                 for r in remove {
                     t.label_ids.retain(|l| l != r);
                 }
@@ -136,6 +175,7 @@ impl MailStore for InMemoryStore {
         let id = inner.next_outbox_id;
         inner.outbox.push(OutboxOp {
             id,
+            account_id: account,
             op_id: op_id.clone(),
             kind: kind.clone(),
             created_at: Utc::now(),
@@ -145,12 +185,26 @@ impl MailStore for InMemoryStore {
         Ok(id)
     }
 
-    async fn list_labels(&self) -> CoreResult<Vec<Label>> {
-        Ok(self.inner.lock().unwrap().labels.clone())
+    async fn list_labels(&self, scope: &AccountScope) -> CoreResult<Vec<Label>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .labels
+            .iter()
+            .filter(|label| scope_matches(scope, &label.account_id))
+            .cloned()
+            .collect())
     }
 
-    async fn get_draft(&self, id: &DraftId) -> CoreResult<Option<Draft>> {
-        Ok(self.inner.lock().unwrap().drafts.get(id).cloned())
+    async fn get_draft(&self, account: &AccountId, id: &DraftId) -> CoreResult<Option<Draft>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .drafts
+            .get(&(account.clone(), id.clone()))
+            .cloned())
     }
 
     async fn save_draft_local(&self, draft: &Draft) -> CoreResult<()> {
@@ -158,21 +212,31 @@ impl MailStore for InMemoryStore {
             .lock()
             .unwrap()
             .drafts
-            .insert(draft.id.clone(), draft.clone());
+            .insert((draft.account_id.clone(), draft.id.clone()), draft.clone());
         Ok(())
     }
 
-    async fn delete_draft_local(&self, id: &DraftId) -> CoreResult<()> {
-        self.inner.lock().unwrap().drafts.remove(id);
+    async fn delete_draft_local(&self, account: &AccountId, id: &DraftId) -> CoreResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .drafts
+            .remove(&(account.clone(), id.clone()));
         Ok(())
     }
 
-    async fn enqueue_outbox(&self, op_id: &OpId, kind: &OutboxOpKind) -> CoreResult<i64> {
+    async fn enqueue_outbox(
+        &self,
+        account: &AccountId,
+        op_id: &OpId,
+        kind: &OutboxOpKind,
+    ) -> CoreResult<i64> {
         let mut inner = self.inner.lock().unwrap();
         inner.next_outbox_id += 1;
         let id = inner.next_outbox_id;
         inner.outbox.push(OutboxOp {
             id,
+            account_id: account.clone(),
             op_id: op_id.clone(),
             kind: kind.clone(),
             created_at: Utc::now(),
@@ -182,9 +246,19 @@ impl MailStore for InMemoryStore {
         Ok(id)
     }
 
-    async fn drain_pending_outbox(&self, max: u32) -> CoreResult<Vec<OutboxOp>> {
+    async fn drain_pending_outbox(
+        &self,
+        account: &AccountId,
+        max: u32,
+    ) -> CoreResult<Vec<OutboxOp>> {
         let inner = self.inner.lock().unwrap();
-        Ok(inner.outbox.iter().take(max as usize).cloned().collect())
+        Ok(inner
+            .outbox
+            .iter()
+            .filter(|op| &op.account_id == account)
+            .take(max as usize)
+            .cloned()
+            .collect())
     }
 
     async fn mark_outbox_done(&self, id: i64) -> CoreResult<()> {
@@ -201,14 +275,65 @@ impl MailStore for InMemoryStore {
         Ok(())
     }
 
-    async fn get_history_cursor(&self) -> CoreResult<Option<u64>> {
-        Ok(self.inner.lock().unwrap().history_cursor)
+    async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .history_cursors
+            .get(account)
+            .copied())
     }
 
-    async fn set_history_cursor(&self, cursor: u64) -> CoreResult<()> {
-        self.inner.lock().unwrap().history_cursor = Some(cursor);
+    async fn set_history_cursor(&self, account: &AccountId, cursor: u64) -> CoreResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .history_cursors
+            .insert(account.clone(), cursor);
         Ok(())
     }
+}
+
+fn scope_matches(scope: &AccountScope, account: &AccountId) -> bool {
+    scope.account().map_or(true, |selected| selected == account)
+}
+
+fn resolve_mutation_account(
+    inner: &Mutex<Inner>,
+    scope: &AccountScope,
+    thread_ids: &[ThreadId],
+) -> CoreResult<AccountId> {
+    if let Some(account) = scope.account() {
+        let inner = inner.lock().unwrap();
+        if thread_ids.iter().any(|thread_id| {
+            !inner
+                .threads
+                .contains_key(&(account.clone(), thread_id.clone()))
+        }) {
+            return Err(crate::error::CoreError::NotFound(format!(
+                "mutation target in account {account}"
+            )));
+        }
+        return Ok(account.clone());
+    }
+    let inner = inner.lock().unwrap();
+    let mut accounts = inner
+        .threads
+        .values()
+        .filter(|thread| thread_ids.contains(&thread.id))
+        .map(|thread| thread.account_id.clone());
+    let Some(account) = accounts.next() else {
+        return Err(crate::error::CoreError::NotFound(
+            "mutation target account".into(),
+        ));
+    };
+    if accounts.any(|candidate| candidate != account) {
+        return Err(crate::error::CoreError::InvalidAction(
+            "mutation spans multiple accounts; choose one account".into(),
+        ));
+    }
+    Ok(account)
 }
 
 #[cfg(test)]
@@ -220,6 +345,7 @@ mod tests {
 
     fn seed_thread(store: &InMemoryStore, id: &str, labels: &[&str]) {
         let summary = ThreadSummary {
+            account_id: AccountId::new("test@example.com"),
             id: ThreadId::new(id),
             subject: format!("subject {id}"),
             snippet: format!("snippet {id}"),
@@ -251,7 +377,7 @@ mod tests {
         assert!(outcome.op_id.is_some());
 
         let thread = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();
@@ -277,7 +403,7 @@ mod tests {
             .unwrap();
 
         let thread = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();
@@ -310,7 +436,7 @@ mod tests {
             .await
             .unwrap();
         let t = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();
@@ -319,7 +445,7 @@ mod tests {
         // Undo → INBOX back.
         dispatcher.execute(Action::Undo).await.unwrap();
         let t = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();
@@ -328,7 +454,7 @@ mod tests {
         // Redo → INBOX gone again.
         dispatcher.execute(Action::Redo).await.unwrap();
         let t = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();
@@ -405,7 +531,11 @@ mod tests {
         dispatcher.execute(Action::Undo).await.unwrap();
 
         for id in ["t1", "t2"] {
-            let thread = store.get_thread(&ThreadId::new(id)).await.unwrap().unwrap();
+            let thread = store
+                .get_thread(&AccountScope::All, &ThreadId::new(id))
+                .await
+                .unwrap()
+                .unwrap();
             assert!(thread
                 .label_ids
                 .iter()
@@ -430,7 +560,7 @@ mod tests {
         assert!(outcome.message.contains("nothing"));
 
         let thread = store
-            .get_thread(&ThreadId::new("t1"))
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
             .await
             .unwrap()
             .unwrap();

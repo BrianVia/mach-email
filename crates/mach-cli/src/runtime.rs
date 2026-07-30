@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use mach_core::ids::AccountId;
+use mach_core::ids::AccountScope;
 use mach_store::SqliteStore;
 
 pub fn db_path() -> Result<PathBuf> {
@@ -15,9 +17,22 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(dir.join("mach.db"))
 }
 
-pub fn open_store() -> Result<Arc<SqliteStore>> {
+pub fn account_scope(account: Option<&str>) -> AccountScope {
+    account
+        .map(|email| AccountScope::One(AccountId::new(email)))
+        .unwrap_or_default()
+}
+
+pub async fn open_store() -> Result<Arc<SqliteStore>> {
     let path = db_path()?;
     let pool = mach_store::open(&path)
         .with_context(|| format!("opening SQLite database at {}", path.display()))?;
-    Ok(Arc::new(SqliteStore::new(pool)))
+    let store = Arc::new(SqliteStore::new(pool));
+    let accounts = mach_gmail::credentials::load_all()?;
+    if accounts.len() == 1 {
+        store
+            .claim_legacy_account(&AccountId::new(accounts[0].email.clone()))
+            .await?;
+    }
+    Ok(store)
 }
