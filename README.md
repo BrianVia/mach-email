@@ -29,6 +29,8 @@ The TUI pulls Gmail history at startup and every 60 seconds without delivering
 queued mutations. Run `mach sync` to drain those operations as well as pull
 Gmail history. Slash search returns cached SQLite matches immediately, then
 queries Gmail for every active account and merges the newest unique results.
+Interactive diagnostics are written to `mach.log` in the application-data
+directory so background activity cannot corrupt the alternate terminal screen.
 
 ## Prerequisites
 

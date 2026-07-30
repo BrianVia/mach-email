@@ -71,9 +71,8 @@ async fn main() -> Result<()> {
     if let Err(e) = color_eyre::install() {
         eprintln!("warning: failed to install color_eyre panic hook: {e}");
     }
-    init_tracing();
-
     let cli = Cli::parse();
+    init_tracing(cli.command.is_none());
     let account = cli.account.as_deref();
     match cli.command {
         None => commands::tui::run(account).await,
@@ -91,13 +90,44 @@ async fn main() -> Result<()> {
     }
 }
 
-fn init_tracing() {
+fn init_tracing(tui_mode: bool) {
+    use std::fs::{self, OpenOptions};
+    use std::sync::Mutex;
+
+    use directories::ProjectDirs;
     use tracing_subscriber::{fmt, EnvFilter};
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn,mach=info,refinery=warn"));
-    fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+    if tui_mode {
+        let log_file = ProjectDirs::from("com", "via", "mach").and_then(|dirs| {
+            let directory = dirs.data_dir();
+            fs::create_dir_all(directory).ok()?;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(directory.join("mach.log"))
+                .ok()
+        });
+        if let Some(log_file) = log_file {
+            fmt()
+                .with_env_filter(filter)
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(Mutex::new(log_file))
+                .init();
+        } else {
+            fmt()
+                .with_env_filter(filter)
+                .with_target(false)
+                .with_writer(std::io::sink)
+                .init();
+        }
+    } else {
+        fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    }
 }

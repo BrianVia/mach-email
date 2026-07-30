@@ -12,11 +12,12 @@
 //! ```
 
 use chrono::{DateTime, Local, Utc};
+use mach_core::store::ThreadSummary;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -123,83 +124,7 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
         return;
     }
 
-    let row_count = inner.height.saturating_sub(1) as usize;
-    if row_count == 0 {
-        return;
-    }
-    // Adjust viewport so selected is visible. (Computed read-only here; the
-    // viewport_top in state should be kept in sync on selection moves — for v1
-    // we just recompute every draw which is cheap.)
-    let mut top = v.viewport_top.min(v.threads.len().saturating_sub(1));
-    if v.selected < top {
-        top = v.selected;
-    } else if v.selected >= top + row_count {
-        top = v.selected.saturating_sub(row_count.saturating_sub(1));
-    }
-    let end = (top + row_count).min(v.threads.len());
-
-    let header = Line::from(vec![
-        Span::raw("       "),
-        Span::styled(format!("{:<22} ", "Account"), Style::default().fg(DIM)),
-        Span::styled(format!("{:>8} ", "Date"), Style::default().fg(DIM)),
-        Span::styled(format!("{:<28} ", "From"), Style::default().fg(DIM)),
-        Span::styled(format!("{:<50} ", "Subject"), Style::default().fg(DIM)),
-        Span::styled("Preview", Style::default().fg(DIM)),
-    ]);
-    let rows = v.threads[top..end].iter().enumerate().map(|(i, t)| {
-        let idx = top + i;
-        let selected = idx == v.selected;
-        let mut style = Style::default();
-        if selected {
-            style = style.bg(SELECTED_BG);
-        }
-        let unread_marker = if t.unread {
-            Span::styled("●", Style::default().fg(UNREAD_DOT))
-        } else {
-            Span::raw(" ")
-        };
-        let star_marker = if t.starred {
-            Span::styled("★", Style::default().fg(STARRED))
-        } else {
-            Span::raw(" ")
-        };
-        let from = trunc(
-            t.participants
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("(no sender)"),
-            28,
-        );
-        let subject_style = if t.unread {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let subj = trunc(&t.subject, 50);
-        let snippet = trunc(&t.snippet, 60);
-        let when = pretty_when(&t.last_message_at);
-        let account = trunc(t.account_id.as_str(), 22);
-
-        Line::from(vec![
-            Span::raw(" "),
-            unread_marker,
-            Span::raw(" "),
-            star_marker,
-            Span::raw(" "),
-            Span::styled(format!("{account:<22} "), Style::default().fg(DIM)),
-            Span::styled(format!("{when:>8} "), Style::default().fg(DIM)),
-            Span::styled(format!("{from:<28} "), Style::default().fg(ACCENT)),
-            Span::styled(format!("{subj:<50} "), subject_style),
-            Span::styled(snippet, Style::default().fg(DIM)),
-        ])
-        .style(style)
-    });
-    let lines: Vec<Line> = std::iter::once(header).chain(rows).collect();
-
-    let par = Paragraph::new(lines);
-    f.render_widget(par, inner);
+    draw_mailbox_table(f, &v.threads, v.selected, v.viewport_top, inner);
 }
 
 fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
@@ -375,49 +300,124 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
         return;
     }
 
-    let row_count = chunks[1].height.saturating_sub(1) as usize;
-    let header = Line::from(vec![
-        Span::raw("   "),
-        Span::styled(format!("{:<22} ", "Account"), Style::default().fg(DIM)),
-        Span::styled(format!("{:>8} ", "Date"), Style::default().fg(DIM)),
-        Span::styled(format!("{:<28} ", "From"), Style::default().fg(DIM)),
-        Span::styled(format!("{:<50} ", "Subject"), Style::default().fg(DIM)),
-        Span::styled("Preview", Style::default().fg(DIM)),
-    ]);
-    let rows = v.results.iter().take(row_count).enumerate().map(|(i, t)| {
-        let selected = i == v.selected;
-        let style = if selected {
-            Style::default().bg(SELECTED_BG)
-        } else {
-            Style::default()
-        };
-        Line::from(vec![
-            Span::raw(if selected { " ▸ " } else { "   " }),
-            Span::styled(
-                format!("{:<22} ", trunc(t.account_id.as_str(), 22)),
-                Style::default().fg(DIM),
-            ),
-            Span::styled(
-                format!("{:>8} ", pretty_when(&t.last_message_at)),
-                Style::default().fg(DIM),
-            ),
-            Span::styled(
-                format!(
-                    "{:<28} ",
-                    trunc(t.participants.first().map(|s| s.as_str()).unwrap_or(""), 28)
-                ),
-                Style::default().fg(ACCENT),
-            ),
-            Span::styled(
-                format!("{:<50} ", trunc(&t.subject, 50)),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(trunc(&t.snippet, 60), Style::default().fg(DIM)),
-        ])
-        .style(style)
-    });
-    let lines: Vec<Line> = std::iter::once(header).chain(rows).collect();
-    f.render_widget(Paragraph::new(lines), chunks[1]);
+    draw_mailbox_table(f, &v.results, v.selected, 0, chunks[1]);
+}
+
+/// Render the inbox-shaped projection as an actual table. The table owns
+/// clipping and column sizing, so a narrow pane can never turn one message
+/// into multiple visual rows or displace the fixed header.
+fn draw_mailbox_table(
+    f: &mut Frame,
+    threads: &[ThreadSummary],
+    selected: usize,
+    viewport_top: usize,
+    area: Rect,
+) {
+    let row_count = area.height.saturating_sub(1) as usize;
+    if row_count == 0 || threads.is_empty() {
+        return;
+    }
+    let mut top = viewport_top.min(threads.len().saturating_sub(1));
+    if selected < top {
+        top = selected;
+    } else if selected >= top + row_count {
+        top = selected.saturating_sub(row_count.saturating_sub(1));
+    }
+    let end = (top + row_count).min(threads.len());
+
+    let rows = threads[top..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, thread)| {
+            let is_selected = top + offset == selected;
+            let marker = Line::from(vec![
+                if thread.unread {
+                    Span::styled("●", Style::default().fg(UNREAD_DOT))
+                } else {
+                    Span::raw(" ")
+                },
+                Span::raw(" "),
+                if thread.starred {
+                    Span::styled("★", Style::default().fg(STARRED))
+                } else {
+                    Span::raw(" ")
+                },
+            ]);
+            let subject_style = if thread.unread {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Row::new(vec![
+                Cell::from(marker),
+                Cell::from(thread.account_id.to_string()).style(Style::default().fg(DIM)),
+                Cell::from(pretty_when(&thread.last_message_at)).style(Style::default().fg(DIM)),
+                Cell::from(
+                    thread
+                        .participants
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("(no sender)")
+                        .to_owned(),
+                )
+                .style(Style::default().fg(ACCENT)),
+                Cell::from(thread.subject.clone()).style(subject_style),
+                Cell::from(thread.snippet.clone()).style(Style::default().fg(DIM)),
+            ])
+            .style(if is_selected {
+                Style::default().bg(SELECTED_BG)
+            } else {
+                Style::default()
+            })
+        });
+    let header = Row::new(["", "Account", "Date", "From", "Subject", "Preview"])
+        .style(Style::default().fg(DIM));
+    let table = Table::new(rows, mailbox_widths(area.width))
+        .header(header)
+        .column_spacing(1);
+    f.render_widget(table, area);
+}
+
+fn mailbox_widths(width: u16) -> [Constraint; 6] {
+    if width >= 150 {
+        [
+            Constraint::Length(3),
+            Constraint::Length(22),
+            Constraint::Length(8),
+            Constraint::Length(28),
+            Constraint::Length(50),
+            Constraint::Fill(1),
+        ]
+    } else if width >= 110 {
+        [
+            Constraint::Length(3),
+            Constraint::Length(20),
+            Constraint::Length(8),
+            Constraint::Length(24),
+            Constraint::Fill(2),
+            Constraint::Fill(1),
+        ]
+    } else if width >= 80 {
+        [
+            Constraint::Length(3),
+            Constraint::Length(16),
+            Constraint::Length(8),
+            Constraint::Length(20),
+            Constraint::Fill(1),
+            Constraint::Length(0),
+        ]
+    } else {
+        [
+            Constraint::Length(3),
+            Constraint::Length(0),
+            Constraint::Length(8),
+            Constraint::Length(18),
+            Constraint::Fill(1),
+            Constraint::Length(0),
+        ]
+    }
 }
 
 fn trunc(s: &str, max: usize) -> String {
