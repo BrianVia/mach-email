@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -31,6 +31,9 @@ const SELECTED_BG: Color = Color::Rgb(0x1e, 0x29, 0x40);
 const STARRED: Color = Color::Rgb(0xff, 0xd1, 0x5c);
 
 pub fn draw(f: &mut Frame, app: &App) {
+    // Every frame owns every terminal cell. This also repairs stale cells
+    // after a resize or a previously width-unsafe message body.
+    f.render_widget(Clear, f.area());
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

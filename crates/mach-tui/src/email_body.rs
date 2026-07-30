@@ -138,14 +138,17 @@ fn safe_link(url: &str) -> bool {
 }
 
 fn strip_terminal_controls(input: &str) -> String {
-    input
-        .chars()
-        .filter(|character| {
-            *character == '\t'
-                || !character.is_control()
-                || matches!(*character, '\u{200c}' | '\u{200d}')
-        })
-        .collect()
+    let mut safe = String::with_capacity(input.len());
+    for character in input.chars() {
+        match character {
+            // A literal tab has terminal-dependent width while ratatui treats
+            // it as zero-width, desynchronizing all subsequent cursor writes.
+            '\t' => safe.push_str("    "),
+            character if !character.is_control() => safe.push(character),
+            _ => {}
+        }
+    }
+    safe
 }
 
 fn truncate_utf8(input: &str, max_bytes: usize) -> (&str, bool) {
@@ -215,13 +218,15 @@ mod tests {
     #[test]
     fn strips_terminal_escape_and_control_characters() {
         let lines = render_message(
-            &message(Some("<p>safe\u{1b}]8;;evil\u{7}text</p>"), None),
+            &message(Some("<p>safe\u{1b}]8;;evil\u{7}text\taligned</p>"), None),
             80,
         );
         let output = text(&lines);
         assert!(!output.contains('\u{1b}'));
         assert!(!output.contains('\u{7}'));
+        assert!(!output.contains('\t'));
         assert!(output.contains("safe"));
+        assert_eq!(strip_terminal_controls("left\tright"), "left    right");
     }
 
     #[test]
