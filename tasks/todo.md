@@ -16,7 +16,9 @@ Status legend: ✅ done · 🔄 in progress · ⏳ pending · ❌ dropped.
 - ✅ **HTTP client** — gzip, rustls, proactive token refresh, 401 retry.
 - ✅ **Bootstrap** — snapshots historyId, fetches labels + last-30-days threads (10x parallel).
 - ✅ **Body backfill (Milestone P)** — lazy `format=full` fetch on first thread open, MIME walker handles padded/unpadded base64url, falls back to `html2text` for HTML-only messages.
-- ✅ **Mutating endpoints** — `threads.modify`, `threads.trash`, `messages.send`.
+- ✅ **Triage mutation endpoints** — `threads.modify` and `threads.trash`.
+- ⏳ **Safe send activation** — the `messages.send` client exists, but remains
+  unavailable until the draft pipeline and crash/retry semantics are complete.
 - ✅ **Outbox drain worker** — replays optimistic local mutations to Gmail.
 - ✅ **Incremental sync** — `users.history.list` with messageAdded/Deleted/labelAdded/labelRemoved events.
 - ✅ **Gap recovery** — falls back to a 7-day re-bootstrap on 404 cursor-too-old, reconciles by `messageId` upsert.
@@ -33,12 +35,14 @@ Status legend: ✅ done · 🔄 in progress · ⏳ pending · ❌ dropped.
 - ✅ **CLI** — `mach do '{...}'` dispatches Action JSON.
 - ✅ **TUI** — `mach` launches ratatui app.
 - ✅ **Desktop** — `mach-desktop` launches Tauri app.
-- ✅ **MCP** — `mach mcp` speaks JSON-RPC over stdio; one `mach` tool with the full Action schema. Tested handshake + tools/list + tools/call.
+- ✅ **MCP** — `mach mcp` speaks JSON-RPC over stdio; one `mach` tool exposes
+  only dispatcher-supported actions. Tested handshake + tools/list + tools/call.
 
 ### Polish
 - ✅ **Undo/redo** — 20-deep in-memory stack on `Dispatcher`. Inverse computed before mutation; new mutation clears redo. Tests: round-trip + empty-stack + redo-invalidation.
 - ✅ **Snooze sweeper** — `mach sync` scans `MACH/Snoozed/<rfc3339>` labels, un-snoozes when due.
-- ✅ **Send-later timer** — `mach sync` fires drafts whose `send_later.send_at` is past.
+- ⏳ **Send-later delivery** — `mach sync` detects due rows, but delivery stays
+  disabled until `SendDraft` has the same safe pipeline as interactive send.
 - ✅ **`mach doctor`** — env health (paths, cursor, creds, account, outbox); `--simulate-gap` wipes cursor for gap-recovery regression.
 
 ## Out of scope for v0.1 (open ideas)

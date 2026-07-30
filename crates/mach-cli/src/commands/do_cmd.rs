@@ -59,14 +59,13 @@ async fn maybe_backfill_bodies(
     thread_id: mach_core::ids::ThreadId,
     store: std::sync::Arc<mach_store::SqliteStore>,
 ) -> Result<()> {
-    use mach_gmail::{config::OAuthConfig, BodyFetcher, GmailClient};
-    let config = match OAuthConfig::from_env() {
-        Ok(c) => c,
-        // Offline mode: no creds, just return cached state below.
-        Err(_) => return Ok(()),
-    };
-    let client = GmailClient::from_stored_credentials(config)?;
-    let fetcher = BodyFetcher::new(client, store);
+    use mach_gmail::{config::OAuthConfig, BodyFetcher};
+    // Preserve the intentional no-config offline mode while still surfacing
+    // corrupt or unreadable persisted credentials to the caller.
+    if OAuthConfig::from_env().is_err() {
+        return Ok(());
+    }
+    let fetcher = BodyFetcher::from_stored_credentials(store)?;
     fetcher.fetch_if_needed(&thread_id).await?;
     Ok(())
 }

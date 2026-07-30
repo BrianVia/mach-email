@@ -120,7 +120,7 @@ impl App {
 
         // Try to construct a body fetcher; if OAuth creds aren't set up,
         // boot offline. The user can still browse cached mail.
-        let body_fetcher = match build_body_fetcher(store.clone()).await {
+        let body_fetcher = match mach_gmail::BodyFetcher::from_stored_credentials(store.clone()) {
             Ok(b) => Some(Arc::new(b)),
             Err(e) => {
                 warn!(error = %e, "no body fetcher; running offline");
@@ -223,12 +223,6 @@ impl SearchView {
     pub fn current_thread_id(&self) -> Option<&ThreadId> {
         self.current_thread().map(|t| &t.id)
     }
-}
-
-async fn build_body_fetcher(store: Arc<SqliteStore>) -> Result<mach_gmail::BodyFetcher> {
-    let config = mach_gmail::config::OAuthConfig::from_env()?;
-    let client = mach_gmail::GmailClient::from_stored_credentials(config)?;
-    Ok(mach_gmail::BodyFetcher::new(client, store))
 }
 
 async fn load_inbox(store: &SqliteStore, label: &str) -> Result<InboxView> {

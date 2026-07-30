@@ -33,6 +33,15 @@ impl BodyFetcher {
         Self { client, store }
     }
 
+    /// Build the online body service from configured OAuth client details and
+    /// the persisted account credentials. Adapters decide whether failure
+    /// means cached-only operation or a hard error.
+    pub fn from_stored_credentials(store: Arc<SqliteStore>) -> Result<Self> {
+        let config = crate::config::OAuthConfig::from_env()?;
+        let client = GmailClient::from_stored_credentials(config)?;
+        Ok(Self::new(client, store))
+    }
+
     pub fn client(&self) -> &Arc<GmailClient> {
         &self.client
     }

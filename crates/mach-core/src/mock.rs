@@ -372,6 +372,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_mutations_are_recorded_as_complete_history_entries() {
+        let store = Arc::new(InMemoryStore::new());
+        seed_thread(&store, "t1", &["INBOX"]);
+        seed_thread(&store, "t2", &["INBOX"]);
+        let dispatcher = Arc::new(Dispatcher::new(store.clone()));
+
+        let first = {
+            let dispatcher = Arc::clone(&dispatcher);
+            tokio::spawn(async move {
+                dispatcher
+                    .execute(Action::Archive {
+                        thread_ids: vec![ThreadId::new("t1")],
+                    })
+                    .await
+            })
+        };
+        let second = {
+            let dispatcher = Arc::clone(&dispatcher);
+            tokio::spawn(async move {
+                dispatcher
+                    .execute(Action::Archive {
+                        thread_ids: vec![ThreadId::new("t2")],
+                    })
+                    .await
+            })
+        };
+
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        dispatcher.execute(Action::Undo).await.unwrap();
+        dispatcher.execute(Action::Undo).await.unwrap();
+
+        for id in ["t1", "t2"] {
+            let thread = store.get_thread(&ThreadId::new(id)).await.unwrap().unwrap();
+            assert!(thread
+                .label_ids
+                .iter()
+                .any(|label| label.as_str() == "INBOX"));
+        }
+    }
+
+    #[tokio::test]
     async fn undo_does_not_reverse_a_preexisting_label() {
         let store = Arc::new(InMemoryStore::new());
         seed_thread(&store, "t1", &["INBOX", "STARRED"]);

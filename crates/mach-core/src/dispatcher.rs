@@ -13,15 +13,15 @@ use crate::store::{MailStore, OutboxOpKind};
 
 const UNDO_DEPTH: usize = 20;
 
-/// The single point of mutation in the system. Every Action — whether it came
-/// from a TUI keypress, `mach do`, or an MCP tool call — flows through here.
+/// The single point of durable mutation in the system. Presentation adapters
+/// may handle navigation actions locally, but all shared mail mutations flow
+/// through here.
 ///
 /// Order of operations on a mutating action:
 ///   1. validate against AppState
-///   2. write optimistic local change via MailStore
-///   3. enqueue outbox op (durable)
-///   4. push inverse onto undo stack
-///   5. broadcast StateEvent
+///   2. atomically write the optimistic change and durable outbox record
+///   3. push the inverse onto the bounded history
+///   4. broadcast StateEvent
 ///
 /// The sync engine drains the outbox in the background. UI surfaces never
 /// wait on the network — that's the whole point.
@@ -29,12 +29,45 @@ pub struct Dispatcher {
     store: Arc<dyn MailStore>,
     state: Mutex<AppState>,
     events: broadcast::Sender<StateEvent>,
-    /// Reverse-action stack — pop to undo. Bounded at `UNDO_DEPTH` so we
-    /// never grow without limit on long-running sessions.
-    undo_stack: Mutex<VecDeque<Action>>,
-    /// Forward-action stack — pop to redo after an undo. Cleared on any
-    /// new (non-undo/redo) mutation.
-    redo_stack: Mutex<VecDeque<Action>>,
+    /// Serializes actions and owns the complete undo/redo invariant. Keeping
+    /// both stacks under one lock prevents a concurrent action from landing
+    /// between a mutation and its history record.
+    history: Mutex<ActionHistory>,
+}
+
+#[derive(Debug)]
+struct ActionHistory {
+    undo: VecDeque<Action>,
+    redo: VecDeque<Action>,
+}
+
+impl ActionHistory {
+    fn new() -> Self {
+        Self {
+            undo: VecDeque::with_capacity(UNDO_DEPTH),
+            redo: VecDeque::with_capacity(UNDO_DEPTH),
+        }
+    }
+
+    fn record_new(&mut self, inverse: Action) {
+        push_bounded(&mut self.undo, inverse);
+        self.redo.clear();
+    }
+
+    fn record_undo(&mut self, inverse: Action) {
+        push_bounded(&mut self.undo, inverse);
+    }
+
+    fn record_redo(&mut self, action: Action) {
+        push_bounded(&mut self.redo, action);
+    }
+}
+
+fn push_bounded(stack: &mut VecDeque<Action>, action: Action) {
+    if stack.len() == UNDO_DEPTH {
+        stack.pop_front();
+    }
+    stack.push_back(action);
 }
 
 impl Dispatcher {
@@ -44,8 +77,7 @@ impl Dispatcher {
             store,
             state: Mutex::new(AppState::default()),
             events,
-            undo_stack: Mutex::new(VecDeque::with_capacity(UNDO_DEPTH)),
-            redo_stack: Mutex::new(VecDeque::with_capacity(UNDO_DEPTH)),
+            history: Mutex::new(ActionHistory::new()),
         }
     }
 
@@ -60,17 +92,17 @@ impl Dispatcher {
     #[instrument(skip(self), fields(action = action.name()))]
     pub async fn execute(&self, action: Action) -> CoreResult<ActionOutcome> {
         debug!("dispatching");
-        // External execute: track for undo, clear redo (because a new
-        // mutation invalidates the redo chain).
-        self.execute_inner(action, true).await
+        let mut history = self.history.lock().await;
+        self.execute_inner(action, true, &mut history).await
     }
 
-    /// Internal dispatch. `track_for_undo=false` is used when replaying
-    /// an undo/redo so we don't infinite-loop our own history.
+    /// Internal dispatch. `track_for_undo=false` replays an undo/redo without
+    /// recursively recording it as a new user action.
     async fn execute_inner(
         &self,
         action: Action,
         track_for_undo: bool,
+        history: &mut ActionHistory,
     ) -> CoreResult<ActionOutcome> {
         // Compute the inverse BEFORE mutating so we don't lose info that
         // a later mutation might wipe (e.g. star toggle has the bool baked in).
@@ -135,8 +167,8 @@ impl Dispatcher {
             }
             Action::Search { query, limit } => self.search(&query, limit).await,
             Action::Refresh => Ok(ActionOutcome::empty("refresh")),
-            Action::Undo => return self.do_undo().await,
-            Action::Redo => return self.do_redo().await,
+            Action::Undo => return self.do_undo(history).await,
+            Action::Redo => return self.do_redo(history).await,
             other => Err(CoreError::InvalidAction(format!(
                 "{} is not implemented yet",
                 other.name()
@@ -147,20 +179,14 @@ impl Dispatcher {
         // first-class user action, not a replay) clear redo.
         if track_for_undo {
             if let (Ok(_), Some(inv)) = (&outcome, inverse) {
-                let mut undo = self.undo_stack.lock().await;
-                if undo.len() == UNDO_DEPTH {
-                    undo.pop_front();
-                }
-                undo.push_back(inv);
-                self.redo_stack.lock().await.clear();
+                history.record_new(inv);
             }
         }
         outcome
     }
 
-    async fn do_undo(&self) -> CoreResult<ActionOutcome> {
-        let mut undo = self.undo_stack.lock().await;
-        let Some(inverse) = undo.pop_back() else {
+    async fn do_undo(&self, history: &mut ActionHistory) -> CoreResult<ActionOutcome> {
+        let Some(inverse) = history.undo.pop_back() else {
             return Ok(ActionOutcome {
                 action_name: "undo".into(),
                 op_id: None,
@@ -170,23 +196,17 @@ impl Dispatcher {
                 message: "nothing to undo".into(),
             });
         };
-        drop(undo);
         let redo_action = self
             .compute_inverse(&inverse)
             .await?
             .unwrap_or_else(|| inverse.clone());
-        let outcome = Box::pin(self.execute_inner(inverse, false)).await?;
-        let mut redo = self.redo_stack.lock().await;
-        if redo.len() == UNDO_DEPTH {
-            redo.pop_front();
-        }
-        redo.push_back(redo_action);
+        let outcome = Box::pin(self.execute_inner(inverse, false, history)).await?;
+        history.record_redo(redo_action);
         Ok(outcome)
     }
 
-    async fn do_redo(&self) -> CoreResult<ActionOutcome> {
-        let mut redo = self.redo_stack.lock().await;
-        let Some(action) = redo.pop_back() else {
+    async fn do_redo(&self, history: &mut ActionHistory) -> CoreResult<ActionOutcome> {
+        let Some(action) = history.redo.pop_back() else {
             return Ok(ActionOutcome {
                 action_name: "redo".into(),
                 op_id: None,
@@ -196,15 +216,10 @@ impl Dispatcher {
                 message: "nothing to redo".into(),
             });
         };
-        drop(redo);
         let undo_inverse = self.compute_inverse(&action).await?;
-        let outcome = Box::pin(self.execute_inner(action, false)).await?;
+        let outcome = Box::pin(self.execute_inner(action, false, history)).await?;
         if let Some(inv) = undo_inverse {
-            let mut undo = self.undo_stack.lock().await;
-            if undo.len() == UNDO_DEPTH {
-                undo.pop_front();
-            }
-            undo.push_back(inv);
+            history.record_undo(inv);
         }
         Ok(outcome)
     }

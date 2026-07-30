@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use mach_core::Dispatcher;
-use mach_gmail::{BodyFetcher, GmailClient};
+use mach_gmail::BodyFetcher;
 use mach_store::SqliteStore;
 use tracing::{info, warn};
 
@@ -64,10 +64,11 @@ async fn main() -> Result<()> {
     let store = Arc::new(SqliteStore::new(pool));
     let dispatcher = Dispatcher::new(store.clone());
 
-    let (body_fetcher, account_email) = match build_body_fetcher(store.clone()).await {
-        Ok((b, email)) => {
+    let (body_fetcher, account_email) = match BodyFetcher::from_stored_credentials(store.clone()) {
+        Ok(fetcher) => {
+            let email = fetcher.client().email().await;
             info!(account = %email, "gmail client up");
-            (Some(Arc::new(b)), email)
+            (Some(Arc::new(fetcher)), email)
         }
         Err(e) => {
             warn!(error = %e, "no body fetcher; running offline");
@@ -115,13 +116,6 @@ async fn main() -> Result<()> {
         .expect("error running tauri app");
 
     Ok(())
-}
-
-async fn build_body_fetcher(store: Arc<SqliteStore>) -> Result<(BodyFetcher, String)> {
-    let config = mach_gmail::config::OAuthConfig::from_env()?;
-    let client = GmailClient::from_stored_credentials(config)?;
-    let email = client.email().await;
-    Ok((BodyFetcher::new(client, store), email))
 }
 
 /// Serve `mach://attachment/<message_id>/<attachment_id>`. Caches to disk

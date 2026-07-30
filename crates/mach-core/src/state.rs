@@ -1,18 +1,14 @@
-use std::collections::VecDeque;
-
-use crate::action::Action;
 use crate::ids::{LabelId, ThreadId};
 
 /// In-process UI state owned by the dispatcher actor. The store is the
-/// source of truth for mail data; this is only the *projection* the user
-/// is currently looking at plus undo history.
+/// source of truth for mail data; this is only the projection the user
+/// is currently looking at. Action history is owned privately by the
+/// dispatcher so there is only one undo/redo authority.
 #[derive(Debug, Default)]
 pub struct AppState {
     pub view: View,
     pub selection: Selection,
     pub current_label: Option<LabelId>,
-    pub undo: VecDeque<Action>,
-    pub redo: VecDeque<Action>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -33,17 +29,5 @@ pub struct Selection {
 impl Selection {
     pub fn is_empty(&self) -> bool {
         self.thread_ids.is_empty()
-    }
-}
-
-const UNDO_DEPTH: usize = 20;
-
-impl AppState {
-    pub fn push_undo(&mut self, action: Action) {
-        if self.undo.len() == UNDO_DEPTH {
-            self.undo.pop_front();
-        }
-        self.undo.push_back(action);
-        self.redo.clear();
     }
 }
