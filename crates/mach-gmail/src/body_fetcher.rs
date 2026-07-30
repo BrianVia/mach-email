@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::stream::{self, StreamExt};
 use mach_core::{
     ids::{AccountId, AccountScope, ThreadId},
     store::MailStore,
@@ -25,11 +26,18 @@ pub struct BodyFetcher {
     store: Arc<SqliteStore>,
 }
 
-/// Account-indexed lazy body services. This is the only owner of choosing
-/// which Gmail client may hydrate a cached thread.
+/// Account-indexed Gmail services. This is the only owner of choosing which
+/// authenticated Gmail client may read remote data for a cached account.
 #[derive(Default)]
-pub struct BodyFetcherPool {
+pub struct GmailAccountPool {
     fetchers: HashMap<AccountId, Arc<BodyFetcher>>,
+}
+
+#[derive(Debug, Default)]
+pub struct PullReport {
+    pub attempted: usize,
+    pub succeeded: usize,
+    pub failures: Vec<(AccountId, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +110,7 @@ impl BodyFetcher {
     }
 }
 
-impl BodyFetcherPool {
+impl GmailAccountPool {
     pub fn from_stored_credentials(store: Arc<SqliteStore>) -> Result<Self> {
         let accounts = crate::credentials::load_all()?;
         let mut fetchers = HashMap::with_capacity(accounts.len());
@@ -124,6 +132,55 @@ impl BodyFetcherPool {
 
     pub fn is_empty(&self) -> bool {
         self.fetchers.is_empty()
+    }
+
+    /// Pull new Gmail history for every account in scope. This deliberately
+    /// has no outbox or scheduled-send effects: UI cache freshness must never
+    /// surprise the user by delivering old local mutations.
+    pub async fn pull_updates(&self, scope: &AccountScope) -> PullReport {
+        let selected: Vec<_> = self
+            .fetchers
+            .iter()
+            .filter(|(account, _)| scope.account().map_or(true, |wanted| wanted == *account))
+            .map(|(account, fetcher)| (account.clone(), fetcher.clone()))
+            .collect();
+        let attempted = selected.len();
+        let results = stream::iter(selected)
+            .map(|(account, fetcher)| async move {
+                let result = fetcher.pull_updates().await;
+                (account, result)
+            })
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut report = PullReport {
+            attempted,
+            ..PullReport::default()
+        };
+        for (account, result) in results {
+            match result {
+                Ok(()) => report.succeeded += 1,
+                Err(error) => report.failures.push((account, format!("{error:#}"))),
+            }
+        }
+        report
+    }
+}
+
+impl BodyFetcher {
+    async fn pull_updates(&self) -> Result<()> {
+        if self
+            .store
+            .get_history_cursor(&self.account)
+            .await?
+            .is_none()
+        {
+            crate::sync::bootstrap(self.client.clone(), self.store.clone()).await?;
+        } else {
+            crate::sync::incremental_sync(self.client.clone(), self.store.clone()).await?;
+        }
+        Ok(())
     }
 }
 

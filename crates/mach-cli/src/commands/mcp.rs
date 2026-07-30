@@ -9,11 +9,11 @@ pub async fn run(account: Option<&str>) -> Result<()> {
     // Try to spin up a Gmail client; if env creds aren't set the MCP
     // server still serves cached reads + queues mutations to the outbox
     // for the next sync.
-    let body_fetchers = match mach_gmail::BodyFetcherPool::from_stored_credentials(store.clone()) {
+    let body_fetchers = match mach_gmail::GmailAccountPool::from_stored_credentials(store.clone()) {
         Ok(pool) => std::sync::Arc::new(pool),
         Err(e) => {
             warn!(error = %e, "mcp: no gmail clients; cached-only mode");
-            std::sync::Arc::new(mach_gmail::BodyFetcherPool::default())
+            std::sync::Arc::new(mach_gmail::GmailAccountPool::default())
         }
     };
     let scope = runtime::account_scope(account);

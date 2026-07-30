@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use mach_core::ids::AccountScope;
 use mach_core::Dispatcher;
-use mach_gmail::BodyFetcherPool;
+use mach_gmail::GmailAccountPool;
 use mach_store::SqliteStore;
 use tracing::{info, warn};
 
@@ -25,7 +25,7 @@ pub struct AppState {
     pub store: Arc<SqliteStore>,
     pub scope: AccountScope,
     pub dispatcher: Dispatcher,
-    pub body_fetchers: Arc<BodyFetcherPool>,
+    pub body_fetchers: Arc<GmailAccountPool>,
     pub default_keymap_toml: String,
     pub user_keymap_toml: Option<String>,
     pub account_emails: Vec<String>,
@@ -73,14 +73,14 @@ async fn main() -> Result<()> {
     let scope = AccountScope::All;
     let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone());
 
-    let body_fetchers = match BodyFetcherPool::from_stored_credentials(store.clone()) {
+    let body_fetchers = match GmailAccountPool::from_stored_credentials(store.clone()) {
         Ok(pool) => {
             info!(accounts = pool.accounts().count(), "gmail clients up");
             Arc::new(pool)
         }
         Err(e) => {
             warn!(error = %e, "no body fetchers; running offline");
-            Arc::new(BodyFetcherPool::default())
+            Arc::new(GmailAccountPool::default())
         }
     };
     let account_emails = accounts.into_iter().map(|account| account.email).collect();

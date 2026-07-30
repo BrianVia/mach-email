@@ -12,7 +12,7 @@ pub mod oauth;
 pub mod outbox;
 pub mod sync;
 
-pub use body_fetcher::{BodyFetcher, BodyFetcherPool, FetchOutcome};
+pub use body_fetcher::{BodyFetcher, FetchOutcome, GmailAccountPool, PullReport};
 pub use client::GmailClient;
 pub use config::OAuthConfig;
 pub use credentials::{CredsError, StoredCredentials};

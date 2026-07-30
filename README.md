@@ -8,8 +8,9 @@ The application is currently best treated as a personal read-and-triage
 client. Unified multi-account inbox browsing, per-account filtering, search,
 archive, trash, read/unread, starring,
 labels, snooze, lazy body fetching, undo/redo, manual Gmail sync, and
-account-correct mutation routing are wired. Compose, reply, forward, draft
-persistence, send-later, and automatic background sync are not yet complete.
+account-correct mutation routing, and pull-only background refresh while the
+TUI is open are wired. Compose, reply, forward, draft persistence, send-later,
+and an always-on sync daemon are not yet complete.
 
 ## Architecture
 
@@ -23,7 +24,9 @@ persistence, send-later, and automatic background sync are not yet complete.
 
 Mail data is cached in the platform application-data directory. Mutations
 update SQLite optimistically and atomically enqueue a durable Gmail operation.
-Run `mach sync` to drain those operations and pull Gmail history.
+The TUI pulls Gmail history at startup and every 60 seconds without delivering
+queued mutations. Run `mach sync` to drain those operations as well as pull
+Gmail history.
 
 ## Prerequisites
 

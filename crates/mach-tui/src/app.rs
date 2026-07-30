@@ -24,6 +24,8 @@ use mach_core::{
 };
 use mach_store::SqliteStore;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, warn};
 
 use crate::config::load_keymap;
@@ -39,7 +41,7 @@ pub struct App {
     pub dispatcher: Dispatcher,
     /// Body fetcher is optional — if creds are missing we run offline,
     /// serving whatever's already cached.
-    pub body_fetchers: Arc<mach_gmail::BodyFetcherPool>,
+    pub body_fetchers: Arc<mach_gmail::GmailAccountPool>,
 
     pub view: View,
     pub status: StatusLine,
@@ -106,12 +108,17 @@ pub struct StatusLine {
     pub hint: String,
 }
 
-#[allow(dead_code)] // Syncing/AuthExpired set by the periodic-sync task once wired.
+#[allow(dead_code)] // AuthExpired is reserved for typed OAuth failure reporting.
 pub enum SyncState {
     Ok,
     Syncing,
     Offline,
     AuthExpired,
+}
+
+enum PullEvent {
+    Started,
+    Finished(mach_gmail::PullReport),
 }
 
 impl App {
@@ -122,11 +129,11 @@ impl App {
         // Try to construct a body fetcher; if OAuth creds aren't set up,
         // boot offline. The user can still browse cached mail.
         let body_fetchers =
-            match mach_gmail::BodyFetcherPool::from_stored_credentials(store.clone()) {
+            match mach_gmail::GmailAccountPool::from_stored_credentials(store.clone()) {
                 Ok(pool) => Arc::new(pool),
                 Err(e) => {
                     warn!(error = %e, "no body fetchers; running offline");
-                    Arc::new(mach_gmail::BodyFetcherPool::default())
+                    Arc::new(mach_gmail::GmailAccountPool::default())
                 }
             };
 
@@ -256,7 +263,14 @@ pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("init terminal")?;
 
-    let result = main_loop(&mut app, &mut terminal).await;
+    let (pull_tx, mut pull_rx) = mpsc::unbounded_channel();
+    let pull_task = tokio::spawn(periodic_pull(
+        app.body_fetchers.clone(),
+        app.scope.clone(),
+        pull_tx,
+    ));
+    let result = main_loop(&mut app, &mut terminal, &mut pull_rx).await;
+    pull_task.abort();
 
     // Always restore terminal state, even on error.
     disable_raw_mode().ok();
@@ -274,6 +288,7 @@ pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
 async fn main_loop(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    pull_events: &mut mpsc::UnboundedReceiver<PullEvent>,
 ) -> Result<()> {
     // Initial draw before we block on input.
     terminal.draw(|f| draw(f, app)).context("initial draw")?;
@@ -297,13 +312,76 @@ async fn main_loop(
                 }
             }
             _ = tick.tick() => {
-                // Could refresh sync status here. For now, just a heartbeat
-                // for the status line.
+                // Heartbeat keeps status/chord feedback responsive.
+            }
+            Some(event) = pull_events.recv() => {
+                handle_pull_event(app, event).await;
             }
         }
         terminal.draw(|f| draw(f, app)).context("draw")?;
     }
     Ok(())
+}
+
+async fn periodic_pull(
+    accounts: Arc<mach_gmail::GmailAccountPool>,
+    scope: AccountScope,
+    events: mpsc::UnboundedSender<PullEvent>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if events.send(PullEvent::Started).is_err() {
+            break;
+        }
+        let report = accounts.pull_updates(&scope).await;
+        if events.send(PullEvent::Finished(report)).is_err() {
+            break;
+        }
+    }
+}
+
+async fn handle_pull_event(app: &mut App, event: PullEvent) {
+    match event {
+        PullEvent::Started => app.status.sync = SyncState::Syncing,
+        PullEvent::Finished(report) => {
+            for (account, error) in &report.failures {
+                warn!(account = %account, error, "background pull failed");
+            }
+            app.status.sync = if report.succeeded > 0 {
+                SyncState::Ok
+            } else {
+                SyncState::Offline
+            };
+            if report.succeeded > 0 {
+                refresh_visible_inbox(app).await;
+            }
+        }
+    }
+}
+
+async fn refresh_visible_inbox(app: &mut App) {
+    let View::Inbox(current) = &app.view else {
+        return;
+    };
+    let label = current.label.clone();
+    let selected = current
+        .current_thread()
+        .map(|thread| (thread.account_id.clone(), thread.id.clone()));
+    match load_inbox(&app.store, &app.scope, label.as_str()).await {
+        Ok(mut inbox) => {
+            if let Some((account, id)) = selected {
+                inbox.selected = inbox
+                    .threads
+                    .iter()
+                    .position(|thread| thread.account_id == account && thread.id == id)
+                    .unwrap_or(0);
+            }
+            app.view = View::Inbox(inbox);
+        }
+        Err(error) => warn!(%error, "refreshing inbox after background pull failed"),
+    }
 }
 
 async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {

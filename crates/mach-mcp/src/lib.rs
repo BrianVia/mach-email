@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use mach_core::ids::AccountScope;
 use mach_core::{action::DISPATCHER_ACTION_NAMES, Action, Dispatcher};
-use mach_gmail::BodyFetcherPool;
+use mach_gmail::GmailAccountPool;
 use mach_store::SqliteStore;
 use schemars::schema_for;
 use serde_json::{json, Value};
@@ -32,13 +32,13 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Server {
     dispatcher: Dispatcher,
-    body_fetchers: Arc<BodyFetcherPool>,
+    body_fetchers: Arc<GmailAccountPool>,
 }
 
 impl Server {
     pub fn new(
         store: Arc<SqliteStore>,
-        body_fetchers: Arc<BodyFetcherPool>,
+        body_fetchers: Arc<GmailAccountPool>,
         scope: AccountScope,
     ) -> Self {
         Self {
