@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en" style="background:#0a0d12;color:#e6e7eb;">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>mach</title>
+    <style>
+      html, body, #app { height: 100%; margin: 0; }
+      body { background:#0a0d12; color:#e6e7eb; font: 14px ui-monospace,Menlo,monospace; }
+      #mach-boot-probe {
+        position: fixed; inset: 0; display: flex;
+        align-items: center; justify-content: center;
+        color: #8a8e98;
+      }
+    </style>
+  </head>
+  <body class="bg-bg text-fg antialiased">
+    <div id="app">
+      <!-- visible until JS mounts; replaced/cleared on render() -->
+      <div id="mach-boot-probe">mach is booting…</div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

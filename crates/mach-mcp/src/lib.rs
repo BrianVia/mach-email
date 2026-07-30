@@ -1,0 +1,208 @@
+//! MCP server (Model Context Protocol).
+//!
+//! Speaks JSON-RPC 2.0 over stdio (newline-delimited messages, per the MCP
+//! stdio transport spec). The wire is dead simple — Claude Desktop or any
+//! MCP client launches `mach mcp` as a child process and pipes JSON-RPC.
+//!
+//! Tool surface:
+//! - **mach** — single generic tool whose `inputSchema` is the
+//!   `Action` enum's JSON Schema. The model passes any Action JSON; the
+//!   server dispatches it. This keeps the surface lined up exactly with
+//!   the CLI's `mach do` — same shape, same outcomes.
+//!
+//! ECHO suppression and incremental sync are deliberately out of scope
+//! for the MCP server. Mutations land via the same outbox the TUI uses;
+//! the next `mach sync` (TUI tick or manual) drains them.
+
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use mach_core::{Action, Dispatcher};
+use mach_gmail::BodyFetcher;
+use mach_store::SqliteStore;
+use schemars::schema_for;
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tracing::{debug, error, warn};
+
+const PROTOCOL_VERSION: &str = "2024-11-05";
+const SERVER_NAME: &str = "mach";
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub struct Server {
+    dispatcher: Dispatcher,
+    #[allow(dead_code)] // kept for future read endpoints (resources/list etc.)
+    store: Arc<SqliteStore>,
+    body_fetcher: Option<Arc<BodyFetcher>>,
+}
+
+impl Server {
+    pub fn new(
+        store: Arc<SqliteStore>,
+        body_fetcher: Option<Arc<BodyFetcher>>,
+    ) -> Self {
+        Self {
+            dispatcher: Dispatcher::new(store.clone()),
+            store,
+            body_fetcher,
+        }
+    }
+
+    /// Run the server to completion. Returns when stdin closes (client
+    /// disconnect) or on fatal protocol error.
+    pub async fn run(self) -> Result<()> {
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin);
+        let mut stdout = tokio::io::stdout();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {}
+                Err(e) => {
+                    error!(error = %e, "stdin read error");
+                    break;
+                }
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let req: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(error = %e, "malformed json from client");
+                    let err =
+                        rpc_error(Value::Null, -32700, &format!("Parse error: {e}"), None);
+                    write_line(&mut stdout, &err).await?;
+                    continue;
+                }
+            };
+            // Notifications (no `id` field) — silently process, no reply.
+            let id = req.get("id").cloned();
+            let method = req
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
+
+            debug!(method = %method, "rpc request");
+
+            let response = self.handle(&method, params, id.clone()).await;
+            if let Some(resp) = response {
+                write_line(&mut stdout, &resp).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle(&self, method: &str, params: Value, id: Option<Value>) -> Option<Value> {
+        // Notifications: no `id`, no response.
+        if id.is_none() {
+            return None;
+        }
+        let id = id.unwrap();
+        match method {
+            "initialize" => Some(rpc_ok(id, self.initialize_result())),
+            "ping" => Some(rpc_ok(id, json!({}))),
+            "tools/list" => Some(rpc_ok(id, self.tools_list())),
+            "tools/call" => match self.tools_call(params).await {
+                Ok(content) => Some(rpc_ok(id, content)),
+                Err(e) => Some(rpc_error(id, -32603, &e.to_string(), None)),
+            },
+            "resources/list" => Some(rpc_ok(id, json!({ "resources": [] }))),
+            "prompts/list" => Some(rpc_ok(id, json!({ "prompts": [] }))),
+            _ => Some(rpc_error(
+                id,
+                -32601,
+                &format!("Method not found: {method}"),
+                None,
+            )),
+        }
+    }
+
+    fn initialize_result(&self) -> Value {
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {
+                "tools": {},
+            },
+            "serverInfo": {
+                "name": SERVER_NAME,
+                "version": SERVER_VERSION,
+            },
+        })
+    }
+
+    fn tools_list(&self) -> Value {
+        let action_schema = schema_for!(Action);
+        let schema_value = serde_json::to_value(&action_schema).unwrap_or(json!({}));
+        json!({
+            "tools": [
+                {
+                    "name": "mach",
+                    "description": "Dispatch a mach Action against the local cache + outbox. \
+                        Mutations apply optimistically and round-trip to Gmail on the next \
+                        `mach sync` (or auto-drain in the TUI/desktop). Search uses FTS5 \
+                        over the cached body index.",
+                    "inputSchema": schema_value,
+                }
+            ]
+        })
+    }
+
+    async fn tools_call(&self, params: Value) -> Result<Value> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .context("missing tool name")?;
+        if name != "mach" {
+            anyhow::bail!("unknown tool: {name}");
+        }
+        let args = params
+            .get("arguments")
+            .cloned()
+            .context("missing tool arguments")?;
+        let action: Action = serde_json::from_value(args)
+            .context("arguments did not match an Action variant")?;
+
+        // Same backfill semantics as the CLI's `mach do open_thread`.
+        if let Action::OpenThread { id } = &action {
+            if let Some(fetcher) = self.body_fetcher.as_ref() {
+                let _ = fetcher.fetch_if_needed(id).await;
+            }
+        }
+
+        let outcome = self.dispatcher.execute(action).await?;
+        let pretty = serde_json::to_string_pretty(&outcome)?;
+        // MCP returns content as an array of typed parts. We give one text
+        // block with the outcome JSON; the model can parse + reason over it.
+        Ok(json!({
+            "content": [
+                { "type": "text", "text": pretty }
+            ]
+        }))
+    }
+}
+
+fn rpc_ok(id: Value, result: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn rpc_error(id: Value, code: i64, message: &str, data: Option<Value>) -> Value {
+    let mut err = json!({ "code": code, "message": message });
+    if let Some(d) = data {
+        err["data"] = d;
+    }
+    json!({ "jsonrpc": "2.0", "id": id, "error": err })
+}
+
+async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> Result<()> {
+    let mut s = serde_json::to_string(v)?;
+    s.push('\n');
+    w.write_all(s.as_bytes()).await?;
+    w.flush().await?;
+    Ok(())
+}

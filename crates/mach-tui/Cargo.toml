@@ -1,0 +1,25 @@
+[package]
+name = "mach-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mach-core.workspace = true
+mach-store.workspace = true
+mach-gmail.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+toml.workspace = true
+notify.workspace = true
+directories.workspace = true
+anyhow.workspace = true
+futures.workspace = true

@@ -1,0 +1,676 @@
+//! TUI state machine + main event loop.
+//!
+//! Single-threaded model: a `tokio::select!` drains crossterm input events,
+//! tick timers, and store-update notifications. Every mutation goes through
+//! `Dispatcher::execute` so the TUI never touches state outside the
+//! Action enum — same surface the CLI and MCP use.
+
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use futures::StreamExt;
+use mach_core::{
+    keymap::{KeyContext, Keymap, Mode, Resolution},
+    Action, Dispatcher,
+};
+use mach_core::ids::{LabelId, ThreadId};
+use mach_core::store::{MailStore, Message, ThreadSummary};
+use mach_store::SqliteStore;
+use ratatui::{
+    backend::CrosstermBackend,
+    Terminal,
+};
+use tokio::sync::mpsc;
+use tracing::{debug, error, warn};
+
+use crate::config::load_keymap;
+use crate::keys::key_event_to_chord;
+use crate::render::draw;
+
+/// Top-level app state. The `View` enum is the active screen; selection
+/// and chord state live alongside.
+pub struct App {
+    pub keymap: Keymap,
+    pub store: Arc<SqliteStore>,
+    pub dispatcher: Dispatcher,
+    /// Body fetcher is optional — if creds are missing we run offline,
+    /// serving whatever's already cached.
+    pub body_fetcher: Option<Arc<mach_gmail::BodyFetcher>>,
+
+    pub view: View,
+    pub status: StatusLine,
+    pub chord_buffer: String,
+    pub last_chord_continuations: Vec<String>,
+
+    pub running: bool,
+}
+
+/// The active screen. Plus per-screen state.
+pub enum View {
+    Inbox(InboxView),
+    Thread(ThreadView),
+    Composer(ComposerView),
+    Search(SearchView),
+}
+
+pub struct InboxView {
+    pub label: LabelId,
+    pub threads: Vec<ThreadSummary>,
+    pub selected: usize,
+    /// 0-indexed top row of the visible viewport; scrolls when selection
+    /// goes off-screen.
+    pub viewport_top: usize,
+}
+
+pub struct ThreadView {
+    pub thread_id: ThreadId,
+    pub summary: ThreadSummary,
+    pub messages: Vec<Message>,
+    pub scroll: u16,
+    /// Selected message index (for `$current_message` resolution).
+    pub selected_message: usize,
+}
+
+pub struct ComposerView {
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+    pub field: ComposerField,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ComposerField {
+    To,
+    Cc,
+    Subject,
+    Body,
+}
+
+pub struct SearchView {
+    pub query: String,
+    pub results: Vec<ThreadSummary>,
+    pub selected: usize,
+    /// Background view to fall back to when search closes.
+    pub background: Box<View>,
+}
+
+/// One-line status footer. Sync status + chord hint + binding hint.
+pub struct StatusLine {
+    pub account: String,
+    pub sync: SyncState,
+    pub hint: String,
+}
+
+#[allow(dead_code)] // Syncing/AuthExpired set by the periodic-sync task once wired.
+pub enum SyncState {
+    Ok,
+    Syncing,
+    Offline,
+    AuthExpired,
+}
+
+impl App {
+    pub async fn new(store: Arc<SqliteStore>) -> Result<Self> {
+        let keymap = load_keymap()?;
+        let dispatcher = Dispatcher::new(store.clone());
+
+        // Try to construct a body fetcher; if OAuth creds aren't set up,
+        // boot offline. The user can still browse cached mail.
+        let body_fetcher = match build_body_fetcher(store.clone()).await {
+            Ok(b) => Some(Arc::new(b)),
+            Err(e) => {
+                warn!(error = %e, "no body fetcher; running offline");
+                None
+            }
+        };
+
+        let inbox = load_inbox(&store, "INBOX").await?;
+        let view = View::Inbox(inbox);
+
+        let account = match &body_fetcher {
+            Some(b) => b.client().email().await,
+            None => "offline".into(),
+        };
+        let status = StatusLine {
+            account,
+            sync: if body_fetcher.is_some() {
+                SyncState::Ok
+            } else {
+                SyncState::Offline
+            },
+            hint: "j/k:nav  e:archive  c:compose  /:search  q:quit".into(),
+        };
+
+        Ok(Self {
+            keymap,
+            store,
+            dispatcher,
+            body_fetcher,
+            view,
+            status,
+            chord_buffer: String::new(),
+            last_chord_continuations: Vec::new(),
+            running: true,
+        })
+    }
+
+    /// Build a `KeyContext` from current view state.
+    pub fn key_context(&self) -> KeyContext {
+        match &self.view {
+            View::Inbox(v) => KeyContext {
+                selection: v.current_thread_id().map(|t| vec![t.as_str().to_string()]).unwrap_or_default(),
+                current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
+                current_message: None,
+                current_draft: None,
+            },
+            View::Thread(v) => KeyContext {
+                selection: vec![v.thread_id.as_str().to_string()],
+                current_thread: Some(v.thread_id.as_str().to_string()),
+                current_message: v.current_message_id().map(|m| m.as_str().to_string()),
+                current_draft: None,
+            },
+            View::Composer(_) => KeyContext::default(),
+            View::Search(v) => KeyContext {
+                selection: v.current_thread_id().map(|t| vec![t.as_str().to_string()]).unwrap_or_default(),
+                current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn current_mode(&self) -> Mode {
+        match &self.view {
+            View::Inbox(_) => Mode::Normal,
+            View::Thread(_) => Mode::Reading,
+            View::Composer(_) => Mode::Composing,
+            View::Search(_) => Mode::Search,
+        }
+    }
+}
+
+impl InboxView {
+    pub fn current_thread(&self) -> Option<&ThreadSummary> {
+        self.threads.get(self.selected)
+    }
+    pub fn current_thread_id(&self) -> Option<&ThreadId> {
+        self.current_thread().map(|t| &t.id)
+    }
+}
+
+impl ThreadView {
+    pub fn current_message(&self) -> Option<&Message> {
+        self.messages.get(self.selected_message)
+    }
+    pub fn current_message_id(&self) -> Option<&mach_core::ids::MessageId> {
+        self.current_message().map(|m| &m.id)
+    }
+}
+
+impl SearchView {
+    pub fn current_thread(&self) -> Option<&ThreadSummary> {
+        self.results.get(self.selected)
+    }
+    pub fn current_thread_id(&self) -> Option<&ThreadId> {
+        self.current_thread().map(|t| &t.id)
+    }
+}
+
+async fn build_body_fetcher(store: Arc<SqliteStore>) -> Result<mach_gmail::BodyFetcher> {
+    let config = mach_gmail::config::OAuthConfig::from_env()?;
+    let client = mach_gmail::GmailClient::from_keyring(config)?;
+    Ok(mach_gmail::BodyFetcher::new(client, store))
+}
+
+async fn load_inbox(store: &SqliteStore, label: &str) -> Result<InboxView> {
+    let lid = LabelId::new(label);
+    let threads = store
+        .list_threads_in_label(&lid, 200)
+        .await
+        .context("listing inbox threads")?;
+    Ok(InboxView {
+        label: lid,
+        threads,
+        selected: 0,
+        viewport_top: 0,
+    })
+}
+
+/// Run the TUI to completion. Returns when the user quits.
+pub async fn run(store: Arc<SqliteStore>) -> Result<()> {
+    let mut app = App::new(store).await?;
+
+    // Terminal setup.
+    enable_raw_mode().context("enable_raw_mode")?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("alt screen")?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).context("init terminal")?;
+
+    let result = main_loop(&mut app, &mut terminal).await;
+
+    // Always restore terminal state, even on error.
+    disable_raw_mode().ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
+    terminal.show_cursor().ok();
+
+    result
+}
+
+async fn main_loop(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    // Initial draw before we block on input.
+    terminal.draw(|f| draw(f, app)).context("initial draw")?;
+
+    let mut input = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(500));
+
+    while app.running {
+        tokio::select! {
+            ev = input.next() => {
+                match ev {
+                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => {
+                        handle_key(app, k).await;
+                    }
+                    Some(Ok(_)) => {} // resize, mouse, paste — re-draw covers it
+                    Some(Err(e)) => {
+                        error!(error = %e, "input error");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            _ = tick.tick() => {
+                // Could refresh sync status here. For now, just a heartbeat
+                // for the status line.
+            }
+        }
+        terminal.draw(|f| draw(f, app)).context("draw")?;
+    }
+    Ok(())
+}
+
+async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    // Composer text input is special: most keys go to the field, not the
+    // keymap. We only consult the keymap for specific control bindings.
+    if let View::Composer(_) = &app.view {
+        if composer_swallow_key(app, &k) {
+            return;
+        }
+    }
+    // Search text input similarly: chars feed the query, special keys
+    // (Esc/Enter/Up/Down) drive selection.
+    if let View::Search(_) = &app.view {
+        if search_swallow_key(app, &k).await {
+            return;
+        }
+    }
+
+    let Some(chord_atom) = key_event_to_chord(&k) else {
+        return;
+    };
+
+    let new_chord = if app.chord_buffer.is_empty() {
+        chord_atom
+    } else {
+        format!("{} {}", app.chord_buffer, chord_atom)
+    };
+
+    let ctx = app.key_context();
+    match app.keymap.resolve(app.current_mode(), &new_chord, &ctx) {
+        Resolution::Action(action) => {
+            app.chord_buffer.clear();
+            app.last_chord_continuations.clear();
+            execute_action(app, action).await;
+        }
+        Resolution::Prefix(conts) => {
+            app.chord_buffer = new_chord;
+            app.last_chord_continuations = conts
+                .iter()
+                .map(|c| format!("{} → {}", c.next, c.action_name))
+                .collect();
+        }
+        Resolution::Unbound => {
+            // Try fallback: maybe this is a single-key action that's
+            // displacing a chord (e.g. user pressed `g` then a key that
+            // isn't a continuation — treat the new key as fresh).
+            if !app.chord_buffer.is_empty() {
+                app.chord_buffer.clear();
+                app.last_chord_continuations.clear();
+                let chord = key_event_to_chord(&k).unwrap_or_default();
+                if let Resolution::Action(action) =
+                    app.keymap.resolve(app.current_mode(), &chord, &ctx)
+                {
+                    execute_action(app, action).await;
+                }
+            }
+        }
+    }
+}
+
+fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let View::Composer(c) = &mut app.view else {
+        return false;
+    };
+    // Ctrl-Enter and Esc + Ctrl-S go to the keymap.
+    if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('s')) {
+        return false;
+    }
+    if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Enter) {
+        return false;
+    }
+    if matches!(k.code, KeyCode::Esc) {
+        return false;
+    }
+    match k.code {
+        KeyCode::Tab => {
+            c.field = match c.field {
+                ComposerField::To => ComposerField::Cc,
+                ComposerField::Cc => ComposerField::Subject,
+                ComposerField::Subject => ComposerField::Body,
+                ComposerField::Body => ComposerField::To,
+            };
+            true
+        }
+        KeyCode::BackTab => {
+            c.field = match c.field {
+                ComposerField::To => ComposerField::Body,
+                ComposerField::Cc => ComposerField::To,
+                ComposerField::Subject => ComposerField::Cc,
+                ComposerField::Body => ComposerField::Subject,
+            };
+            true
+        }
+        KeyCode::Backspace => {
+            let target = match c.field {
+                ComposerField::To => &mut c.to,
+                ComposerField::Cc => &mut c.cc,
+                ComposerField::Subject => &mut c.subject,
+                ComposerField::Body => &mut c.body,
+            };
+            target.pop();
+            true
+        }
+        KeyCode::Enter => {
+            // Only the body gets newlines; other fields ignore enter.
+            if c.field == ComposerField::Body {
+                c.body.push('\n');
+            }
+            true
+        }
+        KeyCode::Char(ch) => {
+            let target = match c.field {
+                ComposerField::To => &mut c.to,
+                ComposerField::Cc => &mut c.cc,
+                ComposerField::Subject => &mut c.subject,
+                ComposerField::Body => &mut c.body,
+            };
+            target.push(ch);
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn search_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    let View::Search(s) = &mut app.view else {
+        return false;
+    };
+    match k.code {
+        KeyCode::Esc => {
+            // Close search; restore background view.
+            let bg = std::mem::replace(&mut *s.background, View::Inbox(InboxView {
+                label: LabelId::new("INBOX"),
+                threads: Vec::new(),
+                selected: 0,
+                viewport_top: 0,
+            }));
+            app.view = bg;
+            true
+        }
+        KeyCode::Enter => {
+            if let Some(t) = s.current_thread().cloned() {
+                let id = t.id.clone();
+                drop(t);
+                open_thread(app, id).await;
+            }
+            true
+        }
+        KeyCode::Up => {
+            if s.selected > 0 {
+                s.selected -= 1;
+            }
+            true
+        }
+        KeyCode::Down => {
+            if s.selected + 1 < s.results.len() {
+                s.selected += 1;
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            s.query.pop();
+            run_search(app).await;
+            true
+        }
+        KeyCode::Char(ch) => {
+            s.query.push(ch);
+            run_search(app).await;
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn run_search(app: &mut App) {
+    let query = if let View::Search(s) = &app.view {
+        s.query.clone()
+    } else {
+        return;
+    };
+    if query.trim().is_empty() {
+        if let View::Search(s) = &mut app.view {
+            s.results.clear();
+            s.selected = 0;
+        }
+        return;
+    }
+    match app.store.search_threads(&query, 50).await {
+        Ok(hits) => {
+            if let View::Search(s) = &mut app.view {
+                s.results = hits;
+                s.selected = 0;
+            }
+        }
+        Err(e) => warn!(error = %e, "search failed"),
+    }
+}
+
+async fn execute_action(app: &mut App, action: Action) {
+    debug!(?action, "execute_action");
+    match &action {
+        Action::Quit => {
+            app.running = false;
+            return;
+        }
+        Action::BackToList => {
+            // From thread/composer/search → back to inbox label list.
+            if let View::Inbox(_) = app.view {
+                // Already on inbox; nothing to do.
+                return;
+            }
+            if let Ok(inbox) = load_inbox(&app.store, "INBOX").await {
+                app.view = View::Inbox(inbox);
+            }
+            return;
+        }
+        Action::SelectNext => {
+            advance_selection(app, 1);
+            return;
+        }
+        Action::SelectPrev => {
+            advance_selection(app, -1);
+            return;
+        }
+        Action::ComposeNew => {
+            app.view = View::Composer(ComposerView {
+                to: String::new(),
+                cc: String::new(),
+                subject: String::new(),
+                body: String::new(),
+                field: ComposerField::To,
+            });
+            return;
+        }
+        Action::OpenThread { id } => {
+            open_thread(app, id.clone()).await;
+            return;
+        }
+        Action::OpenLabel { label_id } => {
+            match load_inbox(&app.store, label_id.as_str()).await {
+                Ok(inbox) => app.view = View::Inbox(inbox),
+                Err(e) => warn!(error = %e, "open_label failed"),
+            }
+            return;
+        }
+        Action::Search { .. } => {
+            let bg = std::mem::replace(&mut app.view, View::Inbox(InboxView {
+                label: LabelId::new("INBOX"),
+                threads: Vec::new(),
+                selected: 0,
+                viewport_top: 0,
+            }));
+            app.view = View::Search(SearchView {
+                query: String::new(),
+                results: Vec::new(),
+                selected: 0,
+                background: Box::new(bg),
+            });
+            return;
+        }
+        _ => {}
+    }
+
+    // All other actions go through the dispatcher (mutations, etc.).
+    let is_archive_or_trash = matches!(&action, Action::Archive { .. } | Action::Trash { .. });
+    let is_in_reading_mode = matches!(&app.view, View::Thread(_));
+
+    match app.dispatcher.execute(action.clone()).await {
+        Ok(outcome) => {
+            debug!(?outcome, "dispatched");
+
+            // From inbox view: drop the affected row in place (Superhuman feel —
+            // the list visibly closes the gap).
+            if is_archive_or_trash {
+                if let View::Inbox(v) = &mut app.view {
+                    v.threads
+                        .retain(|t| !outcome.changed_threads.iter().any(|c| c == &t.id));
+                    if v.selected >= v.threads.len() && !v.threads.is_empty() {
+                        v.selected = v.threads.len() - 1;
+                    }
+                }
+            }
+
+            // From thread reader: archive/trash should kick you back to the
+            // inbox + advance to the next thread. That's the muscle-memory
+            // expectation from Superhuman, Gmail, Mail.app — you're done with
+            // this thread, hand me the next one.
+            if is_archive_or_trash && is_in_reading_mode {
+                let removed_id = outcome.changed_threads.first().cloned();
+                if let Ok(mut inbox) = load_inbox(&app.store, "INBOX").await {
+                    // Pick the thread that was *next* in the old list (so the
+                    // selection points to what would have shown up underneath
+                    // the cursor). Falls back to the head of the list.
+                    if let Some(removed) = removed_id {
+                        let preferred = inbox
+                            .threads
+                            .iter()
+                            .position(|t| t.id == removed)
+                            .unwrap_or(0);
+                        inbox.selected = preferred.min(inbox.threads.len().saturating_sub(1));
+                    }
+                    app.view = View::Inbox(inbox);
+                }
+            }
+        }
+        Err(e) => warn!(error = %e, "dispatch failed"),
+    }
+}
+
+async fn open_thread(app: &mut App, id: ThreadId) {
+    // Background body fetch if creds are available. We block here for the
+    // sake of simplicity; for v1.5 we'll move this to a background task.
+    if let Some(fetcher) = &app.body_fetcher {
+        if let Err(e) = fetcher.fetch_if_needed(&id).await {
+            warn!(error = %e, "body backfill failed");
+        }
+    }
+    let Ok(Some(summary)) = app.store.get_thread(&id).await else {
+        warn!(thread_id = %id, "thread not found");
+        return;
+    };
+    let messages = app
+        .store
+        .list_messages_in_thread(&id)
+        .await
+        .unwrap_or_default();
+    app.view = View::Thread(ThreadView {
+        thread_id: id,
+        summary,
+        messages,
+        scroll: 0,
+        selected_message: 0,
+    });
+}
+
+fn advance_selection(app: &mut App, delta: i32) {
+    match &mut app.view {
+        View::Inbox(v) => {
+            if v.threads.is_empty() {
+                return;
+            }
+            let next = (v.selected as i32 + delta).clamp(0, v.threads.len() as i32 - 1) as usize;
+            v.selected = next;
+        }
+        View::Thread(v) => {
+            if !v.messages.is_empty() {
+                let next = (v.selected_message as i32 + delta)
+                    .clamp(0, v.messages.len() as i32 - 1) as usize;
+                v.selected_message = next;
+            }
+        }
+        View::Search(v) => {
+            if !v.results.is_empty() {
+                let next = (v.selected as i32 + delta).clamp(0, v.results.len() as i32 - 1) as usize;
+                v.selected = next;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Drain a `mpsc::Receiver` of pending items without blocking. Used for
+/// burst-merging keystrokes into a single redraw. (Unused at v1 — kept for
+/// when we batch state events.)
+#[allow(dead_code)]
+fn try_drain<T>(rx: &mut mpsc::Receiver<T>, into: &mut Vec<T>) {
+    while let Ok(v) = rx.try_recv() {
+        into.push(v);
+    }
+}

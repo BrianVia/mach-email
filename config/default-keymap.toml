@@ -1,0 +1,96 @@
+# mach — default keymap.
+#
+# Bindings are split by *mode*. The TUI/desktop knows which mode the user
+# is in (normal = inbox list, reading = thread open, composing = editor,
+# search = search prompt, filter = filter overlay) and consults that
+# section.
+#
+# Macros, substituted at dispatch time:
+#   "$selection"        → currently-selected thread IDs (array)
+#   "$current_thread"   → most-recently-opened thread ID (string)
+#   "$current_message"  → focused message ID inside the thread reader
+#   "$current_draft"    → focused draft ID inside the composer
+#
+# Override per-binding at ~/.config/mach/keymap.toml. Anything in your
+# user file wins; anything you don't override stays at these defaults.
+#
+# These defaults track Superhuman v7 (Mac edition). They're chosen for
+# familiarity, not because we love every choice — feel free to remap.
+
+# ─────────────────────────────────────────────────────────────────────
+# Normal mode (inbox list)
+# ─────────────────────────────────────────────────────────────────────
+[normal]
+# Selection movement
+"j"        = "select_next"
+"k"        = "select_prev"
+"down"     = "select_next"
+"up"       = "select_prev"
+
+# Open thread
+"enter"    = { kind = "open_thread", id = "$current_thread" }
+"l"        = { kind = "open_thread", id = "$current_thread" }
+"esc"      = "back_to_list"
+
+# Mutations on selection
+"e"        = { kind = "archive",   thread_ids = "$selection" }
+"#"        = { kind = "trash",     thread_ids = "$selection" }
+"s"        = { kind = "star",      thread_ids = "$selection", starred = true }
+"shift+s"  = { kind = "star",      thread_ids = "$selection", starred = false }
+"u"        = { kind = "mark_read", thread_ids = "$selection", read = false }
+"shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
+
+# Compose
+"c"        = "compose_new"
+"r"        = { kind = "reply",   message_id = "$current_message", all = false }
+"shift+r"  = { kind = "reply",   message_id = "$current_message", all = true  }
+"f"        = { kind = "forward", message_id = "$current_message" }
+
+# Search & navigation
+"/"        = { kind = "search",     query = "", limit = 50 }
+"shift+/"  = { kind = "search",     query = "", limit = 50 }
+
+# Vim-style "Go to" chord prefix
+"g i"      = { kind = "open_label", label_id = "INBOX"   }
+"g s"      = { kind = "open_label", label_id = "STARRED" }
+"g d"      = { kind = "open_label", label_id = "DRAFT"   }
+"g t"      = { kind = "open_label", label_id = "SENT"    }
+"g e"      = { kind = "open_label", label_id = "DONE"    }   # Superhuman "Done" = archived
+"g h"      = { kind = "open_label", label_id = "MUTED"   }
+"g j"      = { kind = "open_label", label_id = "SPAM"    }
+"g k"      = { kind = "open_label", label_id = "TRASH"   }
+"g a"      = { kind = "open_label", label_id = "ALL"     }
+
+# Meta
+"z"        = "undo"
+"shift+z"  = "redo"
+"ctrl+r"   = "refresh"
+"q"        = "quit"
+
+# ─────────────────────────────────────────────────────────────────────
+# Reading mode (thread is open)
+# ─────────────────────────────────────────────────────────────────────
+[reading]
+"j"        = "select_next"      # next thread in the list-behind
+"k"        = "select_prev"
+"esc"      = "back_to_list"
+"e"        = { kind = "archive",   thread_ids = "$selection" }
+"#"        = { kind = "trash",     thread_ids = "$selection" }
+"s"        = { kind = "star",      thread_ids = "$selection", starred = true }
+"shift+s"  = { kind = "star",      thread_ids = "$selection", starred = false }
+"u"        = { kind = "mark_read", thread_ids = "$selection", read = false }
+"shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
+
+"r"        = { kind = "reply",   message_id = "$current_message", all = false }
+"shift+r"  = { kind = "reply",   message_id = "$current_message", all = true  }
+"f"        = { kind = "forward", message_id = "$current_message" }
+"c"        = "compose_new"
+"q"        = "quit"
+
+# ─────────────────────────────────────────────────────────────────────
+# Composing mode (draft editor)
+# ─────────────────────────────────────────────────────────────────────
+[composing]
+"esc"      = "back_to_list"                # close composer
+"ctrl+s"   = { kind = "save_draft", draft_id = "$current_draft", patch = {} }
+"ctrl+enter" = { kind = "send_draft", draft_id = "$current_draft" }

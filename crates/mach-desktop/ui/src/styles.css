@@ -1,0 +1,212 @@
+@import "tailwindcss";
+
+@theme {
+  /* Neutrals — 9-step ramp, designed so adjacent values have visible but
+     subtle contrast. Picked off a cool-blue undertone (#0a0d12 base) so
+     accent indigo lands cleanly on top. */
+  --color-bg:          #0a0d12;   /* canvas */
+  --color-bg-elev-1:   #0f131b;   /* card */
+  --color-bg-elev-2:   #161b26;   /* raised card / modal */
+  --color-bg-elev-3:   #1d2331;   /* hover / focus surface */
+  --color-bg-selected: #1c2540;   /* selected row tint */
+
+  --color-fg:          #f0f1f5;   /* primary text */
+  --color-fg-soft:     #c3c7d1;   /* secondary text */
+  --color-fg-mute:     #7d8390;   /* tertiary / metadata */
+  --color-fg-dim:      #565b67;   /* hairline borders, deep mute */
+
+  --color-accent:        #818cf8;  /* indigo-400 — primary action */
+  --color-accent-bright: #a5b0ff;  /* hover state */
+  --color-accent-soft:   #4f5cd0;  /* darker, for shadows/glows */
+
+  --color-unread:  #fb923c;        /* warm orange — unread dot */
+  --color-starred: #facc15;        /* warm yellow — star */
+  --color-success: #22c55e;
+  --color-warning: #fbbf24;
+  --color-danger:  #f87171;
+
+  /* Fonts. Variable Inter is the gold standard; system fallback if absent. */
+  --font-sans:
+    "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui,
+    sans-serif;
+  --font-mono:
+    "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Radii — sized for the surface they apply to. */
+  --radius-row:    8px;
+  --radius-card:  12px;
+  --radius-modal: 16px;
+
+  /* Shadows. Two tones — a soft "lift" for cards and a stronger one for
+     floating elements (modals, popovers). Both use cool-blue undertones
+     that match the bg. */
+  --shadow-card:
+    0 1px 0 rgba(255, 255, 255, 0.03),
+    0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-pop:
+    0 1px 0 rgba(255, 255, 255, 0.04),
+    0 12px 36px rgba(0, 0, 0, 0.55),
+    0 24px 64px rgba(0, 0, 0, 0.35);
+}
+
+html, body, #app { height: 100%; }
+html {
+  background: var(--color-bg);
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11", "cv02";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.005em;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  overflow: hidden;
+}
+
+/* Scrollbars — narrow, neutral, fade-on-hover. */
+* { scrollbar-width: thin; scrollbar-color: var(--color-fg-dim) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+*:hover::-webkit-scrollbar-thumb { background-color: var(--color-fg-dim); background-clip: padding-box; }
+
+/* Selection highlight gradient. Subtle indigo glow on the left edge. */
+.row-selected {
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--color-accent) 22%, transparent),
+      color-mix(in oklab, var(--color-accent) 6%, transparent) 35%,
+      transparent 80%
+    );
+  box-shadow:
+    inset 3px 0 0 var(--color-accent),
+    inset 0 0 0 1px rgba(255,255,255,0.02);
+}
+
+/* Reusable surface — used for the composer modal, popovers, etc. */
+.glass {
+  background: color-mix(in oklab, var(--color-bg-elev-2) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+}
+
+/* Pulsing unread dot — 3s cycle, easy to ignore but draws the eye on
+   unscrolled new mail. */
+@keyframes mach-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-unread) 60%, transparent); }
+  50%      { box-shadow: 0 0 0 5px transparent; }
+}
+.unread-dot {
+  background: var(--color-unread);
+  border-radius: 999px;
+  animation: mach-pulse 2.4s ease-in-out infinite;
+}
+
+/* Subtle focus rings — accent at low opacity, not the browser blue. */
+:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--color-accent) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Make form controls match the theme. */
+input, textarea, button, select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: transparent;
+}
+button { cursor: pointer; }
+
+/* Rendered email HTML — keep images responsive, links accent-colored,
+   tables from breaking layout. Marketing emails are *the* worst actors;
+   these defaults clamp the worst offenders. */
+.mach-html img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+}
+.mach-html a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.mach-html a:hover { color: var(--color-accent-bright); }
+.mach-html table { max-width: 100%; border-collapse: collapse; }
+.mach-html blockquote {
+  border-left: 3px solid var(--color-fg-dim);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--color-fg-soft);
+}
+.mach-html pre {
+  background: var(--color-bg-elev-1);
+  padding: 10px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.mach-html code {
+  background: var(--color-bg-elev-1);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+.mach-html h1, .mach-html h2, .mach-html h3, .mach-html h4 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  color: var(--color-fg);
+  letter-spacing: -0.01em;
+}
+.mach-html p  { margin: 8px 0; line-height: 1.6; }
+.mach-html ul, .mach-html ol { padding-left: 22px; margin: 8px 0; }
+.mach-html hr {
+  border: none;
+  border-top: 1px solid var(--color-fg-dim);
+  opacity: 0.3;
+  margin: 16px 0;
+}
+
+/* Avatar — colored circle for sender initials. Hash function in
+   `lib/avatar.ts` picks the hue. */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+  color: white;
+  user-select: none;
+}
+
+/* "kbd" pill — used in chord overlay + status hints. */
+.kbd {
+  background: var(--color-bg-elev-2);
+  border: 1px solid color-mix(in oklab, var(--color-fg-dim) 50%, transparent);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-fg-soft);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.5);
+}
