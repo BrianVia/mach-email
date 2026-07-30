@@ -10,9 +10,12 @@ pub mod config;
 pub mod credentials;
 pub mod oauth;
 pub mod outbox;
+mod search;
 pub mod sync;
 
-pub use body_fetcher::{BodyFetcher, FetchOutcome, GmailAccountPool, PullReport};
+pub use body_fetcher::{
+    BodyFetcher, FetchOutcome, GmailAccountPool, PullReport, RemoteSearchReport,
+};
 pub use client::GmailClient;
 pub use config::OAuthConfig;
 pub use credentials::{CredsError, StoredCredentials};

@@ -42,6 +42,8 @@ pub struct App {
     /// Body fetcher is optional — if creds are missing we run offline,
     /// serving whatever's already cached.
     pub body_fetchers: Arc<mach_gmail::GmailAccountPool>,
+    search_events: Option<mpsc::UnboundedSender<SearchEvent>>,
+    remote_search_task: Option<tokio::task::JoinHandle<()>>,
 
     pub view: View,
     pub status: StatusLine,
@@ -97,6 +99,8 @@ pub struct SearchView {
     pub query: String,
     pub results: Vec<ThreadSummary>,
     pub selected: usize,
+    pub remote_searching: bool,
+    pub remote_failures: usize,
     /// Background view to fall back to when search closes.
     pub background: Box<View>,
 }
@@ -119,6 +123,11 @@ pub enum SyncState {
 enum PullEvent {
     Started,
     Finished(mach_gmail::PullReport),
+}
+
+struct SearchEvent {
+    query: String,
+    report: mach_gmail::RemoteSearchReport,
 }
 
 impl App {
@@ -163,6 +172,8 @@ impl App {
             scope,
             dispatcher,
             body_fetchers,
+            search_events: None,
+            remote_search_task: None,
             view,
             status,
             chord_buffer: String::new(),
@@ -255,6 +266,8 @@ async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> R
 /// Run the TUI to completion. Returns when the user quits.
 pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
     let mut app = App::new(store, scope).await?;
+    let (search_tx, mut search_rx) = mpsc::unbounded_channel();
+    app.search_events = Some(search_tx);
 
     // Terminal setup.
     enable_raw_mode().context("enable_raw_mode")?;
@@ -269,8 +282,11 @@ pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
         app.scope.clone(),
         pull_tx,
     ));
-    let result = main_loop(&mut app, &mut terminal, &mut pull_rx).await;
+    let result = main_loop(&mut app, &mut terminal, &mut pull_rx, &mut search_rx).await;
     pull_task.abort();
+    if let Some(task) = app.remote_search_task.take() {
+        task.abort();
+    }
 
     // Always restore terminal state, even on error.
     disable_raw_mode().ok();
@@ -289,6 +305,7 @@ async fn main_loop(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     pull_events: &mut mpsc::UnboundedReceiver<PullEvent>,
+    search_events: &mut mpsc::UnboundedReceiver<SearchEvent>,
 ) -> Result<()> {
     // Initial draw before we block on input.
     terminal.draw(|f| draw(f, app)).context("initial draw")?;
@@ -316,6 +333,9 @@ async fn main_loop(
             }
             Some(event) = pull_events.recv() => {
                 handle_pull_event(app, event).await;
+            }
+            Some(event) = search_events.recv() => {
+                handle_search_event(app, event);
             }
         }
         terminal.draw(|f| draw(f, app)).context("draw")?;
@@ -381,6 +401,43 @@ async fn refresh_visible_inbox(app: &mut App) {
             app.view = View::Inbox(inbox);
         }
         Err(error) => warn!(%error, "refreshing inbox after background pull failed"),
+    }
+}
+
+fn handle_search_event(app: &mut App, event: SearchEvent) {
+    let View::Search(search) = &mut app.view else {
+        return;
+    };
+    if search.query != event.query {
+        return;
+    }
+    let selected = search
+        .current_thread()
+        .map(|thread| (thread.account_id.clone(), thread.id.clone()));
+    search.results.extend(event.report.results);
+    search.results.sort_by(|left, right| {
+        right
+            .last_message_at
+            .cmp(&left.last_message_at)
+            .then_with(|| left.account_id.as_str().cmp(right.account_id.as_str()))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    search
+        .results
+        .dedup_by(|left, right| left.account_id == right.account_id && left.id == right.id);
+    search.results.truncate(50);
+    search.selected = selected
+        .and_then(|(account, id)| {
+            search
+                .results
+                .iter()
+                .position(|thread| thread.account_id == account && thread.id == id)
+        })
+        .unwrap_or(0);
+    search.remote_searching = false;
+    search.remote_failures = event.report.failures.len();
+    for (account, error) in event.report.failures {
+        warn!(account = %account, error, "remote search failed");
     }
 }
 
@@ -514,6 +571,9 @@ async fn search_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bo
     };
     match k.code {
         KeyCode::Esc => {
+            if let Some(task) = app.remote_search_task.take() {
+                task.abort();
+            }
             // Close search; restore background view.
             let bg = std::mem::replace(
                 &mut *s.background,
@@ -529,6 +589,9 @@ async fn search_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bo
         }
         KeyCode::Enter => {
             if let Some(t) = s.current_thread().cloned() {
+                if let Some(task) = app.remote_search_task.take() {
+                    task.abort();
+                }
                 let id = t.id.clone();
                 drop(t);
                 open_thread(app, id).await;
@@ -568,9 +631,14 @@ async fn run_search(app: &mut App) {
         return;
     };
     if query.trim().is_empty() {
+        if let Some(task) = app.remote_search_task.take() {
+            task.abort();
+        }
         if let View::Search(s) = &mut app.view {
             s.results.clear();
             s.selected = 0;
+            s.remote_searching = false;
+            s.remote_failures = 0;
         }
         return;
     }
@@ -579,10 +647,32 @@ async fn run_search(app: &mut App) {
             if let View::Search(s) = &mut app.view {
                 s.results = hits;
                 s.selected = 0;
+                s.remote_searching = !app.body_fetchers.is_empty();
+                s.remote_failures = 0;
             }
         }
         Err(e) => warn!(error = %e, "search failed"),
     }
+    if let Some(task) = app.remote_search_task.take() {
+        task.abort();
+    }
+    if app.body_fetchers.is_empty() {
+        return;
+    }
+    let Some(events) = app.search_events.clone() else {
+        return;
+    };
+    let accounts = app.body_fetchers.clone();
+    let scope = app.scope.clone();
+    let task_query = query.clone();
+    app.remote_search_task = Some(tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let report = accounts.search_remote(&scope, &task_query, 50).await;
+        let _ = events.send(SearchEvent {
+            query: task_query,
+            report,
+        });
+    }));
 }
 
 async fn execute_action(app: &mut App, action: Action) {
@@ -646,6 +736,8 @@ async fn execute_action(app: &mut App, action: Action) {
                 query: String::new(),
                 results: Vec::new(),
                 selected: 0,
+                remote_searching: false,
+                remote_failures: 0,
                 background: Box::new(bg),
             });
             return;

@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use mach_core::{
     ids::{AccountId, AccountScope, ThreadId},
-    store::MailStore,
+    store::{MailStore, ThreadSummary},
 };
 use mach_store::{MessageBodyUpdate, SqliteStore};
 use tracing::{debug, info};
@@ -37,6 +37,12 @@ pub struct GmailAccountPool {
 pub struct PullReport {
     pub attempted: usize,
     pub succeeded: usize,
+    pub failures: Vec<(AccountId, String)>,
+}
+
+#[derive(Debug, Default)]
+pub struct RemoteSearchReport {
+    pub results: Vec<ThreadSummary>,
     pub failures: Vec<(AccountId, String)>,
 }
 
@@ -164,6 +170,59 @@ impl GmailAccountPool {
                 Err(error) => report.failures.push((account, format!("{error:#}"))),
             }
         }
+        report
+    }
+
+    /// Search Gmail's complete index for every account in scope, cache the
+    /// matching metadata, and return one date-sorted account-qualified list.
+    pub async fn search_remote(
+        &self,
+        scope: &AccountScope,
+        query: &str,
+        limit: u32,
+    ) -> RemoteSearchReport {
+        let selected: Vec<_> = self
+            .fetchers
+            .iter()
+            .filter(|(account, _)| scope.account().map_or(true, |wanted| wanted == *account))
+            .map(|(account, fetcher)| (account.clone(), fetcher.clone()))
+            .collect();
+        let query = query.to_string();
+        let mut searches = stream::iter(selected)
+            .map(|(account, fetcher)| {
+                let query = query.clone();
+                async move {
+                    let result = crate::search::search_account(
+                        &account,
+                        fetcher.client.clone(),
+                        fetcher.store.clone(),
+                        &query,
+                        limit,
+                    )
+                    .await;
+                    (account, result)
+                }
+            })
+            .buffer_unordered(4);
+
+        let mut report = RemoteSearchReport::default();
+        while let Some((account, result)) = searches.next().await {
+            match result {
+                Ok(results) => report.results.extend(results),
+                Err(error) => report.failures.push((account, format!("{error:#}"))),
+            }
+        }
+        report.results.sort_by(|left, right| {
+            right
+                .last_message_at
+                .cmp(&left.last_message_at)
+                .then_with(|| left.account_id.as_str().cmp(right.account_id.as_str()))
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        report
+            .results
+            .dedup_by(|left, right| left.account_id == right.account_id && left.id == right.id);
+        report.results.truncate(limit as usize);
         report
     }
 }

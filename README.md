@@ -5,7 +5,7 @@ It provides a terminal UI, JSON CLI, Tauri desktop application, and MCP
 server over one Rust core.
 
 The application is currently best treated as a personal read-and-triage
-client. Unified multi-account inbox browsing, per-account filtering, search,
+client. Unified multi-account inbox browsing, per-account filtering, hybrid search,
 archive, trash, read/unread, starring,
 labels, snooze, lazy body fetching, undo/redo, manual Gmail sync, and
 account-correct mutation routing, and pull-only background refresh while the
@@ -26,7 +26,8 @@ Mail data is cached in the platform application-data directory. Mutations
 update SQLite optimistically and atomically enqueue a durable Gmail operation.
 The TUI pulls Gmail history at startup and every 60 seconds without delivering
 queued mutations. Run `mach sync` to drain those operations as well as pull
-Gmail history.
+Gmail history. Slash search returns cached SQLite matches immediately, then
+queries Gmail for every active account and merges the newest unique results.
 
 ## Prerequisites
 

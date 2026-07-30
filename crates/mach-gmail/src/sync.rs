@@ -134,7 +134,7 @@ pub async fn bootstrap(
     Ok(stats)
 }
 
-fn remote_thread_to_upsert(t: &RemoteThread) -> ThreadUpsert {
+pub(crate) fn remote_thread_to_upsert(t: &RemoteThread) -> ThreadUpsert {
     let history_id: u64 = t.history_id.parse().unwrap_or(0);
     let messages: Vec<MessageUpsert> = t.messages.iter().map(remote_message_to_upsert).collect();
 

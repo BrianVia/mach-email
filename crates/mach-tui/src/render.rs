@@ -341,11 +341,27 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
         ),
         Span::styled(v.query.clone(), Style::default().fg(Color::White)),
         Span::styled("▏", Style::default().fg(ACCENT)),
+        Span::styled(
+            if v.remote_searching {
+                format!("  {} local · searching Gmail…", v.results.len())
+            } else if v.remote_failures > 0 {
+                format!(
+                    "  {} results · {} account search failed",
+                    v.results.len(),
+                    v.remote_failures
+                )
+            } else {
+                format!("  {} results", v.results.len())
+            },
+            Style::default().fg(DIM),
+        ),
     ]));
     f.render_widget(prompt, chunks[0]);
 
     if v.results.is_empty() {
-        let msg = if v.query.is_empty() {
+        let msg = if v.remote_searching {
+            "Searching Gmail…"
+        } else if v.query.is_empty() {
             "Type to search…"
         } else {
             "No matches"
@@ -357,36 +373,48 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
         return;
     }
 
-    let lines: Vec<Line> = v
-        .results
-        .iter()
-        .take(chunks[1].height as usize)
-        .enumerate()
-        .map(|(i, t)| {
-            let selected = i == v.selected;
-            let style = if selected {
-                Style::default().bg(SELECTED_BG)
-            } else {
-                Style::default()
-            };
-            Line::from(vec![
-                Span::raw(if selected { " ▸ " } else { "   " }),
-                Span::styled(
-                    format!(
-                        "{:<28} ",
-                        trunc(t.participants.first().map(|s| s.as_str()).unwrap_or(""), 28)
-                    ),
-                    Style::default().fg(ACCENT),
+    let row_count = chunks[1].height.saturating_sub(1) as usize;
+    let header = Line::from(vec![
+        Span::raw("   "),
+        Span::styled(format!("{:<22} ", "Account"), Style::default().fg(DIM)),
+        Span::styled(format!("{:>8} ", "Date"), Style::default().fg(DIM)),
+        Span::styled(format!("{:<28} ", "From"), Style::default().fg(DIM)),
+        Span::styled(format!("{:<50} ", "Subject"), Style::default().fg(DIM)),
+        Span::styled("Preview", Style::default().fg(DIM)),
+    ]);
+    let rows = v.results.iter().take(row_count).enumerate().map(|(i, t)| {
+        let selected = i == v.selected;
+        let style = if selected {
+            Style::default().bg(SELECTED_BG)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::raw(if selected { " ▸ " } else { "   " }),
+            Span::styled(
+                format!("{:<22} ", trunc(t.account_id.as_str(), 22)),
+                Style::default().fg(DIM),
+            ),
+            Span::styled(
+                format!("{:>8} ", pretty_when(&t.last_message_at)),
+                Style::default().fg(DIM),
+            ),
+            Span::styled(
+                format!(
+                    "{:<28} ",
+                    trunc(t.participants.first().map(|s| s.as_str()).unwrap_or(""), 28)
                 ),
-                Span::styled(
-                    format!("{:<50} ", trunc(&t.subject, 50)),
-                    Style::default().fg(Color::White),
-                ),
-                Span::styled(trunc(&t.snippet, 60), Style::default().fg(DIM)),
-            ])
-            .style(style)
-        })
-        .collect();
+                Style::default().fg(ACCENT),
+            ),
+            Span::styled(
+                format!("{:<50} ", trunc(&t.subject, 50)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(trunc(&t.snippet, 60), Style::default().fg(DIM)),
+        ])
+        .style(style)
+    });
+    let lines: Vec<Line> = std::iter::once(header).chain(rows).collect();
     f.render_widget(Paragraph::new(lines), chunks[1]);
 }
 
