@@ -75,20 +75,56 @@ fn render_html(html: &str, width: u16) -> Option<Vec<Line<'static>>> {
         .lines_from_read(input.as_bytes(), usize::from(width.max(20)))
         .ok()?;
     let output_truncated = rendered.len() > MAX_OUTPUT_LINES;
+    let mut links = Vec::new();
     let mut lines: Vec<_> = rendered
         .into_iter()
         .take(MAX_OUTPUT_LINES)
         .map(|line| {
-            let spans = line
-                .tagged_strings()
-                .filter_map(|text| {
-                    let safe = strip_terminal_controls(&text.s);
-                    (!safe.is_empty()).then(|| Span::styled(safe, annotation_style(&text.tag)))
-                })
-                .collect::<Vec<_>>();
+            let mut spans = Vec::new();
+            for text in line.tagged_strings() {
+                let safe = strip_terminal_controls(&text.s);
+                if safe.is_empty() {
+                    continue;
+                }
+                spans.push(Span::styled(safe, annotation_style(&text.tag)));
+                if let Some(url) = safe_link_target(&text.tag) {
+                    let number = links.iter().position(|known| known == &url).map(|i| i + 1);
+                    let first_reference = number.is_none() && links.len() < 50;
+                    let number = number.or_else(|| {
+                        first_reference.then(|| {
+                            links.push(url);
+                            links.len()
+                        })
+                    });
+                    if first_reference {
+                        spans.push(Span::styled(
+                            format!("[{}]", number.expect("new link has an index")),
+                            Style::default().fg(DIM),
+                        ));
+                    }
+                }
+            }
             Line::from(spans)
         })
         .collect();
+    if !links.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Links",
+            Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+        ));
+        lines.extend(links.into_iter().enumerate().map(|(index, url)| {
+            Line::from(vec![
+                Span::styled(format!("[{}] ", index + 1), Style::default().fg(DIM)),
+                Span::styled(
+                    url,
+                    Style::default()
+                        .fg(ACCENT)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+            ])
+        }));
+    }
     if input_truncated || output_truncated {
         lines.push(Line::styled(
             "… message truncated for terminal safety …",
@@ -135,6 +171,20 @@ fn annotation_style(annotations: &[RichAnnotation]) -> Style {
 fn safe_link(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+}
+
+fn safe_link_target(annotations: &[RichAnnotation]) -> Option<String> {
+    annotations.iter().find_map(|annotation| {
+        let RichAnnotation::Link(url) = annotation else {
+            return None;
+        };
+        if !safe_link(url) {
+            return None;
+        }
+        let safe = strip_terminal_controls(url.trim());
+        let (bounded, _) = truncate_utf8(&safe, 2_048);
+        Some(bounded.to_owned())
+    })
 }
 
 fn strip_terminal_controls(input: &str) -> String {
@@ -245,5 +295,21 @@ mod tests {
             20,
         );
         assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn exposes_link_targets_without_terminal_escape_sequences() {
+        let lines = render_message(
+            &message(
+                Some(r#"<p><a href="https://example.com/inbox">Open your Inbox</a></p>"#),
+                None,
+            ),
+            80,
+        );
+        let output = text(&lines);
+        assert!(output.contains("Open your Inbox"));
+        assert!(output.contains("[1]"));
+        assert!(output.contains("https://example.com/inbox"));
+        assert!(!output.contains('\u{1b}'));
     }
 }
