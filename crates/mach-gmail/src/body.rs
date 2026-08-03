@@ -71,7 +71,7 @@ impl ParsedBody {
             // "text" otherwise (the visible bug on the TUI when a sender's
             // marketing HTML lacks a text/plain alternative).
             let stripped = strip_noise_blocks(html);
-            html2text::from_read(stripped.as_bytes(), 1_000_000)
+            html2text::from_read(stripped.as_bytes(), 1_000_000).ok()?
         };
         Some(clean(&raw))
     }

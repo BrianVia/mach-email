@@ -78,7 +78,7 @@ clap = { version = "4", features = ["derive", "env"] }
 mail-builder = "0.4"
 
 # Misc
-html2text = "0.12"
+html2text = "0.17"
 
 [profile.release]
 opt-level = 3

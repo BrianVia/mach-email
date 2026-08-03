@@ -2,7 +2,7 @@
 
 use std::{cell::RefCell, collections::HashMap};
 
-use html2text::render::text_renderer::RichAnnotation;
+use html2text::render::RichAnnotation;
 use mach_core::store::Message;
 use ratatui::{
     style::{Color, Modifier, Style},
