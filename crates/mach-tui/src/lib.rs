@@ -5,6 +5,7 @@
 //! at `~/.config/mach/keymap.toml`.
 
 mod app;
+mod backend;
 mod config;
 mod email_body;
 mod keys;

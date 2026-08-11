@@ -32,6 +32,12 @@ const SELECTED_BG: Color = Color::Rgb(0x1e, 0x29, 0x40);
 const STARRED: Color = Color::Rgb(0xff, 0xd1, 0x5c);
 
 pub fn draw(f: &mut Frame, app: &App) {
+    // Publish this frame's link table so the backend can translate
+    // underline-color ids into OSC 8 hyperlinks while drawing.
+    match &app.view {
+        View::Thread(v) => app.hyperlinks.publish(v.body_renderer.hyperlinks()),
+        _ => app.hyperlinks.publish(Vec::new()),
+    }
     // Every frame owns every terminal cell. This also repairs stale cells
     // after a resize or a previously width-unsafe message body.
     f.render_widget(Clear, f.area());

@@ -23,11 +23,12 @@ use mach_core::{
     Action, Dispatcher,
 };
 use mach_store::SqliteStore;
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, warn};
 
+use crate::backend::HyperlinkRegistry;
 use crate::config::load_keymap;
 use crate::email_body::EmailBodyRenderer;
 use crate::keys::key_event_to_chord;
@@ -43,6 +44,7 @@ pub struct App {
     /// Body fetcher is optional — if creds are missing we run offline,
     /// serving whatever's already cached.
     pub body_fetchers: Arc<mach_gmail::GmailAccountPool>,
+    pub hyperlinks: Arc<HyperlinkRegistry>,
     search_events: Option<mpsc::UnboundedSender<SearchEvent>>,
     remote_search_task: Option<tokio::task::JoinHandle<()>>,
 
@@ -57,7 +59,7 @@ pub struct App {
 /// The active screen. Plus per-screen state.
 pub enum View {
     Inbox(InboxView),
-    Thread(ThreadView),
+    Thread(Box<ThreadView>),
     Composer(ComposerView),
     Search(SearchView),
 }
@@ -150,6 +152,7 @@ impl App {
 
         let inbox = load_inbox(&store, &scope, "INBOX").await?;
         let view = View::Inbox(inbox);
+        let hyperlinks = Arc::new(HyperlinkRegistry::default());
 
         let account = match &scope {
             AccountScope::One(account) => account.to_string(),
@@ -174,6 +177,7 @@ impl App {
             scope,
             dispatcher,
             body_fetchers,
+            hyperlinks,
             search_events: None,
             remote_search_task: None,
             view,
@@ -275,7 +279,7 @@ pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
     enable_raw_mode().context("enable_raw_mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("alt screen")?;
-    let backend = CrosstermBackend::new(stdout);
+    let backend = crate::backend::HyperlinkBackend::new(stdout, app.hyperlinks.clone());
     let mut terminal = Terminal::new(backend).context("init terminal")?;
 
     let (pull_tx, mut pull_rx) = mpsc::unbounded_channel();
@@ -305,7 +309,7 @@ pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
 
 async fn main_loop(
     app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<crate::backend::HyperlinkBackend<io::Stdout>>,
     pull_events: &mut mpsc::UnboundedReceiver<PullEvent>,
     search_events: &mut mpsc::UnboundedReceiver<SearchEvent>,
 ) -> Result<()> {
@@ -839,14 +843,14 @@ async fn open_thread(app: &mut App, id: ThreadId) {
         .list_messages_in_thread(&AccountScope::One(summary.account_id.clone()), &id)
         .await
         .unwrap_or_default();
-    app.view = View::Thread(ThreadView {
+    app.view = View::Thread(Box::new(ThreadView {
         thread_id: id,
         summary,
         messages,
         body_renderer: EmailBodyRenderer::default(),
         scroll: 0,
         selected_message: 0,
-    });
+    }));
 }
 
 fn advance_selection(app: &mut App, delta: i32) {
