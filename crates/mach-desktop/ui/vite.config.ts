@@ -1,6 +1,5 @@
 import { defineConfig } from "vite";
-import solid from "vite-plugin-solid";
-import tailwindcss from "@tailwindcss/vite";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
 // https://vitejs.dev/config/
@@ -8,7 +7,7 @@ export default defineConfig(async () => ({
   // Bundle everything into a single index.html: JS, CSS, even images. This
   // avoids Tauri's asset protocol having to serve separate files — the
   // entire frontend ships as one inlined file the WebView loads in one shot.
-  plugins: [solid(), tailwindcss(), viteSingleFile()],
+  plugins: [svelte(), viteSingleFile()],
   base: "./",
 
   // Vite options tailored for Tauri development.

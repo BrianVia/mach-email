@@ -1,0 +1,2 @@
+<script lang="ts">import type {Snippet} from 'svelte';let{children,primary=false,onclick}:{children:Snippet;primary?:boolean;onclick?:()=>void}=$props();</script>
+<button class:primary {onclick}>{@render children()}</button><style>button{height:32px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:0 12px;font-size:13px;font-weight:550}button:hover{background:var(--hover)}.primary{background:var(--accent);color:white;border-color:var(--accent)}</style>

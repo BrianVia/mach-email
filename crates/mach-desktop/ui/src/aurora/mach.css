@@ -1,0 +1,7 @@
+:root {
+  --danger: oklch(62% 0.19 25);
+  --success: oklch(65% 0.15 155);
+  --starred: oklch(75% 0.14 85);
+  --surface-2: color-mix(in oklab, var(--text) 4%, var(--surface));
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

@@ -1,12 +1,20 @@
 /* @refresh reload */
-import { render } from "solid-js/web";
-import App from "./App";
-import "./styles.css";
+import { mount } from "svelte";
+import App from "./App.svelte";
+import "./aurora/theme.css";
+import "./aurora/mach.css";
+
+const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+function applyTheme(event: MediaQueryList | MediaQueryListEvent) {
+  document.documentElement.dataset.theme = event.matches ? "dark" : "light";
+}
+applyTheme(colorScheme);
+colorScheme.addEventListener("change", applyTheme);
 
 // Global error trap. Renders the message as a fullscreen overlay so it's
-// impossible to miss even when SolidJS itself failed to mount.
+// impossible to miss even when Svelte itself failed to mount.
 function paintError(msg: string) {
-  // Style the host body so we don't depend on Tailwind CSS having loaded.
+  // Style the host body so we don't depend on application CSS having loaded.
   document.documentElement.style.background = "#0a0d12";
   document.body.style.cssText =
     "margin:0;padding:0;background:#0a0d12;color:#ff7066;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;";
@@ -42,8 +50,7 @@ try {
   if (!root) throw new Error("missing #app");
   // Clear the boot probe (the inline-styled "mach is booting…" div from index.html).
   root.innerHTML = "";
-  render(() => <App />, root);
+  mount(App, { target: root });
 } catch (e) {
-  paintError(`render() threw: ${(e as Error).message}\n${(e as Error).stack ?? ""}`);
+  paintError(`mount() threw: ${(e as Error).message}\n${(e as Error).stack ?? ""}`);
 }
-
