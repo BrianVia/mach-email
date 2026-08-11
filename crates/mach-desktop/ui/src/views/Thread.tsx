@@ -1,7 +1,7 @@
 // Thread reader. Subject as a hero, then a stack of message cards with
 // avatar + sender + collapsible body. Selected message expands; others
 // collapse to a 2-line preview the user can click open.
-import { createSignal, For, createMemo, Show } from "solid-js";
+import { createSignal, For, createMemo, Show, createEffect, on } from "solid-js";
 import type { Message, ThreadSummary } from "../lib/ipc";
 import { linkify } from "../lib/text";
 import { renderEmailHtml } from "../lib/html";
@@ -40,7 +40,9 @@ export default function ThreadReader(props: {
 }
 
 function MessageCard(props: { m: Message; selected: boolean }) {
-  const [expanded, setExpanded] = createSignal(props.selected);
+  const [override, setOverride] = createSignal<boolean | null>(null);
+  const expanded = () => override() ?? props.selected;
+  createEffect(on(() => props.selected, () => setOverride(null), { defer: true }));
   const dateStr = createMemo(() => prettyFullDate(props.m.internal_date));
   const initials = createMemo(() => initialsFor(props.m.from));
   const avatarBg = createMemo(() => avatarColor(props.m.from));
@@ -68,7 +70,7 @@ function MessageCard(props: { m: Message; selected: boolean }) {
     >
       <header
         class="flex items-start gap-3 px-5 py-4 cursor-pointer select-none"
-        onClick={() => setExpanded((x) => !x)}
+        onClick={() => setOverride(!expanded())}
       >
         <span class="avatar" style={{ background: avatarBg() }} aria-hidden>
           {initials()}

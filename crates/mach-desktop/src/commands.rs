@@ -41,23 +41,6 @@ pub async fn dispatch_action(
     let action: Action =
         serde_json::from_str(&action_json).map_err(|e| format!("parsing action JSON: {e}"))?;
 
-    // Body backfill on open_thread, same shape as the CLI.
-    if let Action::OpenThread { id } = &action {
-        let summary = state
-            .store
-            .get_thread(&state.scope, id)
-            .await
-            .map_err(|error| error.to_string())?;
-        if let Some(fetcher) = summary
-            .as_ref()
-            .and_then(|thread| state.body_fetchers.get(&thread.account_id))
-        {
-            if let Err(e) = fetcher.fetch_if_needed(id).await {
-                warn!(error = %e, "body backfill failed");
-            }
-        }
-    }
-
     state
         .dispatcher
         .execute(action)
@@ -137,6 +120,9 @@ pub async fn refetch_thread(
         return Ok(Out::err("thread not found"));
     };
     let thread_scope = AccountScope::One(summary.account_id.clone());
+    let Some(fetcher) = state.body_fetchers.get(&summary.account_id) else {
+        return Ok(Out::err("offline — cannot refetch"));
+    };
     if let Err(e) = state
         .store
         .invalidate_thread_bodies(&summary.account_id, &id)
@@ -144,12 +130,8 @@ pub async fn refetch_thread(
     {
         return Ok(Out::err(e));
     }
-    if let Some(fetcher) = state.body_fetchers.get(&summary.account_id) {
-        if let Err(e) = fetcher.fetch_if_needed(&id).await {
-            warn!(error = %e, "refetch_thread: body backfill failed");
-        }
-    } else {
-        return Ok(Out::err("offline — cannot refetch"));
+    if let Err(e) = fetcher.fetch_if_needed(&id).await {
+        warn!(error = %e, "refetch_thread: body backfill failed");
     }
     let messages = state
         .store

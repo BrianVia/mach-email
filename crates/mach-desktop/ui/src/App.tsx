@@ -44,11 +44,19 @@ export default function App() {
   });
   const [keymap, setKeymap] = createSignal<Keymap | null>(null);
   const [bootError, setBootError] = createSignal<string | null>(null);
+  const [actionError, setActionError] = createSignal<string | null>(null);
   const [chordBuf, setChordBuf] = createSignal("");
   const [chordConts, setChordConts] = createSignal<
     { next: string; action_name: string }[]
   >([]);
-  const [status] = createResource(fetchAccountStatus);
+  const [status, { refetch }] = createResource(fetchAccountStatus);
+  let actionErrorTimer: number | undefined;
+
+  function showActionError(e: unknown) {
+    setActionError(String((e as Error).message ?? e));
+    if (actionErrorTimer !== undefined) window.clearTimeout(actionErrorTimer);
+    actionErrorTimer = window.setTimeout(() => setActionError(null), 4_000);
+  }
 
   // Boot: load keymap, load inbox.
   onMount(async () => {
@@ -73,6 +81,11 @@ export default function App() {
       console.error("[mach]", e);
       setBootError(msg);
     }
+  });
+
+  onMount(() => {
+    const t = window.setInterval(() => void refetch(), 30_000);
+    onCleanup(() => window.clearInterval(t));
   });
 
   // Key handler: route via keymap.
@@ -169,72 +182,73 @@ export default function App() {
   async function runAction(action: Record<string, unknown>) {
     const kind = action.kind as string;
     const v = view();
-    switch (kind) {
-      case "quit":
-        // window.close — but keep state for now; user can ⌘W or cmd+Q
-        return;
-      case "back_to_list": {
-        const threads = await listThreads("INBOX", INBOX_LIMIT);
-        setView({ kind: "inbox", label: "INBOX", threads, selected: 0 });
-        return;
-      }
-      case "select_next":
-        moveSelection(1);
-        return;
-      case "select_prev":
-        moveSelection(-1);
-        return;
-      case "compose_new":
-        setView({ kind: "composer", background: v });
-        return;
-      case "open_thread": {
-        const id = (action.id as string) ?? "";
-        const t = await openThreadIpc(id);
-        setView({
-          kind: "thread",
-          thread: t.thread,
-          messages: t.messages,
-          selectedMsg: 0,
-        });
-        return;
-      }
-      case "open_label": {
-        const label = action.label_id as string;
-        const threads = await listThreads(label, INBOX_LIMIT);
-        setView({ kind: "inbox", label, threads, selected: 0 });
-        return;
-      }
-      case "search": {
-        setView({
-          kind: "search",
-          query: "",
-          results: [],
-          selected: 0,
-          background: v,
-        });
-        return;
-      }
-      case "refresh": {
-        // Context-aware: in the inbox, re-pull the thread list. In a
-        // thread, force-refetch the bodies (clears the cache and goes
-        // back to Gmail for `format=full`).
-        if (v.kind === "thread") {
-          const opened = await refetchThreadIpc(v.thread.id);
-          setView({
-            kind: "thread",
-            thread: opened.thread,
-            messages: opened.messages,
-            selectedMsg: v.selectedMsg,
-          });
-        } else if (v.kind === "inbox") {
-          const threads = await listThreads(v.label, INBOX_LIMIT);
-          setView({ ...v, threads });
-        }
-        return;
-      }
-    }
-    // Pass-through to backend dispatcher for the rest (mutations).
     try {
+      switch (kind) {
+        case "quit":
+          // window.close — but keep state for now; user can ⌘W or cmd+Q
+          return;
+        case "back_to_list": {
+          const threads = await listThreads("INBOX", INBOX_LIMIT);
+          setView({ kind: "inbox", label: "INBOX", threads, selected: 0 });
+          return;
+        }
+        case "select_next":
+          moveSelection(1);
+          return;
+        case "select_prev":
+          moveSelection(-1);
+          return;
+        case "compose_new":
+          setView({ kind: "composer", background: v });
+          return;
+        case "open_thread": {
+          const id = (action.id as string) ?? "";
+          const t = v.kind === "inbox"
+            ? v.threads.find((thread) => thread.id === id)
+            : v.kind === "search"
+              ? v.results.find((thread) => thread.id === id)
+              : undefined;
+          if (!t) throw new Error("thread not found");
+          await openThreadView(t);
+          return;
+        }
+        case "open_label": {
+          const label = action.label_id as string;
+          const threads = await listThreads(label, INBOX_LIMIT);
+          setView({ kind: "inbox", label, threads, selected: 0 });
+          return;
+        }
+        case "search": {
+          setView({
+            kind: "search",
+            query: "",
+            results: [],
+            selected: 0,
+            background: v,
+          });
+          return;
+        }
+        case "refresh": {
+          // Context-aware: in the inbox, re-pull the thread list. In a
+          // thread, force-refetch the bodies (clears the cache and goes
+          // back to Gmail for `format=full`).
+          if (v.kind === "thread") {
+            const opened = await refetchThreadIpc(v.thread.id);
+            setView({
+              kind: "thread",
+              thread: opened.thread,
+              messages: opened.messages,
+              selectedMsg: v.selectedMsg,
+            });
+          } else if (v.kind === "inbox") {
+            const threads = await listThreads(v.label, INBOX_LIMIT);
+            setView({ ...v, threads });
+          }
+          return;
+        }
+      }
+
+      // Pass-through to backend dispatcher for the rest (mutations).
       const outcome = await dispatchAction(action);
       const removedSet = new Set(outcome.changed_threads);
       const isArchiveOrTrash = kind === "archive" || kind === "trash";
@@ -265,8 +279,38 @@ export default function App() {
           selected: fallback,
         });
       }
+
+      if (!isArchiveOrTrash && v.kind === "inbox" && removedSet.size) {
+        const selectedId = v.threads[v.selected]?.id;
+        const threads = await listThreads(v.label, INBOX_LIMIT);
+        const preserved = selectedId
+          ? threads.findIndex((thread) => thread.id === selectedId)
+          : -1;
+        setView({
+          ...v,
+          threads,
+          selected: preserved >= 0
+            ? preserved
+            : clamp(v.selected, 0, threads.length - 1),
+        });
+      }
     } catch (e) {
       console.warn("dispatch failed", e);
+      showActionError(e);
+    }
+  }
+
+  async function openThreadView(t: ThreadSummary) {
+    const opened = await openThreadIpc(t.id);
+    setView({
+      kind: "thread",
+      thread: opened.thread,
+      messages: opened.messages,
+      selectedMsg: 0,
+    });
+    if (t.unread) {
+      void dispatchAction({ kind: "mark_read", thread_ids: [t.id], read: true })
+        .catch(() => {});
     }
   }
 
@@ -288,9 +332,14 @@ export default function App() {
   async function onSearchInput(query: string) {
     const v = view();
     if (v.kind !== "search") return;
-    const trimmed = query.trim();
-    const results = trimmed ? await searchThreads(trimmed, 50) : [];
-    setView({ ...v, query, results, selected: 0 });
+    try {
+      const trimmed = query.trim();
+      const results = trimmed ? await searchThreads(trimmed, 50) : [];
+      setView({ ...v, query, results, selected: 0 });
+    } catch (e) {
+      console.warn("search failed", e);
+      showActionError(e);
+    }
   }
 
   async function onSearchEnter() {
@@ -298,13 +347,12 @@ export default function App() {
     if (v.kind !== "search") return;
     const t = v.results[v.selected];
     if (!t) return;
-    const opened = await openThreadIpc(t.id);
-    setView({
-      kind: "thread",
-      thread: opened.thread,
-      messages: opened.messages,
-      selectedMsg: 0,
-    });
+    try {
+      await openThreadView(t);
+    } catch (e) {
+      console.warn("open thread failed", e);
+      showActionError(e);
+    }
   }
 
   function onSearchEsc() {
@@ -326,6 +374,7 @@ export default function App() {
   });
   onCleanup(() => {
     document.removeEventListener("keydown", handleKey, true);
+    if (actionErrorTimer !== undefined) window.clearTimeout(actionErrorTimer);
   });
 
   return (
@@ -333,6 +382,14 @@ export default function App() {
       <Show when={bootError()}>
         <div class="bg-danger/20 text-danger px-4 py-2 text-sm border-b border-danger/30">
           ⚠ {bootError()}
+        </div>
+      </Show>
+      <Show when={actionError()}>
+        <div
+          class="bg-danger/20 text-danger px-4 py-2 text-sm border-b border-danger/30"
+          onClick={() => setActionError(null)}
+        >
+          ⚠ {actionError()}
         </div>
       </Show>
       <TopBar accountEmail={status()?.email} online={status()?.online ?? false} view={view()} />
@@ -345,13 +402,12 @@ export default function App() {
               const v = view() as Extract<AppView, { kind: "inbox" }>;
               const t = v.threads[i];
               if (!t) return;
-              const opened = await openThreadIpc(t.id);
-              setView({
-                kind: "thread",
-                thread: opened.thread,
-                messages: opened.messages,
-                selectedMsg: 0,
-              });
+              try {
+                await openThreadView(t);
+              } catch (e) {
+                console.warn("open thread failed", e);
+                showActionError(e);
+              }
             }}
           />
         </Show>
@@ -477,7 +533,6 @@ function StatusBar(props: {
             <Hint k="e" label="archive" />
             <Hint k="c" label="compose" />
             <Hint k="/" label="search" />
-            <Hint k="r" label="reply" />
             <Hint k="esc" label="back" />
           </div>
         }

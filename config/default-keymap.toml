@@ -71,6 +71,7 @@
 # Reading mode (thread is open)
 # ─────────────────────────────────────────────────────────────────────
 [reading]
+"ctrl+r"   = "refresh"
 "j"        = "select_next"      # next thread in the list-behind
 "k"        = "select_prev"
 "esc"      = "back_to_list"
