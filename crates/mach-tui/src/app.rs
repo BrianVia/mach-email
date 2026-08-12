@@ -16,11 +16,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use mach_core::ids::{AccountScope, LabelId, ThreadId};
-use mach_core::store::{MailStore, Message, ThreadSummary};
+use mach_core::ids::{AccountScope, DraftId, LabelId, ThreadId};
+use mach_core::store::{Draft, MailStore, Message, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
-    Action, Dispatcher,
+    Action, ActionOutcome, Dispatcher, DraftPatch,
 };
 use mach_store::SqliteStore;
 use ratatui::Terminal;
@@ -84,11 +84,13 @@ pub struct ThreadView {
 }
 
 pub struct ComposerView {
+    pub draft_id: DraftId,
     pub to: String,
     pub cc: String,
     pub subject: String,
     pub body: String,
     pub field: ComposerField,
+    previous_view: Box<View>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,7 +208,12 @@ impl App {
                 current_message: v.current_message_id().map(|m| m.as_str().to_string()),
                 current_draft: None,
             },
-            View::Composer(_) => KeyContext::default(),
+            View::Composer(v) => KeyContext {
+                selection: Vec::new(),
+                current_thread: None,
+                current_message: None,
+                current_draft: Some(v.draft_id.as_str().to_string()),
+            },
             View::Search(v) => KeyContext {
                 selection: v
                     .current_thread_id()
@@ -723,6 +730,9 @@ async fn execute_action(app: &mut App, action: Action) {
                 // Already on inbox; nothing to do.
                 return;
             }
+            if matches!(app.view, View::Composer(_)) {
+                save_composer(app).await;
+            }
             if let Ok(inbox) = load_inbox(&app.store, &app.scope, "INBOX").await {
                 app.view = View::Inbox(inbox);
             }
@@ -736,14 +746,16 @@ async fn execute_action(app: &mut App, action: Action) {
             advance_selection(app, -1);
             return;
         }
-        Action::ComposeNew => {
-            app.view = View::Composer(ComposerView {
-                to: String::new(),
-                cc: String::new(),
-                subject: String::new(),
-                body: String::new(),
-                field: ComposerField::To,
-            });
+        Action::ComposeNew | Action::Reply { .. } | Action::Forward { .. } => {
+            open_composer(app, action.clone()).await;
+            return;
+        }
+        Action::SaveDraft { .. } if matches!(app.view, View::Composer(_)) => {
+            save_composer(app).await;
+            return;
+        }
+        Action::SendDraft { .. } if matches!(app.view, View::Composer(_)) => {
+            send_composer(app).await;
             return;
         }
         Action::OpenThread { id } => {
@@ -826,6 +838,115 @@ async fn execute_action(app: &mut App, action: Action) {
     }
 }
 
+async fn open_composer(app: &mut App, action: Action) {
+    match app.dispatcher.execute(action).await {
+        Ok(outcome) => match draft_from_outcome(outcome) {
+            Ok(draft) => {
+                let previous_view = std::mem::replace(&mut app.view, empty_inbox_view());
+                app.view = View::Composer(ComposerView::from_draft(draft, previous_view));
+            }
+            Err(error) => warn!(%error, "dispatch returned an invalid draft"),
+        },
+        Err(error) => warn!(%error, "dispatch failed"),
+    }
+}
+
+async fn save_composer(app: &mut App) -> bool {
+    let Some(action) = composer_save_action(&app.view) else {
+        return false;
+    };
+    match app.dispatcher.execute(action).await {
+        Ok(outcome) => {
+            debug!(?outcome, "draft saved");
+            true
+        }
+        Err(error) => {
+            warn!(%error, "dispatch failed");
+            false
+        }
+    }
+}
+
+async fn send_composer(app: &mut App) {
+    if !save_composer(app).await {
+        return;
+    }
+    let View::Composer(composer) = &app.view else {
+        return;
+    };
+    let action = Action::SendDraft {
+        draft_id: composer.draft_id.clone(),
+    };
+    match app.dispatcher.execute(action).await {
+        Ok(outcome) => {
+            debug!(?outcome, "draft queued to send");
+            let View::Composer(composer) = std::mem::replace(&mut app.view, empty_inbox_view())
+            else {
+                return;
+            };
+            app.view = *composer.previous_view;
+        }
+        Err(error) => warn!(%error, "dispatch failed"),
+    }
+}
+
+fn composer_save_action(view: &View) -> Option<Action> {
+    let View::Composer(composer) = view else {
+        return None;
+    };
+    Some(Action::SaveDraft {
+        draft_id: composer.draft_id.clone(),
+        patch: DraftPatch {
+            to: Some(split_recipients(&composer.to)),
+            cc: Some(split_recipients(&composer.cc)),
+            subject: Some(composer.subject.clone()),
+            body_md: Some(composer.body.clone()),
+            ..DraftPatch::default()
+        },
+    })
+}
+
+fn split_recipients(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|recipient| !recipient.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn draft_from_outcome(outcome: ActionOutcome) -> Result<Draft> {
+    let data = outcome.data.context("missing action outcome data")?;
+    let draft = data
+        .get("draft")
+        .context("missing draft in action outcome")?
+        .clone();
+    serde_json::from_value(draft).context("decoding draft from action outcome")
+}
+
+fn empty_inbox_view() -> View {
+    View::Inbox(InboxView {
+        label: LabelId::new("INBOX"),
+        threads: Vec::new(),
+        selected: 0,
+        viewport_top: 0,
+    })
+}
+
+impl ComposerView {
+    fn from_draft(draft: Draft, previous_view: View) -> Self {
+        Self {
+            draft_id: draft.id,
+            to: draft.to.join(", "),
+            cc: draft.cc.join(", "),
+            subject: draft.subject,
+            body: draft.body_md,
+            field: ComposerField::To,
+            previous_view: Box::new(previous_view),
+        }
+    }
+}
+
 async fn open_thread(app: &mut App, id: ThreadId) {
     let Ok(Some(summary)) = app.store.get_thread(&app.scope, &id).await else {
         warn!(thread_id = %id, "thread not found");
@@ -878,5 +999,80 @@ fn advance_selection(app: &mut App, delta: i32) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use mach_core::ids::AccountId;
+
+    use super::*;
+
+    fn draft() -> Draft {
+        Draft {
+            account_id: AccountId::new("me@example.com"),
+            id: DraftId::new("draft-1"),
+            gmail_draft_id: None,
+            thread_id: Some(ThreadId::new("thread-1")),
+            in_reply_to_message_id: Some(mach_core::ids::MessageId::new("message-1")),
+            to: vec!["Alice <alice@example.com>".into(), "bob@example.com".into()],
+            cc: vec!["carol@example.com".into()],
+            bcc: Vec::new(),
+            subject: "Re: Plans".into(),
+            body_md: "Sounds good".into(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn draft_outcome_populates_composer_buffer() {
+        let draft = draft();
+        let outcome = ActionOutcome {
+            action_name: "reply".into(),
+            op_id: None,
+            changed_threads: Vec::new(),
+            changed_drafts: vec![draft.id.clone()],
+            data: Some(serde_json::json!({ "draft": draft })),
+            message: String::new(),
+        };
+
+        let composer =
+            ComposerView::from_draft(draft_from_outcome(outcome).unwrap(), empty_inbox_view());
+
+        assert_eq!(composer.draft_id.as_str(), "draft-1");
+        assert_eq!(composer.to, "Alice <alice@example.com>, bob@example.com");
+        assert_eq!(composer.cc, "carol@example.com");
+        assert_eq!(composer.subject, "Re: Plans");
+        assert_eq!(composer.body, "Sounds good");
+    }
+
+    #[test]
+    fn composer_save_uses_the_entire_editing_buffer() {
+        let mut composer = ComposerView::from_draft(draft(), empty_inbox_view());
+        composer.to = " alice@example.com, bob@example.com, ".into();
+        composer.cc = " , carol@example.com ".into();
+        composer.subject = "Updated".into();
+        composer.body = "New body".into();
+
+        let Action::SaveDraft { draft_id, patch } =
+            composer_save_action(&View::Composer(composer)).unwrap()
+        else {
+            panic!("expected save draft action");
+        };
+
+        assert_eq!(draft_id.as_str(), "draft-1");
+        assert_eq!(patch.to.unwrap(), ["alice@example.com", "bob@example.com"]);
+        assert_eq!(patch.cc.unwrap(), ["carol@example.com"]);
+        assert_eq!(patch.subject.as_deref(), Some("Updated"));
+        assert_eq!(patch.body_md.as_deref(), Some("New body"));
+        assert!(patch.in_reply_to_message_id.is_none());
+        assert!(patch.thread_id.is_none());
+    }
+
+    #[test]
+    fn malformed_draft_outcome_is_rejected() {
+        let outcome = ActionOutcome::empty("compose_new");
+        assert!(draft_from_outcome(outcome).is_err());
     }
 }

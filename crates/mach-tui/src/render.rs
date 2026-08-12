@@ -68,7 +68,7 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
             v.threads.len()
         ),
         View::Thread(v) => format!("  ← Inbox  •  {}", trunc(&v.summary.subject, 60)),
-        View::Composer(_) => "  Compose".to_string(),
+        View::Composer(v) => format!("  Compose  •  draft {}", v.draft_id),
         View::Search(v) => format!("  / {}", v.query),
     };
     let bar = Line::from(vec![
