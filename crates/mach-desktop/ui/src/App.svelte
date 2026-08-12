@@ -523,7 +523,18 @@
       onClose={closeComposer}
     />
   {:else if view.kind === "search"}
-    <SearchOverlay v={view} onInput={onSearchInput} onEnter={onSearchEnter} onEsc={onSearchEsc} onMove={moveSelection} />
+    <SearchOverlay
+      v={view}
+      onInput={onSearchInput}
+      onEnter={onSearchEnter}
+      onEsc={onSearchEsc}
+      onMove={moveSelection}
+      onPick={(index) => {
+        if (view.kind !== "search") return;
+        view = { ...view, selected: index };
+        void onSearchEnter();
+      }}
+    />
   {/if}
 
   {#if bootError || actionError || notice}

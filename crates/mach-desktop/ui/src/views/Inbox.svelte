@@ -65,8 +65,10 @@
         class:selected={index === v.selected}
         class="row"
         style:height={`${ROW_H}px`}
-        onclick={() => onSelect(index)}
-        ondblclick={() => onOpen(index)}
+        onclick={() => {
+          onSelect(index);
+          onOpen(index);
+        }}
       >
         <div class="indicators">
           {#if thread.unread}<span class="unread" aria-label="unread"></span>{:else}<span class="spacer"></span>{/if}
