@@ -6,6 +6,7 @@
     dispatchAction,
     fetchAccountStatus,
     fetchKeymapSources,
+    fetchSettings,
     flushOutbox,
     listThreads,
     openThread as openThreadIpc,
@@ -17,6 +18,7 @@
     type Draft,
     type Message,
     type MailSyncedPayload,
+    type Settings,
     type SyncStatusPayload,
     type ThreadSummary,
   } from "./lib/ipc";
@@ -45,6 +47,7 @@
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
   let status = $state<AccountStatus | null>(null);
+  let settings = $state<Settings>({});
   let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
   let actionErrorTimer: number | undefined;
@@ -85,6 +88,12 @@
 
   async function boot() {
     try {
+      try {
+        settings = await fetchSettings();
+      } catch (error) {
+        console.warn("[mach] settings load failed", error);
+        settings = {};
+      }
       const sources = await fetchKeymapSources();
       try {
         const resolved = Keymap.fromToml(sources.defaults);
@@ -305,8 +314,18 @@
       if (isArchiveOrTrash && currentView.kind === "thread") {
         const threads = await listThreads("INBOX", INBOX_LIMIT);
         const at = threads.findIndex((thread) => thread.id === currentView.thread.id);
-        const fallback = at >= 0 ? Math.min(at, threads.length - 1) : 0;
+        // The archived thread is usually gone from the refreshed list; the
+        // thread now occupying its date-sorted position is the "next" one.
+        const successor = threads.findIndex(
+          (thread) => thread.last_message_at <= currentView.thread.last_message_at,
+        );
+        const fallback = at >= 0
+          ? Math.min(at, threads.length - 1)
+          : successor >= 0 ? successor : Math.max(0, threads.length - 1);
         view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
+        if ((settings.after_archive ?? "next") === "next" && at < 0 && successor >= 0 && threads[fallback]) {
+          await openThreadView(threads[fallback]);
+        }
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {

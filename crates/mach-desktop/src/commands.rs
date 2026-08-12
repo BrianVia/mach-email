@@ -309,6 +309,26 @@ pub fn keymap_sources(state: State<'_, AppState>) -> serde_json::Value {
 }
 
 #[tauri::command]
+pub fn settings() -> serde_json::Value {
+    let Some(contents) =
+        crate::config_dir().and_then(|dir| std::fs::read_to_string(dir.join("settings.toml")).ok())
+    else {
+        return serde_json::json!({});
+    };
+
+    match toml::from_str::<toml::Value>(&contents) {
+        Ok(settings) => serde_json::to_value(settings).unwrap_or_else(|error| {
+            warn!(error = %error, "serializing settings failed");
+            serde_json::json!({})
+        }),
+        Err(error) => {
+            warn!(error = %error, "parsing settings.toml failed");
+            serde_json::json!({})
+        }
+    }
+}
+
+#[tauri::command]
 pub fn account_status(state: State<'_, AppState>) -> serde_json::Value {
     serde_json::json!({
         "email": if state.account_emails.len() == 1 {

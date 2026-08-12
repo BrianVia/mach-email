@@ -31,6 +31,10 @@ pub struct AppState {
     pub account_emails: Vec<String>,
 }
 
+fn config_dir() -> Option<PathBuf> {
+    ProjectDirs::from("com", "via", "mach").map(|dirs| dirs.config_dir().to_path_buf())
+}
+
 fn db_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("com", "via", "mach")
         .context("could not resolve OS application-data directory")?;
@@ -38,8 +42,7 @@ fn db_path() -> Result<PathBuf> {
 }
 
 fn load_user_keymap_toml() -> Option<String> {
-    let dirs = ProjectDirs::from("com", "via", "mach")?;
-    std::fs::read_to_string(dirs.config_dir().join("keymap.toml")).ok()
+    std::fs::read_to_string(config_dir()?.join("keymap.toml")).ok()
 }
 
 #[tokio::main]
@@ -157,6 +160,7 @@ async fn main() -> Result<()> {
             commands::refetch_thread,
             commands::search,
             commands::keymap_sources,
+            commands::settings,
             commands::account_status,
             commands::flush_outbox,
             commands::sync_now,

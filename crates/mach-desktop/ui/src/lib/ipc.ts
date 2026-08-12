@@ -107,6 +107,10 @@ export type KeymapSources = {
   user: string | null;
 };
 
+export type Settings = {
+  after_archive?: "next" | "list";
+};
+
 // Backend Ok/Err discriminated union.
 type Out<T> = { ok: T } | { err: string };
 function unwrap<T>(o: Out<T>): T {
@@ -167,6 +171,10 @@ export async function searchThreads(
 
 export async function fetchKeymapSources(): Promise<KeymapSources> {
   return invoke<KeymapSources>("keymap_sources");
+}
+
+export async function fetchSettings(): Promise<Settings> {
+  return invoke<Settings>("settings");
 }
 
 export async function fetchAccountStatus(): Promise<AccountStatus> {
