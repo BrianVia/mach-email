@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
-use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::{Action, Dispatcher, MailStore};
-use mach_gmail::{config::OAuthConfig, GmailClient, OutboxWorker};
+use mach_core::ids::AccountId;
+use mach_core::MailStore;
+use mach_gmail::{config::OAuthConfig, GmailClient};
 
 use crate::runtime;
 
@@ -43,84 +42,34 @@ async fn sync_account(
         return Ok(());
     }
 
-    // Default `mach sync` = drain pending mutations + un-snooze + fire
-    // due send-laters + pull new history.
-    let now_ms = Utc::now().timestamp_millis();
-    let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account.clone()));
-
-    // 1) Sweep snoozes that have come due.
-    let due = store.find_due_snoozes(&account, now_ms).await?;
-    if !due.is_empty() {
-        for d in &due {
-            let tid = ThreadId::new(d.thread_id.clone());
-            // Add INBOX back, drop the MACH/Snoozed label.
-            dispatcher
-                .execute(Action::AddLabel {
-                    thread_ids: vec![tid.clone()],
-                    label_id: LabelId::new("INBOX"),
-                })
-                .await
-                .context("queueing INBOX restore for due snooze")?;
-            dispatcher
-                .execute(Action::RemoveLabel {
-                    thread_ids: vec![tid],
-                    label_id: LabelId::new(d.snoozed_label.clone()),
-                })
-                .await
-                .context("queueing snooze-label removal")?;
-        }
-        println!("[{email}] ⏰ Un-snoozed {} thread(s)", due.len());
+    let report = mach_gmail::sync_account_tick(&account, client, store).await?;
+    if report.unsnoozed > 0 {
+        println!("[{email}] ⏰ Un-snoozed {} thread(s)", report.unsnoozed);
     }
-
-    // 2) Fire due send-later drafts.
-    let due_sends = store.find_due_sends(&account, now_ms).await?;
-    let mut fired_sends = 0usize;
-    for s in &due_sends {
-        match dispatcher
-            .execute(Action::SendDraft {
-                draft_id: mach_core::ids::DraftId::new(s.draft_id.clone()),
-            })
-            .await
-        {
-            Ok(_) => {
-                store
-                    .mark_send_later(&account, &s.send_later_id, "sent")
-                    .await?;
-                fired_sends += 1;
-            }
-            Err(e) => {
-                eprintln!(
-                    "send_later {} failed: {} (will retry next sync)",
-                    s.send_later_id, e
-                );
-            }
-        }
+    if report.sends_fired > 0 {
+        println!(
+            "[{email}] ✉ Fired {} send-later draft(s)",
+            report.sends_fired
+        );
     }
-    if fired_sends > 0 {
-        println!("[{email}] ✉ Fired {fired_sends} send-later draft(s)");
-    }
-
-    // 3) Drain pending outbox to Gmail.
-    let outbox = OutboxWorker::new(account, client.clone(), store.clone());
-    let drain = outbox.drain_once(200).await?;
-    if drain.processed > 0 || drain.failed > 0 {
+    if report.outbox.processed > 0 || report.outbox.failed > 0 {
         println!(
             "[{email}] ↑ Outbox: {} processed, {} failed",
-            drain.processed, drain.failed,
+            report.outbox.processed, report.outbox.failed,
         );
     }
-
-    let stats = mach_gmail::incremental_sync(client, store).await?;
-    if stats.gap_recovered {
-        println!(
-            "[{email}] ⚠ Gap recovery: rebuilt last 7 days ({} threads), cursor {}",
-            stats.threads_refetched, stats.new_cursor
-        );
-    } else {
-        println!(
-            "[{email}] ✓ Incremental: {} events, {} threads refetched, cursor {}",
-            stats.events, stats.threads_refetched, stats.new_cursor
-        );
+    if let Some(stats) = report.incremental {
+        if stats.gap_recovered {
+            println!(
+                "[{email}] ⚠ Gap recovery: rebuilt last 7 days ({} threads), cursor {}",
+                stats.threads_refetched, stats.new_cursor
+            );
+        } else {
+            println!(
+                "[{email}] ✓ Incremental: {} events, {} threads refetched, cursor {}",
+                stats.events, stats.threads_refetched, stats.new_cursor
+            );
+        }
     }
     Ok(())
 }

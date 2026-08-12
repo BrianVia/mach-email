@@ -10,11 +10,11 @@
 use mach_core::ids::{AccountScope, LabelId, ThreadId};
 use mach_core::store::MailStore;
 use mach_core::{Action, ActionOutcome};
-use mach_gmail::{GmailAccountPool, OutboxWorker};
+use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tracing::warn;
 
 use crate::AppState;
@@ -34,6 +34,95 @@ impl<T> Out<T> {
     fn err(e: impl std::fmt::Display) -> Self {
         Out::Err { err: e.to_string() }
     }
+}
+
+#[derive(Clone, Serialize)]
+struct MailSyncedPayload {
+    account: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SyncStatusPayload {
+    account: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+fn tick_changed(report: &TickReport) -> bool {
+    report.unsnoozed > 0
+        || report.sends_fired > 0
+        || report.outbox.processed > 0
+        || report
+            .incremental
+            .as_ref()
+            .is_some_and(|stats| stats.events > 0)
+}
+
+fn emit_sync_event<T: Clone + Serialize>(app: &AppHandle, event: &str, payload: T) {
+    if let Err(error) = app.emit_to("main", event, payload) {
+        warn!(event, error = %error, "emitting sync event failed");
+    }
+}
+
+pub(crate) async fn sync_accounts(
+    app: &AppHandle,
+    store: &Arc<SqliteStore>,
+    accounts: &GmailAccountPool,
+) -> serde_json::Value {
+    let mut synced = 0;
+    let mut failed = 0;
+    let mut last_error = None;
+
+    for account in accounts.accounts() {
+        let Some(fetcher) = accounts.get(account) else {
+            continue;
+        };
+        let email = account.as_str().to_string();
+        match sync_account_tick(account, fetcher.client().clone(), store.clone()).await {
+            Ok(report) => {
+                synced += 1;
+                if tick_changed(&report) {
+                    emit_sync_event(
+                        app,
+                        "mail-synced",
+                        MailSyncedPayload {
+                            account: email.clone(),
+                        },
+                    );
+                }
+                emit_sync_event(
+                    app,
+                    "sync-status",
+                    SyncStatusPayload {
+                        account: email,
+                        ok: true,
+                        error: None,
+                    },
+                );
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                warn!(account = %account, error = %message, "account sync tick failed");
+                failed += 1;
+                last_error = Some(message.clone());
+                emit_sync_event(
+                    app,
+                    "sync-status",
+                    SyncStatusPayload {
+                        account: email,
+                        ok: false,
+                        error: Some(message),
+                    },
+                );
+            }
+        }
+    }
+
+    serde_json::json!({
+        "synced": synced,
+        "failed": failed,
+        "last_error": last_error,
+    })
 }
 
 #[tauri::command]
@@ -93,6 +182,16 @@ pub(crate) async fn drain_outbox(
 pub async fn flush_outbox(state: State<'_, AppState>) -> Result<Out<serde_json::Value>, String> {
     Ok(Out::ok(
         drain_outbox(&state.store, &state.body_fetchers).await,
+    ))
+}
+
+#[tauri::command]
+pub async fn sync_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Out<serde_json::Value>, String> {
+    Ok(Out::ok(
+        sync_accounts(&app, &state.store, &state.body_fetchers).await,
     ))
 }
 

@@ -20,4 +20,6 @@ pub use client::GmailClient;
 pub use config::OAuthConfig;
 pub use credentials::{CredsError, StoredCredentials};
 pub use outbox::{DrainStats, OutboxWorker};
-pub use sync::{bootstrap, incremental_sync, BootstrapStats, IncrementalStats};
+pub use sync::{
+    bootstrap, incremental_sync, sync_account_tick, BootstrapStats, IncrementalStats, TickReport,
+};

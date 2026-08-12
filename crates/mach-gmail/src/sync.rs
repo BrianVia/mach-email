@@ -10,16 +10,96 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use futures::stream::{self, StreamExt};
-use mach_core::ids::AccountId;
+use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
 use mach_core::store::{MailStore, MessageHeaders};
+use mach_core::{Action, Dispatcher};
 use mach_store::{LabelUpsert, MessageUpsert, SqliteStore, ThreadUpsert};
 use tracing::{info, warn};
 
 use crate::client::{GmailClient, RemoteMessage, RemoteThread};
+use crate::outbox::{DrainStats, OutboxWorker};
 
 const BOOTSTRAP_QUERY: &str = "newer_than:30d";
 const BOOTSTRAP_CONCURRENCY: usize = 10;
+
+#[derive(Debug, Clone, Default)]
+pub struct TickReport {
+    pub unsnoozed: usize,
+    pub sends_fired: usize,
+    pub outbox: DrainStats,
+    pub incremental: Option<IncrementalStats>,
+}
+
+/// Run one complete non-bootstrap sync pass for an authenticated account.
+///
+/// This is the sole owner of ordering scheduled local work, pushing queued
+/// mutations, and then pulling Gmail history. Adapters decide when to call it
+/// and how to present the returned report.
+pub async fn sync_account_tick(
+    account: &AccountId,
+    client: Arc<GmailClient>,
+    store: Arc<SqliteStore>,
+) -> Result<TickReport> {
+    let now_ms = Utc::now().timestamp_millis();
+    let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account.clone()));
+
+    let due = store.find_due_snoozes(account, now_ms).await?;
+    for snooze in &due {
+        let thread_id = ThreadId::new(snooze.thread_id.clone());
+        dispatcher
+            .execute(Action::AddLabel {
+                thread_ids: vec![thread_id.clone()],
+                label_id: LabelId::new("INBOX"),
+            })
+            .await
+            .context("queueing INBOX restore for due snooze")?;
+        dispatcher
+            .execute(Action::RemoveLabel {
+                thread_ids: vec![thread_id],
+                label_id: LabelId::new(snooze.snoozed_label.clone()),
+            })
+            .await
+            .context("queueing snooze-label removal")?;
+    }
+
+    let due_sends = store.find_due_sends(account, now_ms).await?;
+    let mut sends_fired = 0;
+    for send in &due_sends {
+        match dispatcher
+            .execute(Action::SendDraft {
+                draft_id: mach_core::ids::DraftId::new(send.draft_id.clone()),
+            })
+            .await
+        {
+            Ok(_) => {
+                store
+                    .mark_send_later(account, &send.send_later_id, "sent")
+                    .await?;
+                sends_fired += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    send_later_id = %send.send_later_id,
+                    %error,
+                    "send_later dispatch failed; will retry next sync"
+                );
+            }
+        }
+    }
+
+    let outbox = OutboxWorker::new(account.clone(), client.clone(), store.clone());
+    let outbox = outbox.drain_once(200).await?;
+    let incremental = incremental_sync(client, store).await?;
+
+    Ok(TickReport {
+        unsnoozed: due.len(),
+        sends_fired,
+        outbox,
+        incremental: Some(incremental),
+    })
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct BootstrapStats {

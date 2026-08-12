@@ -86,6 +86,22 @@ export type AccountStatus = {
   online: boolean;
 };
 
+export type MailSyncedPayload = {
+  account: string;
+};
+
+export type SyncStatusPayload = {
+  account: string;
+  ok: boolean;
+  error: string | null;
+};
+
+export type SyncNowReport = {
+  synced: number;
+  failed: number;
+  last_error: string | null;
+};
+
 export type KeymapSources = {
   defaults: string;
   user: string | null;
@@ -167,5 +183,10 @@ export async function flushOutbox(): Promise<{
     failed: number;
     last_error: string | null;
   }>>("flush_outbox");
+  return unwrap(result);
+}
+
+export async function syncNow(): Promise<SyncNowReport> {
+  const result = await invoke<Out<SyncNowReport>>("sync_now");
   return unwrap(result);
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keymap";
   import {
     dispatchAction,
@@ -10,10 +11,13 @@
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
     searchThreads,
+    syncNow,
     type AccountStatus,
     type ActionOutcome,
     type Draft,
     type Message,
+    type MailSyncedPayload,
+    type SyncStatusPayload,
     type ThreadSummary,
   } from "./lib/ipc";
   import Shell from "./Shell.svelte";
@@ -41,6 +45,7 @@
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
   let status = $state<AccountStatus | null>(null);
+  let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
   let actionErrorTimer: number | undefined;
   let noticeTimer: number | undefined;
@@ -61,6 +66,10 @@
   });
 
   let activeLabel = $derived(view.kind === "inbox" ? view.label : undefined);
+  let allAccountsSynced = $derived(
+    (status?.accounts.length ?? 0) > 0
+      && (status?.accounts.every((account) => syncOkByAccount[account] === true) ?? false),
+  );
 
   function showActionError(error: unknown) {
     actionError = String((error as Error).message ?? error);
@@ -100,6 +109,36 @@
     } catch (error) {
       console.warn("[mach] account status failed", error);
     }
+  }
+
+  async function refreshInboxPreservingSelection() {
+    const currentView = view;
+    if (currentView.kind !== "inbox") return;
+    const selectedId = currentView.threads[currentView.selected]?.id;
+    const threads = await listThreads(currentView.label, INBOX_LIMIT);
+    if (view.kind !== "inbox" || view.label !== currentView.label) return;
+    const preserved = selectedId
+      ? threads.findIndex((thread) => thread.id === selectedId)
+      : -1;
+    view = {
+      ...view,
+      threads,
+      selected: preserved >= 0
+        ? preserved
+        : clamp(view.selected, 0, threads.length - 1),
+    };
+  }
+
+  function handleMailSynced(_payload: MailSyncedPayload) {
+    if (view.kind === "inbox") {
+      void refreshInboxPreservingSelection().catch((error) => {
+        console.warn("[mach] refreshing inbox after sync failed", error);
+      });
+    }
+  }
+
+  function handleSyncStatus(payload: SyncStatusPayload) {
+    syncOkByAccount = { ...syncOkByAccount, [payload.account]: payload.ok };
   }
 
   function handleKey(event: KeyboardEvent) {
@@ -247,8 +286,8 @@
             const opened = await refetchThreadIpc(currentView.thread.id);
             view = { kind: "thread", thread: opened.thread, messages: opened.messages, selectedMsg: currentView.selectedMsg };
           } else if (currentView.kind === "inbox") {
-            const threads = await listThreads(currentView.label, INBOX_LIMIT);
-            view = { ...currentView, threads };
+            await syncNow();
+            await refreshInboxPreservingSelection();
           }
           return;
         }
@@ -407,14 +446,30 @@
   onMount(() => {
     void boot();
     void refreshStatus();
-    const statusTimer = window.setInterval(() => void refreshStatus(), 30_000);
+    let destroyed = false;
+    const unlisteners: Array<() => void> = [];
+    const keepUnlistener = (unlisten: () => void) => {
+      if (destroyed) unlisten();
+      else unlisteners.push(unlisten);
+    };
+    void listen<MailSyncedPayload>("mail-synced", (event) => {
+      handleMailSynced(event.payload);
+    }).then(keepUnlistener).catch((error) => {
+      console.warn("[mach] mail-synced listener failed", error);
+    });
+    void listen<SyncStatusPayload>("sync-status", (event) => {
+      handleSyncStatus(event.payload);
+    }).then(keepUnlistener).catch((error) => {
+      console.warn("[mach] sync-status listener failed", error);
+    });
     document.addEventListener("keydown", handleKey, true);
     window.focus();
     document.body.tabIndex = -1;
     document.body.focus();
 
     return () => {
-      window.clearInterval(statusTimer);
+      destroyed = true;
+      for (const unlisten of unlisteners) unlisten();
       document.removeEventListener("keydown", handleKey, true);
       if (actionErrorTimer !== undefined) window.clearTimeout(actionErrorTimer);
       if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
@@ -444,7 +499,7 @@
   {title}
   {subtitle}
   accountEmail={status?.email}
-  online={status?.online ?? false}
+  online={allAccountsSynced}
   {activeLabel}
   {chordBuf}
   {chordConts}

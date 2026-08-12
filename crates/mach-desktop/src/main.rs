@@ -85,19 +85,6 @@ async fn main() -> Result<()> {
     };
     let account_emails = accounts.into_iter().map(|account| account.email).collect();
 
-    tokio::spawn({
-        let store = store.clone();
-        let body_fetchers = body_fetchers.clone();
-        async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(20));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                commands::drain_outbox(&store, &body_fetchers).await;
-            }
-        }
-    });
-
     let state = AppState {
         store,
         scope,
@@ -114,6 +101,23 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cache_dir).ok();
 
     tauri::Builder::default()
+        .setup(|app| {
+            use tauri::Manager;
+
+            let app_handle = app.handle().clone();
+            let state = app.state::<AppState>();
+            let store = state.store.clone();
+            let body_fetchers = state.body_fetchers.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    commands::sync_accounts(&app_handle, &store, &body_fetchers).await;
+                }
+            });
+            Ok(())
+        })
         .register_asynchronous_uri_scheme_protocol("mach", {
             let cache_dir = cache_dir.clone();
             move |ctx, req, responder| {
@@ -135,6 +139,7 @@ async fn main() -> Result<()> {
             commands::keymap_sources,
             commands::account_status,
             commands::flush_outbox,
+            commands::sync_now,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri app");
