@@ -5,11 +5,14 @@
     dispatchAction,
     fetchAccountStatus,
     fetchKeymapSources,
+    flushOutbox,
     listThreads,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
     searchThreads,
     type AccountStatus,
+    type ActionOutcome,
+    type Draft,
     type Message,
     type ThreadSummary,
   } from "./lib/ipc";
@@ -24,7 +27,8 @@
 
   type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number };
-  type ComposerView = { kind: "composer"; background: AppView };
+  type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
+  type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
   type AppView = InboxView | ThreadView | ComposerView | SearchView;
   type Continuation = { next: string; action_name: string };
@@ -33,10 +37,13 @@
   let keymap = $state<Keymap | null>(null);
   let bootError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
+  let notice = $state<string | null>(null);
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
   let status = $state<AccountStatus | null>(null);
+  let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
   let actionErrorTimer: number | undefined;
+  let noticeTimer: number | undefined;
 
   let title = $derived.by(() => {
     if (view.kind === "inbox") return labelDisplay(view.label);
@@ -59,6 +66,12 @@
     actionError = String((error as Error).message ?? error);
     if (actionErrorTimer !== undefined) window.clearTimeout(actionErrorTimer);
     actionErrorTimer = window.setTimeout(() => (actionError = null), 4_000);
+  }
+
+  function showNotice(message: string | null) {
+    notice = message;
+    if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
+    if (message) noticeTimer = window.setTimeout(() => (notice = null), 4_000);
   }
 
   async function boot() {
@@ -142,7 +155,7 @@
       const thread = currentView.results[currentView.selected];
       return { selection: thread ? [thread.id] : [], current_thread: thread?.id };
     }
-    return { selection: [] };
+    return { selection: [], current_draft: currentView.draft.id };
   }
 
   function currentMode(currentView: AppView): Mode {
@@ -162,6 +175,10 @@
         case "quit":
           return;
         case "back_to_list": {
+          if (currentView.kind === "composer") {
+            closeComposer();
+            return;
+          }
           const threads = await listThreads("INBOX", INBOX_LIMIT);
           view = { kind: "inbox", label: "INBOX", threads, selected: 0 };
           return;
@@ -173,8 +190,38 @@
           moveSelection(-1);
           return;
         case "compose_new":
-          view = { kind: "composer", background: currentView };
+        case "reply":
+        case "forward": {
+          const outcome = await dispatchAction(action);
+          openComposer(draftFromOutcome(outcome), currentView);
           return;
+        }
+        case "save_draft": {
+          if (currentView.kind !== "composer") return;
+          const draft = await saveComposerDraft(currentView, action);
+          if (view.kind === "composer" && view.draft.id === draft.id) {
+            view = { ...view, draft };
+          }
+          return;
+        }
+        case "send_draft": {
+          if (currentView.kind !== "composer") return;
+          const draft = await saveComposerDraft(currentView, action);
+          if (view.kind === "composer" && view.draft.id === draft.id) {
+            view = { ...view, draft };
+          }
+          await dispatchAction({ kind: "send_draft", draft_id: draft.id });
+          view = currentView.background;
+          showNotice("Sending…");
+          const report = await flushOutbox();
+          if (report.failed > 0) {
+            showNotice(null);
+            showActionError(report.last_error ?? `${report.failed} outbox operation(s) failed`);
+          } else {
+            showNotice("Sent");
+          }
+          return;
+        }
         case "open_thread": {
           const id = (action.id as string) ?? "";
           const thread = currentView.kind === "inbox"
@@ -235,6 +282,7 @@
       }
     } catch (error) {
       console.warn("dispatch failed", error);
+      if (kind === "send_draft") showNotice(null);
       showActionError(error);
     }
   }
@@ -245,6 +293,52 @@
     if (thread.unread) {
       void dispatchAction({ kind: "mark_read", thread_ids: [thread.id], read: true }).catch(() => {});
     }
+  }
+
+  function openComposer(draft: Draft, background: AppView) {
+    composerFields = fieldsFromDraft(draft);
+    view = { kind: "composer", draft, background };
+  }
+
+  function draftFromOutcome(outcome: ActionOutcome): Draft {
+    const draft = (outcome.data as { draft?: Draft } | null)?.draft;
+    if (!draft) throw new Error("draft action returned no draft");
+    return draft;
+  }
+
+  function fieldsFromDraft(draft: Draft): ComposerFields {
+    return {
+      to: draft.to.join(", "),
+      cc: draft.cc.join(", "),
+      subject: draft.subject,
+      body_md: draft.body_md,
+    };
+  }
+
+  function draftPatch() {
+    return {
+      to: parseRecipients(composerFields.to),
+      cc: parseRecipients(composerFields.cc),
+      subject: composerFields.subject,
+      body_md: composerFields.body_md,
+    };
+  }
+
+  async function saveComposerDraft(
+    composer: ComposerView,
+    action: Record<string, unknown> = { kind: "save_draft", draft_id: composer.draft.id },
+  ): Promise<Draft> {
+    const outcome = await dispatchAction({
+      ...action,
+      kind: "save_draft",
+      draft_id: composer.draft.id,
+      patch: draftPatch(),
+    });
+    return draftFromOutcome(outcome);
+  }
+
+  function parseRecipients(value: string): string[] {
+    return value.split(",").map((recipient) => recipient.trim()).filter(Boolean);
   }
 
   function moveSelection(delta: number) {
@@ -289,7 +383,13 @@
   }
 
   function closeComposer() {
-    if (view.kind === "composer") view = view.background;
+    const currentView = view;
+    if (currentView.kind !== "composer") return;
+    void saveComposerDraft(currentView).catch((error) => {
+      console.warn("final draft save failed", error);
+      showActionError(error);
+    });
+    view = currentView.background;
   }
 
   async function openInboxRow(index: number) {
@@ -317,6 +417,7 @@
       window.clearInterval(statusTimer);
       document.removeEventListener("keydown", handleKey, true);
       if (actionErrorTimer !== undefined) window.clearTimeout(actionErrorTimer);
+      if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
     };
   });
 
@@ -360,15 +461,21 @@
   {:else if view.kind === "thread"}
     <ThreadReader v={view} />
   {:else if view.kind === "composer"}
-    <Composer onClose={closeComposer} />
+    <Composer
+      draft={view.draft}
+      onFieldsChange={(fields) => (composerFields = fields)}
+      onSend={() => void runAction({ kind: "send_draft", draft_id: view.kind === "composer" ? view.draft.id : "" })}
+      onClose={closeComposer}
+    />
   {:else if view.kind === "search"}
     <SearchOverlay v={view} onInput={onSearchInput} onEnter={onSearchEnter} onEsc={onSearchEsc} onMove={moveSelection} />
   {/if}
 
-  {#if bootError || actionError}
+  {#if bootError || actionError || notice}
     <div class="errors">
       {#if bootError}<div class="error">⚠ {bootError}</div>{/if}
       {#if actionError}<button class="error" onclick={() => (actionError = null)}>⚠ {actionError}</button>{/if}
+      {#if notice}<button class="notice" onclick={() => showNotice(null)}>{notice}</button>{/if}
     </div>
   {/if}
   <ChordOverlay show={chordBuf.length > 0} buf={chordBuf} conts={chordConts} />
@@ -385,4 +492,5 @@
   .errors { position: absolute; top: 0; right: 0; left: 0; z-index: 60; }
   .error { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); background: color-mix(in oklab, var(--danger) 20%, var(--surface)); color: var(--danger); font-size: 14px; text-align: left; }
   button.error { cursor: pointer; }
+  .notice { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); background: color-mix(in oklab, var(--accent) 18%, var(--surface)); color: var(--accent); font-size: 14px; text-align: left; cursor: pointer; }
 </style>

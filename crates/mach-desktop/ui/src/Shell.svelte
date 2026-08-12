@@ -76,6 +76,7 @@
       <div class="continuations">
         <span class="hint"><kbd>j/k</kbd>nav</span>
         <span class="hint"><kbd>e</kbd>archive</span>
+        <span class="hint"><kbd>r</kbd>reply</span>
         <span class="hint"><kbd>c</kbd>compose</span>
         <span class="hint"><kbd>/</kbd>search</span>
         <span class="hint"><kbd>esc</kbd>back</span>

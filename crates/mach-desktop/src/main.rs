@@ -85,6 +85,19 @@ async fn main() -> Result<()> {
     };
     let account_emails = accounts.into_iter().map(|account| account.email).collect();
 
+    tokio::spawn({
+        let store = store.clone();
+        let body_fetchers = body_fetchers.clone();
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(20));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                commands::drain_outbox(&store, &body_fetchers).await;
+            }
+        }
+    });
+
     let state = AppState {
         store,
         scope,
@@ -121,6 +134,7 @@ async fn main() -> Result<()> {
             commands::search,
             commands::keymap_sources,
             commands::account_status,
+            commands::flush_outbox,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri app");

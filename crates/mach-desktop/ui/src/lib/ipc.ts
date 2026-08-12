@@ -58,6 +58,19 @@ export type Message = {
   inline_images: InlineImageRef[];
 };
 
+export type Draft = {
+  account_id: string;
+  id: string;
+  thread_id: string | null;
+  in_reply_to_message_id: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body_md: string;
+  updated_at: string;
+};
+
 export type ActionOutcome = {
   action_name: string;
   op_id: string | null;
@@ -142,4 +155,17 @@ export async function fetchKeymapSources(): Promise<KeymapSources> {
 
 export async function fetchAccountStatus(): Promise<AccountStatus> {
   return invoke<AccountStatus>("account_status");
+}
+
+export async function flushOutbox(): Promise<{
+  processed: number;
+  failed: number;
+  last_error: string | null;
+}> {
+  const result = await invoke<Out<{
+    processed: number;
+    failed: number;
+    last_error: string | null;
+  }>>("flush_outbox");
+  return unwrap(result);
 }

@@ -1,15 +1,32 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import Icon from "../lib/Icon.svelte";
+  import type { Draft } from "../lib/ipc";
 
-  let { onClose }: { onClose: () => void } = $props();
-  let to = $state("");
-  let cc = $state("");
-  let subject = $state("");
-  let body = $state("");
+  export type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
+
+  let {
+    draft,
+    onFieldsChange,
+    onSend,
+    onClose,
+  }: {
+    draft: Draft;
+    onFieldsChange: (fields: ComposerFields) => void;
+    onSend: () => void;
+    onClose: () => void;
+  } = $props();
+  let to = $state(untrack(() => draft.to.join(", ")));
+  let cc = $state(untrack(() => draft.cc.join(", ")));
+  let subject = $state(untrack(() => draft.subject));
+  let body = $state(untrack(() => draft.body_md));
   let firstInput: HTMLInputElement;
 
   onMount(() => firstInput?.focus());
+
+  function fieldsChanged() {
+    onFieldsChange({ to, cc, subject, body_md: body });
+  }
 </script>
 
 <div class="backdrop" role="presentation" onclick={(event) => event.currentTarget === event.target && onClose()}>
@@ -19,14 +36,14 @@
       <button class="escape" onclick={onClose}>esc</button>
     </header>
     <div class="fields">
-      <label><span>To</span><input bind:this={firstInput} bind:value={to} /></label>
-      <label><span>Cc</span><input bind:value={cc} /></label>
-      <label><span>Subject</span><input bind:value={subject} /></label>
+      <label><span>To</span><input bind:this={firstInput} bind:value={to} oninput={fieldsChanged} /></label>
+      <label><span>Cc</span><input bind:value={cc} oninput={fieldsChanged} /></label>
+      <label><span>Subject</span><input bind:value={subject} oninput={fieldsChanged} /></label>
     </div>
-    <textarea bind:value={body} placeholder="Write your message…"></textarea>
+    <textarea bind:value={body} oninput={fieldsChanged} placeholder="Write your message…"></textarea>
     <footer>
       <div><kbd>⌘↵</kbd> send · <kbd>⌘S</kbd> save · <kbd>esc</kbd> close</div>
-      <button class="send" disabled title="send wiring lands with sync engine (see tasks/todo.md)">
+      <button class="send" onclick={onSend}>
         <Icon name="send" size={13} /> Send
       </button>
     </footer>
@@ -50,5 +67,4 @@
   footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11.5px; }
   kbd { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
   .send { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 0; border-radius: 999px; background: color-mix(in oklab, var(--accent) 15%, transparent); color: var(--accent); font-size: 12.5px; font-weight: 500; }
-  .send:disabled { cursor: default; opacity: .68; }
 </style>
