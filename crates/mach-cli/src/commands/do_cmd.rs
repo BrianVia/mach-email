@@ -65,7 +65,7 @@ async fn maybe_backfill_bodies(
     use mach_gmail::{config::OAuthConfig, BodyFetcher};
     // Preserve the intentional no-config offline mode while still surfacing
     // corrupt or unreadable persisted credentials to the caller.
-    if OAuthConfig::from_env().is_err() {
+    if OAuthConfig::load().is_err() {
         return Ok(());
     }
     let Some(thread) = store.get_thread(scope, &thread_id).await? else {

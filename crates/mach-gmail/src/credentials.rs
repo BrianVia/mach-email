@@ -39,7 +39,7 @@ pub enum CredsError {
     NoDataDir,
 }
 
-fn data_dir() -> Result<PathBuf, CredsError> {
+pub(crate) fn data_dir() -> Result<PathBuf, CredsError> {
     let dirs = ProjectDirs::from("com", "via", "mach").ok_or(CredsError::NoDataDir)?;
     Ok(dirs.data_dir().to_path_buf())
 }
@@ -136,7 +136,7 @@ fn migrate_legacy() -> Result<(), CredsError> {
 }
 
 #[cfg(unix)]
-fn set_mode_0600(path: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn set_mode_0600(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_mode(0o600);
@@ -144,6 +144,6 @@ fn set_mode_0600(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_mode_0600(_path: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn set_mode_0600(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }

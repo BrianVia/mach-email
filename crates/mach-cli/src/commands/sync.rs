@@ -7,7 +7,7 @@ use mach_gmail::{config::OAuthConfig, GmailClient, OutboxWorker};
 use crate::runtime;
 
 pub async fn run(bootstrap: bool, selected_account: Option<&str>) -> Result<()> {
-    let config = OAuthConfig::from_env().context("OAuth client credentials not configured")?;
+    let config = OAuthConfig::load().context("OAuth client credentials not configured")?;
     let store = runtime::open_store().await?;
     let accounts: Vec<_> = mach_gmail::credentials::load_all()?
         .into_iter()

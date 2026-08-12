@@ -3,13 +3,14 @@ use chrono::Utc;
 use mach_gmail::{config::OAuthConfig, credentials, oauth, GmailClient};
 
 pub async fn login() -> Result<()> {
-    let config = OAuthConfig::from_env().context("OAuth client credentials not configured")?;
+    let config = OAuthConfig::load().context("OAuth client credentials not configured")?;
     // Migrate and claim a historical single-account database before adding a
     // second credential. Opening again afterward covers a first login after
     // credentials were removed while the cached database remained.
     let _ = crate::runtime::open_store().await?;
     let creds = oauth::login(&config).await?;
     credentials::save(&creds)?;
+    config.persist()?;
     let store = crate::runtime::open_store().await?;
     println!("✓ Logged in as {}", creds.email);
     println!("  Access token expires {}", creds.expires_at.to_rfc3339());

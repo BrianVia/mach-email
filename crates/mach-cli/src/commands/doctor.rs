@@ -2,7 +2,10 @@ use anyhow::Result;
 use directories::ProjectDirs;
 use mach_core::ids::AccountId;
 use mach_core::store::MailStore;
-use mach_gmail::{config::OAuthConfig, GmailClient};
+use mach_gmail::{
+    config::{OAuthConfig, OAuthConfigSource},
+    GmailClient,
+};
 
 use crate::runtime;
 
@@ -23,16 +26,14 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
     // DB.
     let store = runtime::open_store().await?;
 
-    // OAuth env.
-    let creds_ok = OAuthConfig::from_env().is_ok();
-    println!(
-        "MACH_GOOGLE_*    {}",
-        if creds_ok {
-            "✓ set"
-        } else {
-            "✗ missing (read-only mode)"
-        }
-    );
+    // OAuth client config.
+    let config = OAuthConfig::load_with_source();
+    let source = match &config {
+        Ok((_, OAuthConfigSource::Env)) => "✓ env",
+        Ok((_, OAuthConfigSource::File)) => "✓ file",
+        Err(_) => "✗ none (read-only mode)",
+    };
+    println!("OAuth client:    {source}");
 
     let accounts: Vec<_> = mach_gmail::credentials::load_all()?
         .into_iter()
@@ -50,9 +51,8 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
         );
         let pending = store.drain_pending_outbox(&account, u32::MAX).await?.len();
         println!("outbox pending:  {pending}");
-        if creds_ok {
-            let client =
-                GmailClient::from_stored_credentials(OAuthConfig::from_env()?, account.as_str())?;
+        if let Ok((config, _)) = &config {
+            let client = GmailClient::from_stored_credentials(config.clone(), account.as_str())?;
             match client.get_profile().await {
                 Ok(profile) => println!("remote history:  {} (live)", profile.history_id),
                 Err(error) => println!("⚠ remote check failed: {error}"),

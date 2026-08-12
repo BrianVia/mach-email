@@ -67,7 +67,7 @@ impl BodyFetcher {
     /// the persisted account credentials. Adapters decide whether failure
     /// means cached-only operation or a hard error.
     pub fn from_stored_credentials(account: &str, store: Arc<SqliteStore>) -> Result<Self> {
-        let config = crate::config::OAuthConfig::from_env()?;
+        let config = crate::config::OAuthConfig::load()?;
         let client = GmailClient::from_stored_credentials(config, account)?;
         Ok(Self::new(AccountId::new(account), client, store))
     }
