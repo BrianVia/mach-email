@@ -32,7 +32,8 @@
   const INBOX_LIMIT = 1000;
 
   type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
-  type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number };
+  type ThreadOrigin = { threads: ThreadSummary[]; index: number };
+  type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
   type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
@@ -228,7 +229,18 @@
             return;
           }
           const threads = await listThreads("INBOX", INBOX_LIMIT);
-          view = { kind: "inbox", label: "INBOX", threads, selected: 0 };
+          let selected = 0;
+          if (currentView.kind === "thread" && currentView.origin) {
+            const { origin } = currentView;
+            const selectedId = origin.threads[origin.index]?.id;
+            const preserved = selectedId
+              ? threads.findIndex((thread) => thread.id === selectedId)
+              : -1;
+            selected = preserved >= 0
+              ? preserved
+              : clamp(origin.index, 0, threads.length - 1);
+          }
+          view = { kind: "inbox", label: "INBOX", threads, selected };
           return;
         }
         case "select_next":
@@ -278,11 +290,13 @@
               ? currentView.results.find((candidate) => candidate.id === id)
               : undefined;
           if (!thread) throw new Error("thread not found");
-          await openThreadView(thread);
-          if (currentView.kind === "inbox") {
-            const at = currentView.threads.findIndex((candidate) => candidate.id === id);
-            prefetchThread(currentView.threads[at + 1]?.id);
-          }
+          const at = currentView.kind === "inbox"
+            ? currentView.threads.findIndex((candidate) => candidate.id === id)
+            : -1;
+          await openThreadView(
+            thread,
+            currentView.kind === "inbox" ? { threads: currentView.threads, index: at } : undefined,
+          );
           return;
         }
         case "open_label": {
@@ -306,9 +320,30 @@
         }
       }
 
+      const isArchiveOrTrash = kind === "archive" || kind === "trash";
+      if (
+        isArchiveOrTrash
+        && currentView.kind === "thread"
+        && currentView.origin
+        && (settings.after_archive ?? "next") === "next"
+      ) {
+        const { threads, index } = currentView.origin;
+        const archivedId = currentView.thread.id;
+        const remaining = threads.filter((thread) => thread.id !== archivedId);
+        void dispatchAction(action).catch(showActionError);
+        const nextIndex = Math.min(index, remaining.length - 1);
+        const next = remaining[nextIndex];
+        if (next) {
+          await openThreadView(next, { threads: remaining, index: nextIndex });
+        } else {
+          const fresh = await listThreads("INBOX", INBOX_LIMIT);
+          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0 };
+        }
+        return;
+      }
+
       const outcome = await dispatchAction(action);
       const removedSet = new Set(outcome.changed_threads);
-      const isArchiveOrTrash = kind === "archive" || kind === "trash";
 
       if (isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
         const threads = currentView.threads.filter((thread) => !removedSet.has(thread.id));
@@ -327,10 +362,6 @@
           ? Math.min(at, threads.length - 1)
           : successor >= 0 ? successor : Math.max(0, threads.length - 1);
         view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
-        if ((settings.after_archive ?? "next") === "next" && at < 0 && successor >= 0 && threads[fallback]) {
-          await openThreadView(threads[fallback]);
-          prefetchThread(threads[fallback + 1]?.id);
-        }
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
@@ -350,9 +381,10 @@
     }
   }
 
-  async function openThreadView(thread: ThreadSummary) {
+  async function openThreadView(thread: ThreadSummary, origin?: ThreadOrigin) {
     const cached = await openThreadIpc(thread.id, false);
-    view = { kind: "thread", thread: cached.thread, messages: cached.messages, selectedMsg: 0 };
+    view = { kind: "thread", thread: cached.thread, messages: cached.messages, selectedMsg: 0, origin };
+    prefetchThread(origin?.threads[origin.index + 1]?.id);
     if (thread.unread) {
       void dispatchAction({ kind: "mark_read", thread_ids: [thread.id], read: true }).catch(() => {});
     }
@@ -478,8 +510,7 @@
     const thread = threads[index];
     if (!thread) return;
     try {
-      await openThreadView(thread);
-      prefetchThread(threads[index + 1]?.id);
+      await openThreadView(thread, { threads, index });
     } catch (error) {
       console.warn("open thread failed", error);
       showActionError(error);
