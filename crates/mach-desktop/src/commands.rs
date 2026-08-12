@@ -216,21 +216,29 @@ pub async fn list_threads(
 pub async fn open_thread(
     state: State<'_, AppState>,
     thread_id: String,
+    fetch: bool,
 ) -> Result<Out<serde_json::Value>, String> {
     let id = ThreadId::new(thread_id);
     let Ok(Some(summary)) = state.store.get_thread(&state.scope, &id).await else {
         return Ok(Out::err("thread not found"));
     };
     let thread_scope = AccountScope::One(summary.account_id.clone());
-    let body_fetch_error = match state.body_fetchers.get(&summary.account_id) {
-        Some(fetcher) => match fetcher.fetch_if_needed(&id).await {
-            Ok(_) => None,
-            Err(e) => {
-                warn!(error = format!("{e:#}"), "body backfill failed (open_thread)");
-                Some(format!("{e:#}"))
-            }
-        },
-        None => Some(format!("no Gmail client for {}", summary.account_id)),
+    let body_fetch_error = if fetch {
+        match state.body_fetchers.get(&summary.account_id) {
+            Some(fetcher) => match fetcher.fetch_if_needed(&id).await {
+                Ok(_) => None,
+                Err(e) => {
+                    warn!(
+                        error = format!("{e:#}"),
+                        "body backfill failed (open_thread)"
+                    );
+                    Some(format!("{e:#}"))
+                }
+            },
+            None => Some(format!("no Gmail client for {}", summary.account_id)),
+        }
+    } else {
+        None
     };
     let messages = state
         .store

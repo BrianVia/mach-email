@@ -279,6 +279,10 @@
               : undefined;
           if (!thread) throw new Error("thread not found");
           await openThreadView(thread);
+          if (currentView.kind === "inbox") {
+            const at = currentView.threads.findIndex((candidate) => candidate.id === id);
+            prefetchThread(currentView.threads[at + 1]?.id);
+          }
           return;
         }
         case "open_label": {
@@ -325,6 +329,7 @@
         view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
         if ((settings.after_archive ?? "next") === "next" && at < 0 && successor >= 0 && threads[fallback]) {
           await openThreadView(threads[fallback]);
+          prefetchThread(threads[fallback + 1]?.id);
         }
       }
 
@@ -346,14 +351,28 @@
   }
 
   async function openThreadView(thread: ThreadSummary) {
-    const opened = await openThreadIpc(thread.id);
-    view = { kind: "thread", thread: opened.thread, messages: opened.messages, selectedMsg: 0 };
-    if (opened.body_fetch_error) {
-      showActionError(new Error(`couldn't fetch full message — showing preview (${opened.body_fetch_error})`));
-    }
+    const cached = await openThreadIpc(thread.id, false);
+    view = { kind: "thread", thread: cached.thread, messages: cached.messages, selectedMsg: 0 };
     if (thread.unread) {
       void dispatchAction({ kind: "mark_read", thread_ids: [thread.id], read: true }).catch(() => {});
     }
+    if (cached.messages.some((message) => !message.fetched_full)) {
+      void openThreadIpc(thread.id, true).then((result) => {
+        if (view.kind !== "thread" || view.thread.id !== thread.id) return;
+        view = { ...view, thread: result.thread, messages: result.messages };
+        if (result.body_fetch_error) {
+          showActionError(new Error(`couldn't fetch full message — showing preview (${result.body_fetch_error})`));
+        }
+      }).catch((error) => {
+        if (view.kind !== "thread" || view.thread.id !== thread.id) return;
+        showActionError(error);
+      });
+    }
+  }
+
+  function prefetchThread(threadId: string | undefined) {
+    if (!threadId) return;
+    void openThreadIpc(threadId, true).catch(() => {});
   }
 
   function openComposer(draft: Draft, background: AppView) {
@@ -455,10 +474,12 @@
 
   async function openInboxRow(index: number) {
     if (view.kind !== "inbox") return;
-    const thread = view.threads[index];
+    const threads = view.threads;
+    const thread = threads[index];
     if (!thread) return;
     try {
       await openThreadView(thread);
+      prefetchThread(threads[index + 1]?.id);
     } catch (error) {
       console.warn("open thread failed", error);
       showActionError(error);
