@@ -35,6 +35,8 @@ pub struct Message {
     pub internal_date: DateTime<Utc>,
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
+    #[serde(default)]
+    pub headers: Option<MessageHeaders>,
     pub label_ids: Vec<LabelId>,
     /// `true` once `format=full` has been fetched and `body_plain`/`body_html`
     /// reflect the message contents. Bootstrap leaves this `false`.
@@ -45,6 +47,18 @@ pub struct Message {
     /// rewrites `<img src="cid:...">` against this map.
     #[serde(default)]
     pub inline_images: Vec<InlineImageRow>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageHeaders {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub references: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
 }
 
 /// Mirrors `mach_gmail::body::InlineImageRef` but lives in `mach-core` so
@@ -136,6 +150,11 @@ pub trait MailStore: Send + Sync {
         scope: &AccountScope,
         id: &ThreadId,
     ) -> CoreResult<Vec<Message>>;
+    async fn get_message(
+        &self,
+        scope: &AccountScope,
+        id: &MessageId,
+    ) -> CoreResult<Option<Message>>;
     async fn search_threads(
         &self,
         scope: &AccountScope,
@@ -158,9 +177,28 @@ pub trait MailStore: Send + Sync {
 
     async fn list_labels(&self, scope: &AccountScope) -> CoreResult<Vec<Label>>;
 
+    async fn find_draft(&self, scope: &AccountScope, id: &DraftId) -> CoreResult<Option<Draft>>;
     async fn get_draft(&self, account: &AccountId, id: &DraftId) -> CoreResult<Option<Draft>>;
     async fn save_draft_local(&self, draft: &Draft) -> CoreResult<()>;
     async fn delete_draft_local(&self, account: &AccountId, id: &DraftId) -> CoreResult<()>;
+    async fn queue_draft_send(
+        &self,
+        account: &AccountId,
+        draft_id: &DraftId,
+        op_id: &OpId,
+    ) -> CoreResult<i64>;
+    async fn schedule_send(
+        &self,
+        account: &AccountId,
+        draft_id: &DraftId,
+        send_at: DateTime<Utc>,
+    ) -> CoreResult<()>;
+    async fn complete_send(
+        &self,
+        outbox_row_id: i64,
+        account: &AccountId,
+        draft_id: &DraftId,
+    ) -> CoreResult<()>;
 
     async fn enqueue_outbox(
         &self,

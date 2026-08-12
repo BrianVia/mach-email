@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use mach_core::ids::AccountId;
-use mach_core::store::MailStore;
+use mach_core::store::{MailStore, MessageHeaders};
 use mach_store::{LabelUpsert, MessageUpsert, SqliteStore, ThreadUpsert};
 use tracing::{info, warn};
 
@@ -190,6 +190,12 @@ pub(crate) fn remote_thread_to_upsert(t: &RemoteThread) -> ThreadUpsert {
 fn remote_message_to_upsert(m: &RemoteMessage) -> MessageUpsert {
     let to_addrs = m.header("To").map(parse_address_list).unwrap_or_default();
     let cc_addrs = m.header("Cc").map(parse_address_list).unwrap_or_default();
+    let headers = MessageHeaders {
+        message_id: m.header("Message-Id").map(str::to_string),
+        in_reply_to: m.header("In-Reply-To").map(str::to_string),
+        references: m.header("References").map(str::to_string),
+        reply_to: m.header("Reply-To").map(str::to_string),
+    };
 
     MessageUpsert {
         id: m.id.clone(),
@@ -203,6 +209,7 @@ fn remote_message_to_upsert(m: &RemoteMessage) -> MessageUpsert {
         snippet: m.snippet.clone().unwrap_or_default(),
         label_ids: m.label_ids.clone(),
         body_plain: None, // metadata format omits bodies; full fetch on first open
+        headers_json: Some(serde_json::to_string(&headers).expect("serializing message headers")),
     }
 }
 
@@ -410,4 +417,35 @@ async fn gap_recover(
         gap_recovered: true,
         new_cursor,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_upsert_serializes_only_present_threading_headers() {
+        let remote: RemoteMessage = serde_json::from_value(serde_json::json!({
+            "id": "message",
+            "threadId": "thread",
+            "labelIds": ["INBOX"],
+            "snippet": "body",
+            "internalDate": "1",
+            "payload": {
+                "headers": [
+                    {"name": "Message-ID", "value": "<message@example.com>"},
+                    {"name": "Reply-To", "value": "reply@example.com"}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let upsert = remote_message_to_upsert(&remote);
+        let headers: serde_json::Value =
+            serde_json::from_str(upsert.headers_json.as_deref().unwrap()).unwrap();
+        assert_eq!(headers["message_id"], "<message@example.com>");
+        assert_eq!(headers["reply_to"], "reply@example.com");
+        assert!(headers.get("in_reply_to").is_none());
+        assert!(headers.get("references").is_none());
+    }
 }

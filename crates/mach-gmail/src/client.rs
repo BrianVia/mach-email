@@ -308,7 +308,11 @@ impl GmailClient {
              &metadataHeaders=From\
              &metadataHeaders=To\
              &metadataHeaders=Cc\
-             &metadataHeaders=Date"
+             &metadataHeaders=Date\
+             &metadataHeaders=Message-Id\
+             &metadataHeaders=In-Reply-To\
+             &metadataHeaders=References\
+             &metadataHeaders=Reply-To"
         );
         self.get_json(&url).await
     }
@@ -323,7 +327,11 @@ impl GmailClient {
              &metadataHeaders=From\
              &metadataHeaders=To\
              &metadataHeaders=Cc\
-             &metadataHeaders=Date"
+             &metadataHeaders=Date\
+             &metadataHeaders=Message-Id\
+             &metadataHeaders=In-Reply-To\
+             &metadataHeaders=References\
+             &metadataHeaders=Reply-To"
         );
         self.get_json_optional(&url).await
     }

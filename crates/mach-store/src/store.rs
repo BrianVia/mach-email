@@ -4,7 +4,9 @@ use mach_core::{
     action::OpId,
     error::{CoreError, CoreResult},
     ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId},
-    store::{Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, ThreadSummary},
+    store::{
+        Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind, ThreadSummary,
+    },
 };
 use rusqlite::{params, OptionalExtension, Row};
 use tokio::task::spawn_blocking;
@@ -67,6 +69,7 @@ pub struct MessageUpsert {
     pub snippet: String,
     pub label_ids: Vec<String>,
     pub body_plain: Option<String>,
+    pub headers_json: Option<String>,
 }
 
 /// Inputs the body fetcher writes when format=full lands. We only touch the
@@ -204,8 +207,9 @@ impl SqliteStore {
                     tx.execute(
                         "INSERT INTO messages (account_id, id, thread_id, history_id, internal_date,
                                                from_addr, to_addrs, cc_addrs, subject,
-                                               snippet, body_plain, label_ids_json, fetched_full)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                               snippet, body_plain, headers_json, label_ids_json,
+                                               fetched_full)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                          ON CONFLICT(account_id, id) DO UPDATE SET
                            history_id     = excluded.history_id,
                            internal_date  = excluded.internal_date,
@@ -215,6 +219,7 @@ impl SqliteStore {
                            subject        = excluded.subject,
                            snippet        = excluded.snippet,
                            body_plain     = COALESCE(excluded.body_plain, messages.body_plain),
+                           headers_json   = excluded.headers_json,
                            label_ids_json = excluded.label_ids_json,
                            fetched_full   = MAX(excluded.fetched_full, messages.fetched_full)",
                         params![
@@ -229,6 +234,7 @@ impl SqliteStore {
                             m.subject,
                             m.snippet,
                             m.body_plain,
+                            m.headers_json,
                             label_json,
                             m.body_plain.is_some() as i64,
                         ],
@@ -314,7 +320,81 @@ pub struct DueSend {
     pub draft_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftStateCount {
+    pub state: String,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetter {
+    pub id: i64,
+    pub op_kind: String,
+    pub last_error: Option<String>,
+}
+
 impl SqliteStore {
+    pub async fn draft_state_counts(
+        &self,
+        account: &AccountId,
+    ) -> mach_core::CoreResult<Vec<DraftStateCount>> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        spawn_blocking(move || -> mach_core::CoreResult<Vec<DraftStateCount>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT state, COUNT(*) FROM drafts
+                     WHERE account_id = ?1 GROUP BY state ORDER BY state",
+                )
+                .map_err(map_err)?;
+            let rows = stmt
+                .query_map(params![account.as_str()], |row| {
+                    Ok(DraftStateCount {
+                        state: row.get(0)?,
+                        count: row.get::<_, i64>(1)? as u32,
+                    })
+                })
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(rows)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    pub async fn dead_letters(
+        &self,
+        account: &AccountId,
+    ) -> mach_core::CoreResult<Vec<DeadLetter>> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        spawn_blocking(move || -> mach_core::CoreResult<Vec<DeadLetter>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, op_kind, last_error FROM outbox
+                     WHERE account_id = ?1 AND state = 'failed' ORDER BY id",
+                )
+                .map_err(map_err)?;
+            let rows = stmt
+                .query_map(params![account.as_str()], |row| {
+                    Ok(DeadLetter {
+                        id: row.get(0)?,
+                        op_kind: row.get(1)?,
+                        last_error: row.get(2)?,
+                    })
+                })
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(rows)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     /// Return all snoozed threads whose `MACH/Snoozed/<rfc3339>` label is
     /// past `now`. Walks every thread row, parses the JSON label array,
     /// extracts the matching label. O(threads) — fine at personal scale.
@@ -542,6 +622,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
+    let headers_json: Option<String> = row.get("headers_json")?;
     Ok(Message {
         account_id: AccountId::new(row.get::<_, String>("account_id")?),
         id: MessageId::new(row.get::<_, String>("id")?),
@@ -557,6 +638,9 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         internal_date: ms_to_dt(row.get("internal_date")?),
         body_plain: row.get("body_plain")?,
         body_html: row.get("body_html")?,
+        headers: headers_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<MessageHeaders>(value).ok()),
         label_ids: serde_json::from_str(&label_ids_json).unwrap_or_default(),
         fetched_full: row.get::<_, i64>("fetched_full").unwrap_or(0) != 0,
         inline_images,
@@ -701,7 +785,7 @@ impl MailStore for SqliteStore {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT account_id, id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
-                            subject, snippet, body_plain, body_html, label_ids_json,
+                            subject, snippet, body_plain, body_html, headers_json, label_ids_json,
                             fetched_full, inline_images_json
                      FROM messages
                      WHERE account_id = ?1 AND thread_id = ?2
@@ -714,6 +798,41 @@ impl MailStore for SqliteStore {
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_err)?;
             Ok(rows)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn get_message(
+        &self,
+        scope: &AccountScope,
+        id: &MessageId,
+    ) -> CoreResult<Option<Message>> {
+        let pool = self.pool.clone();
+        let id = id.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Option<Message>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT account_id, id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
+                            subject, snippet, body_plain, body_html, headers_json, label_ids_json,
+                            fetched_full, inline_images_json
+                     FROM messages
+                     WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
+                     LIMIT 2",
+                )
+                .map_err(map_err)?;
+            let mut rows = stmt
+                .query_map(params![id.as_str(), account], row_to_message)
+                .map_err(map_err)?;
+            let first = rows.next().transpose().map_err(map_err)?;
+            if rows.next().transpose().map_err(map_err)?.is_some() {
+                return Err(CoreError::InvalidAction(format!(
+                    "message {id} exists in multiple accounts; choose one account"
+                )));
+            }
+            Ok(first)
         })
         .await
         .map_err(map_err)?
@@ -938,6 +1057,36 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
+    async fn find_draft(&self, scope: &AccountScope, id: &DraftId) -> CoreResult<Option<Draft>> {
+        let pool = self.pool.clone();
+        let id = id.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Option<Draft>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
+                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at
+                     FROM drafts
+                     WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
+                     LIMIT 2",
+                )
+                .map_err(map_err)?;
+            let mut rows = stmt
+                .query_map(params![id.as_str(), account], row_to_draft)
+                .map_err(map_err)?;
+            let first = rows.next().transpose().map_err(map_err)?;
+            if rows.next().transpose().map_err(map_err)?.is_some() {
+                return Err(CoreError::InvalidAction(format!(
+                    "draft {id} exists in multiple accounts; choose one account"
+                )));
+            }
+            Ok(first)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     async fn save_draft_local(&self, draft: &Draft) -> CoreResult<()> {
         let pool = self.pool.clone();
         let draft = draft.clone();
@@ -993,6 +1142,114 @@ impl MailStore for SqliteStore {
                 params![account.as_str(), id.as_str()],
             )
             .map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn queue_draft_send(
+        &self,
+        account: &AccountId,
+        draft_id: &DraftId,
+        op_id: &OpId,
+    ) -> CoreResult<i64> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        let draft_id = draft_id.clone();
+        let op_id = op_id.clone();
+        spawn_blocking(move || -> CoreResult<i64> {
+            let mut conn = pool.get().map_err(map_err)?;
+            let tx = conn.transaction().map_err(map_err)?;
+            let changed = tx
+                .execute(
+                    "UPDATE drafts SET state = 'queued' WHERE account_id = ?1 AND id = ?2",
+                    params![account.as_str(), draft_id.as_str()],
+                )
+                .map_err(map_err)?;
+            if changed == 0 {
+                return Err(CoreError::NotFound("draft not found".into()));
+            }
+            let kind = OutboxOpKind::SendDraft {
+                draft_id: draft_id.clone(),
+            };
+            tx.execute(
+                "INSERT INTO outbox
+                   (account_id, op_id, op_kind, payload_json, created_at, attempts, state)
+                 VALUES (?1, ?2, 'send_draft', ?3, ?4, 0, 'pending')",
+                params![
+                    account.as_str(),
+                    op_id.0,
+                    serde_json::to_string(&kind)?,
+                    Utc::now().timestamp_millis()
+                ],
+            )
+            .map_err(map_err)?;
+            let outbox_id = tx.last_insert_rowid();
+            tx.commit().map_err(map_err)?;
+            Ok(outbox_id)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn schedule_send(
+        &self,
+        account: &AccountId,
+        draft_id: &DraftId,
+        send_at: DateTime<Utc>,
+    ) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        let draft_id = draft_id.clone();
+        spawn_blocking(move || -> CoreResult<()> {
+            let conn = pool.get().map_err(map_err)?;
+            conn.execute(
+                "INSERT INTO send_later (account_id, id, draft_id, send_at, state)
+                 VALUES (?1, ?2, ?3, ?4, 'scheduled')",
+                params![
+                    account.as_str(),
+                    uuid::Uuid::new_v4().simple().to_string(),
+                    draft_id.as_str(),
+                    dt_to_ms(&send_at)
+                ],
+            )
+            .map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn complete_send(
+        &self,
+        outbox_row_id: i64,
+        account: &AccountId,
+        draft_id: &DraftId,
+    ) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        let draft_id = draft_id.clone();
+        spawn_blocking(move || -> CoreResult<()> {
+            let mut conn = pool.get().map_err(map_err)?;
+            let tx = conn.transaction().map_err(map_err)?;
+            tx.execute(
+                "UPDATE outbox SET state = 'done' WHERE id = ?1 AND account_id = ?2",
+                params![outbox_row_id, account.as_str()],
+            )
+            .map_err(map_err)?;
+            tx.execute(
+                "UPDATE send_later SET state = 'sent'
+                 WHERE account_id = ?1 AND draft_id = ?2",
+                params![account.as_str(), draft_id.as_str()],
+            )
+            .map_err(map_err)?;
+            tx.execute(
+                "DELETE FROM drafts WHERE account_id = ?1 AND id = ?2",
+                params![account.as_str(), draft_id.as_str()],
+            )
+            .map_err(map_err)?;
+            tx.commit().map_err(map_err)?;
             Ok(())
         })
         .await
@@ -1111,12 +1368,39 @@ impl MailStore for SqliteStore {
         let pool = self.pool.clone();
         let error = error.to_string();
         spawn_blocking(move || -> CoreResult<()> {
-            let conn = pool.get().map_err(map_err)?;
-            conn.execute(
-                "UPDATE outbox SET attempts = attempts + 1, last_error = ?1 WHERE id = ?2",
-                params![error, id],
+            let mut conn = pool.get().map_err(map_err)?;
+            let tx = conn.transaction().map_err(map_err)?;
+            let row: Option<(i64, String, String, String)> = tx
+                .query_row(
+                    "SELECT attempts, account_id, op_kind, payload_json FROM outbox WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(map_err)?;
+            let Some((attempts, account, op_kind, payload_json)) = row else {
+                return Ok(());
+            };
+            let attempts = attempts + 1;
+            let state = if attempts >= 5 { "failed" } else { "pending" };
+            tx.execute(
+                "UPDATE outbox SET attempts = ?1, last_error = ?2, state = ?3 WHERE id = ?4",
+                params![attempts, error, state, id],
             )
             .map_err(map_err)?;
+            if attempts >= 5 && op_kind == "send_draft" {
+                if let Ok(OutboxOpKind::SendDraft { draft_id }) =
+                    serde_json::from_str::<OutboxOpKind>(&payload_json)
+                {
+                    tx.execute(
+                        "UPDATE drafts SET state = 'failed'
+                         WHERE account_id = ?1 AND id = ?2",
+                        params![account, draft_id.as_str()],
+                    )
+                    .map_err(map_err)?;
+                }
+            }
+            tx.commit().map_err(map_err)?;
             Ok(())
         })
         .await
@@ -1180,6 +1464,22 @@ mod tests {
 
     fn scope() -> AccountScope {
         AccountScope::One(account())
+    }
+
+    fn draft(id: &str) -> Draft {
+        Draft {
+            account_id: account(),
+            id: DraftId::new(id),
+            gmail_draft_id: None,
+            thread_id: None,
+            in_reply_to_message_id: None,
+            to: vec!["recipient@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Subject".into(),
+            body_md: "Body".into(),
+            updated_at: Utc::now(),
+        }
     }
 
     fn seed(pool: &DbPool, id: &str, subject: &str, body: &str, labels: &[&str]) {
@@ -1397,6 +1697,206 @@ mod tests {
         store.mark_outbox_done(id).await.unwrap();
         let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queue_draft_send_rolls_back_state_when_outbox_insert_fails() {
+        let pool = open_in_memory().unwrap();
+        let store = SqliteStore::new(pool.clone());
+        let draft = draft("atomic-queue");
+        store.save_draft_local(&draft).await.unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_send_outbox BEFORE INSERT ON outbox
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected send outbox failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(store
+            .queue_draft_send(&account(), &draft.id, &OpId::new())
+            .await
+            .is_err());
+        let conn = pool.get().unwrap();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM drafts WHERE account_id = ?1 AND id = ?2",
+                params![account().as_str(), draft.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let outbox_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(state, "draft");
+        assert_eq!(outbox_count, 0);
+    }
+
+    #[tokio::test]
+    async fn complete_send_atomically_finishes_outbox_draft_and_schedule() {
+        let pool = open_in_memory().unwrap();
+        let store = SqliteStore::new(pool.clone());
+        let draft = draft("complete-send");
+        store.save_draft_local(&draft).await.unwrap();
+        store
+            .schedule_send(&account(), &draft.id, Utc::now())
+            .await
+            .unwrap();
+        let outbox_id = store
+            .queue_draft_send(&account(), &draft.id, &OpId::new())
+            .await
+            .unwrap();
+
+        pool.get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_draft_delete BEFORE DELETE ON drafts
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected draft delete failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .complete_send(outbox_id, &account(), &draft.id)
+            .await
+            .is_err());
+        {
+            let conn = pool.get().unwrap();
+            let outbox_state: String = conn
+                .query_row(
+                    "SELECT state FROM outbox WHERE id = ?1",
+                    params![outbox_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let draft_state: String = conn
+                .query_row(
+                    "SELECT state FROM drafts WHERE account_id = ?1 AND id = ?2",
+                    params![account().as_str(), draft.id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let send_later_state: String = conn
+                .query_row(
+                    "SELECT state FROM send_later WHERE account_id = ?1 AND draft_id = ?2",
+                    params![account().as_str(), draft.id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(outbox_state, "pending");
+            assert_eq!(draft_state, "queued");
+            assert_eq!(send_later_state, "scheduled");
+        }
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_draft_delete")
+            .unwrap();
+
+        store
+            .complete_send(outbox_id, &account(), &draft.id)
+            .await
+            .unwrap();
+
+        assert!(store
+            .get_draft(&account(), &draft.id)
+            .await
+            .unwrap()
+            .is_none());
+        let conn = pool.get().unwrap();
+        let outbox_state: String = conn
+            .query_row(
+                "SELECT state FROM outbox WHERE id = ?1",
+                params![outbox_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let send_later_state: String = conn
+            .query_row(
+                "SELECT state FROM send_later WHERE account_id = ?1 AND draft_id = ?2",
+                params![account().as_str(), draft.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox_state, "done");
+        assert_eq!(send_later_state, "sent");
+    }
+
+    #[tokio::test]
+    async fn fifth_send_failure_dead_letters_outbox_and_draft() {
+        let pool = open_in_memory().unwrap();
+        let store = SqliteStore::new(pool.clone());
+        let draft = draft("dead-letter");
+        store.save_draft_local(&draft).await.unwrap();
+        let outbox_id = store
+            .queue_draft_send(&account(), &draft.id, &OpId::new())
+            .await
+            .unwrap();
+
+        for attempt in 1..=5 {
+            store
+                .mark_outbox_failed(outbox_id, &format!("failure {attempt}"))
+                .await
+                .unwrap();
+        }
+
+        assert!(store
+            .drain_pending_outbox(&account(), 10)
+            .await
+            .unwrap()
+            .is_empty());
+        let conn = pool.get().unwrap();
+        let (attempts, outbox_state): (i64, String) = conn
+            .query_row(
+                "SELECT attempts, state FROM outbox WHERE id = ?1",
+                params![outbox_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let draft_state: String = conn
+            .query_row(
+                "SELECT state FROM drafts WHERE account_id = ?1 AND id = ?2",
+                params![account().as_str(), draft.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 5);
+        assert_eq!(outbox_state, "failed");
+        assert_eq!(draft_state, "failed");
+        drop(conn);
+        assert_eq!(store.dead_letters(&account()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_message_parses_persisted_threading_headers() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "headers", "subject", "body", &["INBOX"]);
+        let headers = MessageHeaders {
+            message_id: Some("<message@example.com>".into()),
+            in_reply_to: Some("<parent@example.com>".into()),
+            references: Some("<root@example.com>".into()),
+            reply_to: Some("reply@example.com".into()),
+        };
+        pool.get()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET headers_json = ?1 WHERE account_id = ?2 AND id = ?3",
+                params![
+                    serde_json::to_string(&headers).unwrap(),
+                    account().as_str(),
+                    "headers-m"
+                ],
+            )
+            .unwrap();
+        let store = SqliteStore::new(pool);
+
+        let message = store
+            .get_message(&scope(), &MessageId::new("headers-m"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.headers, Some(headers));
     }
 
     #[tokio::test]

@@ -13,7 +13,8 @@ use thiserror::Error;
 mod store;
 
 pub use store::{
-    DueSend, DueSnooze, LabelUpsert, MessageBodyUpdate, MessageUpsert, SqliteStore, ThreadUpsert,
+    DeadLetter, DraftStateCount, DueSend, DueSnooze, LabelUpsert, MessageBodyUpdate, MessageUpsert,
+    SqliteStore, ThreadUpsert,
 };
 
 mod embedded {

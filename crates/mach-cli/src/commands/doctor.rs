@@ -51,6 +51,27 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
         );
         let pending = store.drain_pending_outbox(&account, u32::MAX).await?.len();
         println!("outbox pending:  {pending}");
+        let draft_counts = store.draft_state_counts(&account).await?;
+        let draft_summary = if draft_counts.is_empty() {
+            "(none)".to_string()
+        } else {
+            draft_counts
+                .iter()
+                .map(|entry| format!("{}={}", entry.state, entry.count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!("drafts by state: {draft_summary}");
+        let dead_letters = store.dead_letters(&account).await?;
+        println!("dead letters:    {}", dead_letters.len());
+        for dead_letter in dead_letters {
+            println!(
+                "  #{} {}: {}",
+                dead_letter.id,
+                dead_letter.op_kind,
+                dead_letter.last_error.as_deref().unwrap_or("(no error)")
+            );
+        }
         if let Ok((config, _)) = &config {
             let client = GmailClient::from_stored_credentials(config.clone(), account.as_str())?;
             match client.get_profile().await {

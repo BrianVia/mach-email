@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::action::OpId;
 use crate::error::CoreResult;
-use crate::ids::{AccountId, AccountScope, DraftId, LabelId, ThreadId};
+use crate::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 use crate::store::{Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, ThreadSummary};
 
 #[derive(Default)]
@@ -24,6 +24,7 @@ struct Inner {
     messages_by_thread: HashMap<(AccountId, ThreadId), Vec<Message>>,
     labels: Vec<Label>,
     drafts: HashMap<(AccountId, DraftId), Draft>,
+    scheduled_sends: HashMap<(AccountId, DraftId), DateTime<Utc>>,
     outbox: Vec<OutboxOp>,
     next_outbox_id: i64,
     history_cursors: HashMap<AccountId, u64>,
@@ -106,6 +107,26 @@ impl MailStore for InMemoryStore {
             .get(&(thread.account_id, id.clone()))
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn get_message(
+        &self,
+        scope: &AccountScope,
+        id: &MessageId,
+    ) -> CoreResult<Option<Message>> {
+        let inner = self.inner.lock().unwrap();
+        let mut matches = inner
+            .messages_by_thread
+            .values()
+            .flatten()
+            .filter(|message| message.id == *id && scope_matches(scope, &message.account_id));
+        let result = matches.next().cloned();
+        if matches.next().is_some() {
+            return Err(crate::error::CoreError::InvalidAction(format!(
+                "message {id} exists in multiple accounts; choose one account"
+            )));
+        }
+        Ok(result)
     }
 
     async fn search_threads(
@@ -207,6 +228,21 @@ impl MailStore for InMemoryStore {
             .cloned())
     }
 
+    async fn find_draft(&self, scope: &AccountScope, id: &DraftId) -> CoreResult<Option<Draft>> {
+        let inner = self.inner.lock().unwrap();
+        let mut matches = inner
+            .drafts
+            .values()
+            .filter(|draft| draft.id == *id && scope_matches(scope, &draft.account_id));
+        let result = matches.next().cloned();
+        if matches.next().is_some() {
+            return Err(crate::error::CoreError::InvalidAction(format!(
+                "draft {id} exists in multiple accounts; choose one account"
+            )));
+        }
+        Ok(result)
+    }
+
     async fn save_draft_local(&self, draft: &Draft) -> CoreResult<()> {
         self.inner
             .lock()
@@ -222,6 +258,69 @@ impl MailStore for InMemoryStore {
             .unwrap()
             .drafts
             .remove(&(account.clone(), id.clone()));
+        Ok(())
+    }
+
+    async fn queue_draft_send(
+        &self,
+        account: &AccountId,
+        draft_id: &DraftId,
+        op_id: &OpId,
+    ) -> CoreResult<i64> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .drafts
+            .contains_key(&(account.clone(), draft_id.clone()))
+        {
+            return Err(crate::error::CoreError::NotFound("draft not found".into()));
+        }
+        inner.next_outbox_id += 1;
+        let id = inner.next_outbox_id;
+        inner.outbox.push(OutboxOp {
+            id,
+            account_id: account.clone(),
+            op_id: op_id.clone(),
+            kind: OutboxOpKind::SendDraft {
+                draft_id: draft_id.clone(),
+            },
+            created_at: Utc::now(),
+            attempts: 0,
+            last_error: None,
+        });
+        Ok(id)
+    }
+
+    async fn schedule_send(
+        &self,
+        account: &AccountId,
+        draft_id: &DraftId,
+        send_at: DateTime<Utc>,
+    ) -> CoreResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .drafts
+            .contains_key(&(account.clone(), draft_id.clone()))
+        {
+            return Err(crate::error::CoreError::NotFound("draft not found".into()));
+        }
+        inner
+            .scheduled_sends
+            .insert((account.clone(), draft_id.clone()), send_at);
+        Ok(())
+    }
+
+    async fn complete_send(
+        &self,
+        outbox_row_id: i64,
+        account: &AccountId,
+        draft_id: &DraftId,
+    ) -> CoreResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.outbox.retain(|op| op.id != outbox_row_id);
+        inner.drafts.remove(&(account.clone(), draft_id.clone()));
+        inner
+            .scheduled_sends
+            .remove(&(account.clone(), draft_id.clone()));
         Ok(())
     }
 
@@ -255,7 +354,7 @@ impl MailStore for InMemoryStore {
         Ok(inner
             .outbox
             .iter()
-            .filter(|op| &op.account_id == account)
+            .filter(|op| &op.account_id == account && op.attempts < 5)
             .take(max as usize)
             .cloned()
             .collect())
@@ -339,8 +438,9 @@ fn resolve_mutation_account(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::Action;
+    use crate::action::{Action, DraftPatch};
     use crate::dispatcher::Dispatcher;
+    use crate::store::MessageHeaders;
     use std::sync::Arc;
 
     fn seed_thread(store: &InMemoryStore, id: &str, labels: &[&str]) {
@@ -357,6 +457,229 @@ mod tests {
             label_ids: labels.iter().map(|l| LabelId::new(*l)).collect(),
         };
         store.insert_thread(summary, vec![]);
+    }
+
+    fn seed_message(store: &InMemoryStore) -> Message {
+        let account_id = AccountId::new("test@example.com");
+        let thread_id = ThreadId::new("reply-thread");
+        let message = Message {
+            account_id: account_id.clone(),
+            id: MessageId::new("reply-message"),
+            thread_id: thread_id.clone(),
+            from: "Alice <alice@example.com>".into(),
+            to: vec![account_id.as_str().into()],
+            cc: vec![],
+            subject: "Question".into(),
+            snippet: "Can you help?".into(),
+            internal_date: Utc::now(),
+            body_plain: Some("Can you help?".into()),
+            body_html: None,
+            headers: Some(MessageHeaders {
+                message_id: Some("<rfc-message@example.com>".into()),
+                ..MessageHeaders::default()
+            }),
+            label_ids: vec![LabelId::new("INBOX")],
+            fetched_full: true,
+            inline_images: vec![],
+        };
+        store.insert_thread(
+            ThreadSummary {
+                account_id,
+                id: thread_id,
+                subject: message.subject.clone(),
+                snippet: message.snippet.clone(),
+                participants: vec![message.from.clone()],
+                last_message_at: message.internal_date,
+                message_count: 1,
+                unread: false,
+                starred: false,
+                label_ids: message.label_ids.clone(),
+            },
+            vec![message.clone()],
+        );
+        message
+    }
+
+    #[tokio::test]
+    async fn compose_save_send_happy_path() {
+        let store = Arc::new(InMemoryStore::new());
+        let account = AccountId::new("test@example.com");
+        let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account.clone()));
+
+        let composed = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let draft: Draft =
+            serde_json::from_value(composed.data.unwrap().get("draft").unwrap().clone()).unwrap();
+        assert_eq!(draft.account_id, account);
+
+        let saved = dispatcher
+            .execute(Action::SaveDraft {
+                draft_id: draft.id.clone(),
+                patch: DraftPatch {
+                    to: Some(vec!["recipient@example.com".into()]),
+                    subject: Some("Hello".into()),
+                    body_md: Some("Body".into()),
+                    ..DraftPatch::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(saved.changed_drafts, [draft.id.clone()]);
+
+        let sent = dispatcher
+            .execute(Action::SendDraft {
+                draft_id: draft.id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(sent.message, "queued to send");
+        assert!(sent.data.is_none());
+        assert!(matches!(
+            store.outbox_snapshot().as_slice(),
+            [OutboxOp {
+                kind: OutboxOpKind::SendDraft { draft_id },
+                ..
+            }] if draft_id == &draft.id
+        ));
+    }
+
+    #[tokio::test]
+    async fn compose_new_uses_configured_default_for_all_accounts_scope() {
+        let store = Arc::new(InMemoryStore::new());
+        let missing_default = Dispatcher::new(store.clone())
+            .execute(Action::ComposeNew)
+            .await
+            .unwrap_err();
+        assert!(missing_default
+            .to_string()
+            .contains("no default account is configured"));
+
+        let account = AccountId::new("default@example.com");
+        let dispatcher = Dispatcher::new(store).with_default_account(account.clone());
+        let outcome = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
+        assert_eq!(draft.account_id, account);
+    }
+
+    #[tokio::test]
+    async fn all_accounts_scope_saves_and_sends_draft_from_non_default_account() {
+        let store = Arc::new(InMemoryStore::new());
+        let default_account = AccountId::new("default@example.com");
+        let draft_account = AccountId::new("other@example.com");
+        let draft = Draft {
+            account_id: draft_account.clone(),
+            id: DraftId::new("other-account-draft"),
+            gmail_draft_id: None,
+            thread_id: None,
+            in_reply_to_message_id: None,
+            to: vec!["recipient@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Before save".into(),
+            body_md: String::new(),
+            updated_at: Utc::now(),
+        };
+        store.save_draft_local(&draft).await.unwrap();
+        let dispatcher = Dispatcher::new(store.clone()).with_default_account(default_account);
+
+        dispatcher
+            .execute(Action::SaveDraft {
+                draft_id: draft.id.clone(),
+                patch: DraftPatch {
+                    subject: Some("After save".into()),
+                    ..DraftPatch::default()
+                },
+            })
+            .await
+            .unwrap();
+        dispatcher
+            .execute(Action::SendDraft {
+                draft_id: draft.id.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            store.outbox_snapshot().as_slice(),
+            [OutboxOp {
+                account_id,
+                kind: OutboxOpKind::SendDraft { draft_id },
+                ..
+            }] if account_id == &draft_account && draft_id == &draft.id
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_draft_without_recipients_errors() {
+        let store = Arc::new(InMemoryStore::new());
+        let dispatcher =
+            Dispatcher::with_scope(store, AccountScope::One(AccountId::new("test@example.com")));
+        let composed = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let draft: Draft =
+            serde_json::from_value(composed.data.unwrap().get("draft").unwrap().clone()).unwrap();
+
+        let error = dispatcher
+            .execute(Action::SendDraft { draft_id: draft.id })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("draft has no recipients"));
+    }
+
+    #[tokio::test]
+    async fn reply_draft_keeps_source_thread_and_message_ids() {
+        let store = Arc::new(InMemoryStore::new());
+        let source = seed_message(&store);
+        let dispatcher =
+            Dispatcher::with_scope(store, AccountScope::One(source.account_id.clone()));
+
+        let outcome = dispatcher
+            .execute(Action::Reply {
+                message_id: source.id.clone(),
+                all: false,
+            })
+            .await
+            .unwrap();
+        let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
+        assert_eq!(draft.thread_id, Some(source.thread_id));
+        assert_eq!(draft.in_reply_to_message_id, Some(source.id));
+    }
+
+    #[tokio::test]
+    async fn reply_draft_on_non_default_account_saves_and_sends_under_all_scope() {
+        let store = Arc::new(InMemoryStore::new());
+        let source = seed_message(&store); // lives on test@example.com
+        let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::All)
+            .with_default_account(AccountId::new("other@example.com"));
+
+        let outcome = dispatcher
+            .execute(Action::Reply {
+                message_id: source.id.clone(),
+                all: false,
+            })
+            .await
+            .unwrap();
+        let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
+        assert_eq!(draft.account_id, source.account_id);
+
+        dispatcher
+            .execute(Action::SaveDraft {
+                draft_id: draft.id.clone(),
+                patch: DraftPatch {
+                    body_md: Some("thanks!".into()),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        dispatcher
+            .execute(Action::SendDraft {
+                draft_id: draft.id.clone(),
+            })
+            .await
+            .unwrap();
+        let ops = store.outbox_snapshot();
+        assert!(ops.iter().any(|op| op.account_id == source.account_id
+            && matches!(&op.kind, OutboxOpKind::SendDraft { draft_id } if *draft_id == draft.id)));
     }
 
     #[tokio::test]

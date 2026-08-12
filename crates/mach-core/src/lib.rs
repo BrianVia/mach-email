@@ -5,6 +5,7 @@
 //! `Dispatcher::execute` — never bypass the dispatcher.
 
 pub mod action;
+pub mod compose;
 pub mod dispatcher;
 pub mod error;
 pub mod event;
@@ -21,4 +22,4 @@ pub use event::StateEvent;
 pub use ids::{DraftId, LabelId, MessageId, ThreadId};
 pub use keymap::{Chord, KeyContext, Keymap, KeymapError, Mode};
 pub use state::AppState;
-pub use store::{InlineImageRow, MailRemote, MailStore, OutboxOp, OutboxOpKind};
+pub use store::{InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind};

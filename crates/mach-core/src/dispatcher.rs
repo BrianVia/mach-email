@@ -4,12 +4,13 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, instrument};
 
-use crate::action::{Action, ActionOutcome, OpId};
+use crate::action::{Action, ActionOutcome, DraftPatch, OpId};
+use crate::compose::{forward_prefill, reply_prefill, Prefill};
 use crate::error::{CoreError, CoreResult};
 use crate::event::StateEvent;
-use crate::ids::{AccountScope, LabelId, ThreadId};
+use crate::ids::{AccountId, AccountScope, DraftId, LabelId, ThreadId};
 use crate::state::{AppState, View};
-use crate::store::{MailStore, OutboxOpKind};
+use crate::store::{Draft, MailStore, OutboxOpKind};
 
 const UNDO_DEPTH: usize = 20;
 
@@ -28,6 +29,7 @@ const UNDO_DEPTH: usize = 20;
 pub struct Dispatcher {
     store: Arc<dyn MailStore>,
     scope: AccountScope,
+    default_account: Option<AccountId>,
     state: Mutex<AppState>,
     events: broadcast::Sender<StateEvent>,
     /// Serializes actions and owns the complete undo/redo invariant. Keeping
@@ -81,10 +83,16 @@ impl Dispatcher {
         Self {
             store,
             scope,
+            default_account: None,
             state: Mutex::new(AppState::default()),
             events,
             history: Mutex::new(ActionHistory::new()),
         }
+    }
+
+    pub fn with_default_account(mut self, account: AccountId) -> Self {
+        self.default_account = Some(account);
+        self
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<StateEvent> {
@@ -175,6 +183,12 @@ impl Dispatcher {
                 self.modify_labels(&thread_ids, &[snoozed], &[inbox], "snooze")
                     .await
             }
+            Action::ComposeNew => self.compose_new().await,
+            Action::Reply { message_id, all } => self.reply(&message_id, all).await,
+            Action::Forward { message_id } => self.forward(&message_id).await,
+            Action::SaveDraft { draft_id, patch } => self.save_draft(&draft_id, patch).await,
+            Action::SendDraft { draft_id } => self.send_draft(&draft_id).await,
+            Action::SendLater { draft_id, at } => self.send_later(&draft_id, at).await,
             Action::Search { query, limit } => self.search(&query, limit).await,
             Action::Refresh => Ok(ActionOutcome::empty("refresh")),
             Action::Undo => return self.do_undo(history).await,
@@ -195,6 +209,185 @@ impl Dispatcher {
         outcome
     }
 
+    fn draft_account(&self) -> CoreResult<AccountId> {
+        self.scope
+            .account()
+            .cloned()
+            .or_else(|| self.default_account.clone())
+            .ok_or_else(|| {
+                CoreError::InvalidAction(
+                    "no default account is configured for compose actions".into(),
+                )
+            })
+    }
+
+    async fn compose_new(&self) -> CoreResult<ActionOutcome> {
+        let draft = Draft {
+            account_id: self.draft_account()?,
+            id: new_draft_id(),
+            gmail_draft_id: None,
+            thread_id: None,
+            in_reply_to_message_id: None,
+            to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: String::new(),
+            body_md: String::new(),
+            updated_at: chrono::Utc::now(),
+        };
+        self.store.save_draft_local(&draft).await?;
+        self.draft_outcome("compose_new", draft, None, String::new())
+    }
+
+    async fn reply(
+        &self,
+        message_id: &crate::ids::MessageId,
+        all: bool,
+    ) -> CoreResult<ActionOutcome> {
+        let source = self
+            .store
+            .get_message(&self.scope, message_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(format!("message {message_id}")))?;
+        let prefill = reply_prefill(&source, source.account_id.as_str(), all);
+        self.create_prefilled_draft("reply", source.account_id, prefill)
+            .await
+    }
+
+    async fn forward(&self, message_id: &crate::ids::MessageId) -> CoreResult<ActionOutcome> {
+        let source = self
+            .store
+            .get_message(&self.scope, message_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(format!("message {message_id}")))?;
+        let prefill = forward_prefill(&source);
+        self.create_prefilled_draft("forward", source.account_id, prefill)
+            .await
+    }
+
+    async fn create_prefilled_draft(
+        &self,
+        action_name: &'static str,
+        account_id: AccountId,
+        prefill: Prefill,
+    ) -> CoreResult<ActionOutcome> {
+        let draft = Draft {
+            account_id,
+            id: new_draft_id(),
+            gmail_draft_id: None,
+            thread_id: prefill.thread_id,
+            in_reply_to_message_id: prefill.in_reply_to_message_id,
+            to: prefill.to,
+            cc: prefill.cc,
+            bcc: Vec::new(),
+            subject: prefill.subject,
+            body_md: prefill.body_md,
+            updated_at: chrono::Utc::now(),
+        };
+        self.store.save_draft_local(&draft).await?;
+        self.draft_outcome(action_name, draft, None, String::new())
+    }
+
+    async fn save_draft(&self, draft_id: &DraftId, patch: DraftPatch) -> CoreResult<ActionOutcome> {
+        let mut draft = self
+            .store
+            .find_draft(&self.scope, draft_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound("draft not found".into()))?;
+        if let Some(to) = patch.to {
+            draft.to = to;
+        }
+        if let Some(cc) = patch.cc {
+            draft.cc = cc;
+        }
+        if let Some(bcc) = patch.bcc {
+            draft.bcc = bcc;
+        }
+        if let Some(subject) = patch.subject {
+            draft.subject = subject;
+        }
+        if let Some(body_md) = patch.body_md {
+            draft.body_md = body_md;
+        }
+        if let Some(message_id) = patch.in_reply_to_message_id {
+            draft.in_reply_to_message_id = Some(message_id);
+        }
+        if let Some(thread_id) = patch.thread_id {
+            draft.thread_id = Some(thread_id);
+        }
+        draft.updated_at = chrono::Utc::now();
+        self.store.save_draft_local(&draft).await?;
+        self.draft_outcome("save_draft", draft, None, String::new())
+    }
+
+    async fn send_draft(&self, draft_id: &DraftId) -> CoreResult<ActionOutcome> {
+        let draft = self
+            .store
+            .find_draft(&self.scope, draft_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound("draft not found".into()))?;
+        validate_recipients(&draft)?;
+        let op_id = OpId::new();
+        self.store
+            .queue_draft_send(&draft.account_id, draft_id, &op_id)
+            .await?;
+        self.draft_changed_outcome("send_draft", draft.id, Some(op_id), "queued to send".into())
+    }
+
+    async fn send_later(
+        &self,
+        draft_id: &DraftId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> CoreResult<ActionOutcome> {
+        let draft = self
+            .store
+            .find_draft(&self.scope, draft_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound("draft not found".into()))?;
+        validate_recipients(&draft)?;
+        self.store
+            .schedule_send(&draft.account_id, draft_id, at)
+            .await?;
+        self.draft_changed_outcome("send_later", draft.id, None, String::new())
+    }
+
+    fn draft_outcome(
+        &self,
+        action_name: &'static str,
+        draft: Draft,
+        op_id: Option<OpId>,
+        message: String,
+    ) -> CoreResult<ActionOutcome> {
+        let id = draft.id.clone();
+        let data = serde_json::json!({ "draft": draft });
+        let _ = self.events.send(StateEvent::DraftChanged(id.clone()));
+        Ok(ActionOutcome {
+            action_name: action_name.into(),
+            op_id,
+            changed_threads: Vec::new(),
+            changed_drafts: vec![id],
+            data: Some(data),
+            message,
+        })
+    }
+
+    fn draft_changed_outcome(
+        &self,
+        action_name: &'static str,
+        id: DraftId,
+        op_id: Option<OpId>,
+        message: String,
+    ) -> CoreResult<ActionOutcome> {
+        let _ = self.events.send(StateEvent::DraftChanged(id.clone()));
+        Ok(ActionOutcome {
+            action_name: action_name.into(),
+            op_id,
+            changed_threads: Vec::new(),
+            changed_drafts: vec![id],
+            data: None,
+            message,
+        })
+    }
     async fn do_undo(&self, history: &mut ActionHistory) -> CoreResult<ActionOutcome> {
         let Some(inverse) = history.undo.pop_back() else {
             return Ok(ActionOutcome {
@@ -469,4 +662,21 @@ impl Dispatcher {
         }
         Ok(matching)
     }
+}
+
+fn new_draft_id() -> DraftId {
+    DraftId::new(uuid::Uuid::new_v4().simple().to_string())
+}
+
+fn validate_recipients(draft: &Draft) -> CoreResult<()> {
+    if draft
+        .to
+        .iter()
+        .chain(&draft.cc)
+        .chain(&draft.bcc)
+        .all(|address| address.trim().is_empty())
+    {
+        return Err(CoreError::InvalidAction("draft has no recipients".into()));
+    }
+    Ok(())
 }
