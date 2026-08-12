@@ -222,19 +222,28 @@ pub async fn open_thread(
         return Ok(Out::err("thread not found"));
     };
     let thread_scope = AccountScope::One(summary.account_id.clone());
-    if let Some(fetcher) = state.body_fetchers.get(&summary.account_id) {
-        if let Err(e) = fetcher.fetch_if_needed(&id).await {
-            warn!(error = %e, "body backfill failed (open_thread)");
-        }
-    }
+    let body_fetch_error = match state.body_fetchers.get(&summary.account_id) {
+        Some(fetcher) => match fetcher.fetch_if_needed(&id).await {
+            Ok(_) => None,
+            Err(e) => {
+                warn!(error = format!("{e:#}"), "body backfill failed (open_thread)");
+                Some(format!("{e:#}"))
+            }
+        },
+        None => Some(format!("no Gmail client for {}", summary.account_id)),
+    };
     let messages = state
         .store
         .list_messages_in_thread(&thread_scope, &id)
         .await
         .unwrap_or_default();
+    // Only report the failure when it actually cost the user content —
+    // opening an already-cached thread offline is fine.
+    let missing_bodies = messages.iter().any(|m| !m.fetched_full);
     Ok(Out::ok(serde_json::json!({
         "thread": summary,
         "messages": messages,
+        "body_fetch_error": if missing_bodies { body_fetch_error } else { None },
     })))
 }
 

@@ -329,6 +329,9 @@
   async function openThreadView(thread: ThreadSummary) {
     const opened = await openThreadIpc(thread.id);
     view = { kind: "thread", thread: opened.thread, messages: opened.messages, selectedMsg: 0 };
+    if (opened.body_fetch_error) {
+      showActionError(new Error(`couldn't fetch full message — showing preview (${opened.body_fetch_error})`));
+    }
     if (thread.unread) {
       void dispatchAction({ kind: "mark_read", thread_ids: [thread.id], read: true }).catch(() => {});
     }

@@ -66,6 +66,9 @@
             <time>{prettyFullDate(message.internal_date)}</time>
           </header>
           {#if expanded}
+            {#if !message.fetched_full}
+              <p class="preview-only">Preview only — full message not fetched yet. Press <kbd>⌃R</kbd> to retry.</p>
+            {/if}
             {#if message.body_html && message.body_html.length > 0}
               <div class="message-body mach-html">{@html renderEmailHtml(message).html}</div>
             {:else}
@@ -98,6 +101,8 @@
   time { flex-shrink: 0; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
   .preview { display: -webkit-box; overflow: hidden; margin-top: 8px; color: var(--muted); font-size: 13px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .message-body { padding: 0 20px 20px; overflow-wrap: anywhere; color: var(--muted); font-size: 14px; line-height: 1.6; }
+  .preview-only { margin: 0 20px 12px; padding: 8px 12px; border-radius: 8px; background: color-mix(in oklab, var(--accent) 10%, transparent); color: var(--muted); font-size: 12.5px; }
+  .preview-only kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
   .plain { white-space: pre-wrap; }
   :global(.mach-html img) { display: block; max-width: 100%; height: auto; border-radius: 6px; }
   :global(.mach-html a) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }

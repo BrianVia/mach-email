@@ -49,12 +49,32 @@ async fn main() -> Result<()> {
     // shell still win.
     let _ = dotenvy::dotenv();
 
+    // Finder/desktop launches have no visible stderr, so log to a file in the
+    // data dir (truncated per launch — last session only). Falls back to
+    // stderr when the file can't be opened.
+    let log_writer: Box<dyn Fn() -> Box<dyn std::io::Write + Send> + Send + Sync> = match db_path()
+        .ok()
+        .and_then(|db| db.parent().map(|dir| dir.join("desktop.log")))
+        .and_then(|path| {
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            std::fs::File::create(path).ok()
+        }) {
+        Some(file) => {
+            let file = std::sync::Arc::new(file);
+            Box::new(move || match file.try_clone() {
+                Ok(clone) => Box::new(clone) as _,
+                Err(_) => Box::new(std::io::stderr()) as _,
+            })
+        }
+        None => Box::new(|| Box::new(std::io::stderr()) as _),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "warn,mach=info".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_writer(log_writer)
         .init();
 
     let db = db_path()?;

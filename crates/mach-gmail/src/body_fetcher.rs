@@ -15,7 +15,7 @@ use mach_core::{
     store::{MailStore, ThreadSummary},
 };
 use mach_store::{MessageBodyUpdate, SqliteStore};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::body::{self, ParsedBody};
 use crate::client::{GmailClient, RemoteMessage};
@@ -120,10 +120,18 @@ impl GmailAccountPool {
     pub fn from_stored_credentials(store: Arc<SqliteStore>) -> Result<Self> {
         let accounts = crate::credentials::load_all()?;
         let mut fetchers = HashMap::with_capacity(accounts.len());
+        // One account with broken credentials must not take the others
+        // offline; skip it loudly and keep the rest of the pool alive.
         for credentials in accounts {
             let account = AccountId::new(credentials.email);
-            let fetcher = BodyFetcher::from_stored_credentials(account.as_str(), store.clone())?;
-            fetchers.insert(account, Arc::new(fetcher));
+            match BodyFetcher::from_stored_credentials(account.as_str(), store.clone()) {
+                Ok(fetcher) => {
+                    fetchers.insert(account, Arc::new(fetcher));
+                }
+                Err(e) => {
+                    warn!(account = account.as_str(), error = format!("{e:#}"), "skipping account: client setup failed");
+                }
+            }
         }
         Ok(Self { fetchers })
     }

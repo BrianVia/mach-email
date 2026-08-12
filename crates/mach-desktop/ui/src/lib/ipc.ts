@@ -134,8 +134,8 @@ export async function listThreads(
 
 export async function openThread(
   threadId: string,
-): Promise<{ thread: ThreadSummary; messages: Message[] }> {
-  const r = await invoke<Out<{ thread: ThreadSummary; messages: Message[] }>>(
+): Promise<{ thread: ThreadSummary; messages: Message[]; body_fetch_error?: string | null }> {
+  const r = await invoke<Out<{ thread: ThreadSummary; messages: Message[]; body_fetch_error?: string | null }>>(
     "open_thread",
     { threadId },
   );
