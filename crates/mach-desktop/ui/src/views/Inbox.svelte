@@ -76,6 +76,16 @@
     return raw;
   }
 
+  function categoryOf(thread: ThreadSummary): { text: string; hue: string } | null {
+    for (const label of thread.label_ids) {
+      if (label === "CATEGORY_UPDATES") return { text: "updates", hue: "#6b8afd" };
+      if (label === "CATEGORY_PROMOTIONS") return { text: "promos", hue: "#e8a13c" };
+      if (label === "CATEGORY_SOCIAL") return { text: "social", hue: "#4cb782" };
+      if (label === "CATEGORY_FORUMS") return { text: "forums", hue: "#a78bfa" };
+    }
+    return null;
+  }
+
   function prettyDate(iso: string): string {
     const date = new Date(iso);
     const now = new Date();
@@ -111,6 +121,7 @@
       {#if item.kind === "header"}
         <div class="group-header">{item.label}</div>
       {:else}
+        {@const category = categoryOf(item.thread)}
         <button
           type="button"
           class:selected={item.index === v.selected}
@@ -136,6 +147,9 @@
           <span class:unread-text={item.thread.unread} class="sender">
             {prettySender(item.thread.participants[0] ?? "(no sender)")}
           </span>
+          {#if category}
+            <span class="badge" style:--badge={category.hue}>{category.text}</span>
+          {/if}
           <span class="summary">
             <span class:unread-text={item.thread.unread} class="subject">{item.thread.subject || "(no subject)"}</span>
             <span class="snippet">{item.thread.snippet}</span>
@@ -162,6 +176,7 @@
   :global(.star) { color: var(--starred); }
   .account-marker { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; }
   .sender { width: 13rem; flex-shrink: 0; overflow: hidden; color: color-mix(in oklab, var(--text) 78%, transparent); font-size: 13.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { flex-shrink: 0; padding: 1px 6px; border-radius: 4px; background: color-mix(in oklab, var(--badge) 14%, transparent); color: color-mix(in oklab, var(--badge) 80%, var(--text)); font-size: 10px; font-weight: 500; letter-spacing: .02em; }
   .summary { min-width: 0; flex: 1; overflow: hidden; color: color-mix(in oklab, var(--text) 78%, transparent); font-size: 13.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
   .snippet { margin-left: 12px; color: var(--muted); font-weight: 400; }
   .unread-text { color: var(--text); font-weight: 600; }
