@@ -154,6 +154,41 @@ impl OutboxWorker {
     }
 }
 
+fn split_recipient(value: &str) -> (Option<&str>, &str) {
+    let trimmed = value.trim();
+    let Some((raw_name, raw_email)) = trimmed.split_once('<') else {
+        return (None, trimmed);
+    };
+    let Some(raw_email) = raw_email.strip_suffix('>') else {
+        return (None, trimmed);
+    };
+    if raw_name.contains('<') || raw_email.is_empty() || raw_email.contains('>') {
+        return (None, trimmed);
+    }
+
+    let raw_name = raw_name.trim();
+    let name = if raw_name.starts_with('"') || raw_name.ends_with('"') {
+        let Some(name) = raw_name
+            .strip_prefix('"')
+            .and_then(|name| name.strip_suffix('"'))
+        else {
+            return (None, trimmed);
+        };
+        name
+    } else {
+        raw_name
+    }
+    .trim();
+    if name.contains('"') {
+        return (None, trimmed);
+    }
+
+    (
+        if name.is_empty() { None } else { Some(name) },
+        raw_email.trim(),
+    )
+}
+
 /// Build an RFC 2822 message + URL-safe base64url-encode it for the
 /// `messages.send` endpoint. We use `mail-builder` for headers + body.
 fn build_mime_raw(d: &mach_core::store::Draft, source: Option<&Message>) -> Result<String> {
@@ -162,17 +197,39 @@ fn build_mime_raw(d: &mach_core::store::Draft, source: Option<&Message>) -> Resu
         engine::{general_purpose::GeneralPurpose, DecodePaddingMode, GeneralPurposeConfig},
         Engine as _,
     };
-    use mail_builder::MessageBuilder;
+    use mail_builder::{headers::address::Address, MessageBuilder};
 
     let mut b = MessageBuilder::new().from(d.account_id.as_str());
     if !d.to.is_empty() {
-        b = b.to(d.to.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        b = b.to(d
+            .to
+            .iter()
+            .map(|recipient| {
+                let (name, email) = split_recipient(recipient);
+                Address::new_address(name, email)
+            })
+            .collect::<Vec<_>>());
     }
     if !d.cc.is_empty() {
-        b = b.cc(d.cc.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        b = b.cc(d
+            .cc
+            .iter()
+            .map(|recipient| {
+                let (name, email) = split_recipient(recipient);
+                Address::new_address(name, email)
+            })
+            .collect::<Vec<_>>());
     }
     if !d.bcc.is_empty() {
-        b = b.bcc(d.bcc.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        b = b.bcc(
+            d.bcc
+                .iter()
+                .map(|recipient| {
+                    let (name, email) = split_recipient(recipient);
+                    Address::new_address(name, email)
+                })
+                .collect::<Vec<_>>(),
+        );
     }
     b = b.subject(&d.subject).text_body(&d.body_md);
     if let Some(headers) = source.and_then(|message| message.headers.as_ref()) {
@@ -279,5 +336,46 @@ mod tests {
 
         assert!(!mime.contains("In-Reply-To:"));
         assert!(!mime.contains("References:"));
+    }
+
+    #[test]
+    fn mime_does_not_nest_quoted_email_display_name() {
+        assert_eq!(
+            split_recipient("\"jane@x.com\" <jane@x.com>"),
+            (Some("jane@x.com"), "jane@x.com")
+        );
+
+        let mut draft = draft();
+        draft.to = vec!["\"jane@x.com\" <jane@x.com>".into()];
+
+        let mime = decoded_mime(&draft, None);
+
+        assert!(!mime.contains("<\""), "malformed To header: {mime}");
+        assert_eq!(mime.matches("<jane@x.com>").count(), 1);
+    }
+
+    #[test]
+    fn mime_preserves_recipient_display_name() {
+        let mut draft = draft();
+        draft.to = vec!["Jane Doe <jane@x.com>".into()];
+
+        let mime = decoded_mime(&draft, None);
+
+        assert!(
+            mime.contains("To: Jane Doe <jane@x.com>")
+                || mime.contains("To: \"Jane Doe\" <jane@x.com>"),
+            "unexpected To header: {mime}"
+        );
+        assert_eq!(mime.matches("<jane@x.com>").count(), 1);
+    }
+
+    #[test]
+    fn mime_preserves_bare_recipient() {
+        let mut draft = draft();
+        draft.to = vec!["jane@x.com".into()];
+
+        let mime = decoded_mime(&draft, None);
+
+        assert!(mime.contains("To: <jane@x.com>"));
     }
 }
