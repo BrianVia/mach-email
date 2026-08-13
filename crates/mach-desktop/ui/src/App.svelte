@@ -342,6 +342,18 @@
         return;
       }
 
+      // List-view archive/trash: prune the list from memory and dispatch in
+      // the background — the optimistic local write + outbox handle the rest.
+      if (isArchiveOrTrash && currentView.kind === "inbox") {
+        const removed = new Set((action.thread_ids as string[] | undefined) ?? []);
+        if (removed.size) {
+          void dispatchAction(action).catch(showActionError);
+          const threads = currentView.threads.filter((thread) => !removed.has(thread.id));
+          view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, threads.length - 1)) };
+          return;
+        }
+      }
+
       const outcome = await dispatchAction(action);
       const removedSet = new Set(outcome.changed_threads);
 

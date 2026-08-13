@@ -107,7 +107,7 @@
     <div class="empty"><span>Inbox zero</span><small>Nothing in this view.</small></div>
   {:else}
     <div bind:this={highlight} class="highlight" style:height={`${ROW_H}px`}></div>
-    {#each inboxLayout.renderRows as item}
+    {#each inboxLayout.renderRows as item (item.kind === "header" ? `h:${item.label}` : item.thread.id)}
       {#if item.kind === "header"}
         <div class="group-header">{item.label}</div>
       {:else}
