@@ -71,8 +71,11 @@ impl OutboxWorker {
                 }
                 Err(e) => {
                     stats.failed += 1;
-                    warn!(op_id = %op.op_id, error = %e, "outbox op failed");
-                    if let Err(e2) = self.store.mark_outbox_failed(op.id, &e.to_string()).await {
+                    // `{e:#}` keeps the whole context chain — the root cause
+                    // (e.g. the HTTP status + body) lives at the bottom.
+                    let chain = format!("{e:#}");
+                    warn!(op_id = %op.op_id, error = %chain, "outbox op failed");
+                    if let Err(e2) = self.store.mark_outbox_failed(op.id, &chain).await {
                         warn!(error = %e2, "marking op failed also failed");
                     }
                 }
