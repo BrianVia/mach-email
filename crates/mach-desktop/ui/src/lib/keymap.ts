@@ -49,6 +49,13 @@ export class Keymap {
     this.rebuildPrefixes();
   }
 
+  bindings(mode: Mode): { chord: string; name: string }[] {
+    return Array.from(this.modes.get(mode)?.entries() ?? [], ([chord, tpl]) => ({
+      chord,
+      name: templateActionName(tpl),
+    }));
+  }
+
   private rebuildPrefixes() {
     this.prefixes.clear();
     for (const [mode, m] of this.modes.entries()) {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import type { Message, ThreadSummary } from "../lib/ipc";
   import { linkify } from "../lib/text";
   import { renderEmailHtml } from "../lib/html";
@@ -32,9 +33,24 @@
   function senderEmail(from: string): string {
     return from.match(/<([^>]+)>/)?.[1] ?? "";
   }
+
+  // The webview has no handler for target="_blank", so anchor clicks
+  // silently die. Route them to the OS default browser instead.
+  function interceptLinks(node: HTMLElement) {
+    function onClick(event: MouseEvent) {
+      const anchor = (event.target as HTMLElement | null)?.closest("a");
+      if (!anchor) return;
+      const href = anchor.getAttribute("href") ?? "";
+      if (!/^(https?:|mailto:)/i.test(href)) return;
+      event.preventDefault();
+      void openUrl(href).catch((error) => console.warn("[mach] open link failed", error));
+    }
+    node.addEventListener("click", onClick);
+    return { destroy: () => node.removeEventListener("click", onClick) };
+  }
 </script>
 
-<div class="reader">
+<div class="reader" use:interceptLinks>
   <div class="column">
     <header class="thread-header">
       <h1>{v.thread.subject || "(no subject)"}</h1>

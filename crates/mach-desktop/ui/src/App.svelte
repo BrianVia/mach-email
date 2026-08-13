@@ -27,6 +27,7 @@
   import ThreadReader from "./views/Thread.svelte";
   import Composer from "./views/Composer.svelte";
   import SearchOverlay from "./views/Search.svelte";
+  import Palette from "./views/Palette.svelte";
   import ChordOverlay from "./views/ChordOverlay.svelte";
 
   const INBOX_LIMIT = 1000;
@@ -37,7 +38,9 @@
   type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
-  type AppView = InboxView | ThreadView | ComposerView | SearchView;
+  type PaletteView = { kind: "palette"; query: string; selected: number; background: AppView };
+  type AppView = InboxView | ThreadView | ComposerView | SearchView | PaletteView;
+  type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
   let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0 });
@@ -158,13 +161,33 @@
     }
 
     const currentView = view;
+    const chord = keyEventToChord(event);
+    if (!chord) return;
+    if (chord === "ctrl+k") {
+      if (currentView.kind === "palette") {
+        event.preventDefault();
+        view = currentView.background;
+        return;
+      }
+      if (currentView.kind === "inbox" || currentView.kind === "thread") {
+        event.preventDefault();
+        chordBuf = "";
+        chordConts = [];
+        view = { kind: "palette", query: "", selected: 0, background: currentView };
+        return;
+      }
+    }
+    if (currentView.kind === "palette" && chord === "esc") {
+      event.preventDefault();
+      view = currentView.background;
+      return;
+    }
+
     const target = event.target as HTMLElement | null;
     const inTextInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
     if (inTextInput && !isControlKey(event)) return;
-    if ((currentView.kind === "composer" || currentView.kind === "search") && !isControlKey(event)) return;
+    if ((currentView.kind === "composer" || currentView.kind === "search" || currentView.kind === "palette") && !isControlKey(event)) return;
 
-    const chord = keyEventToChord(event);
-    if (!chord) return;
     const newBuf = chordBuf ? `${chordBuf} ${chord}` : chord;
     const context = currentContext(currentView);
     const mode = currentMode(currentView);
@@ -204,6 +227,7 @@
       const thread = currentView.results[currentView.selected];
       return { selection: thread ? [thread.id] : [], current_thread: thread?.id };
     }
+    if (currentView.kind === "palette") return currentContext(currentView.background);
     return { selection: [], current_draft: currentView.draft.id };
   }
 
@@ -213,7 +237,85 @@
       case "thread": return "reading";
       case "composer": return "composing";
       case "search": return "search";
+      case "palette": return "normal";
     }
+  }
+
+  function paletteCommands(background: AppView): PaletteCommand[] {
+    if (!keymap) return [];
+    const mode = currentMode(background);
+    const context = currentContext(background);
+    const excluded = new Set(["select_next", "select_prev", "quit"]);
+    const labels: Record<string, string> = {
+      archive: "Archive",
+      trash: "Move to Trash",
+      forward: "Forward",
+      compose_new: "Compose",
+      search: "Search",
+      open_thread: "Open thread",
+      back_to_list: "Back to list",
+      undo: "Undo",
+      redo: "Redo",
+      refresh: "Refresh",
+    };
+    const byLabel = new Map<string, PaletteCommand>();
+
+    for (const binding of keymap.bindings(mode)) {
+      if (excluded.has(binding.name)) continue;
+      let label = labels[binding.name];
+      if (binding.name === "star") label = binding.chord === "shift+s" ? "Unstar" : "Star";
+      else if (binding.name === "mark_read") label = binding.chord === "shift+u" ? "Mark read" : "Mark unread";
+      else if (binding.name === "reply") label = binding.chord === "shift+r" ? "Reply all" : "Reply";
+      else if (binding.name === "open_label") {
+        const resolution = keymap.resolve(mode, binding.chord, context);
+        const labelId = resolution.kind === "action" ? resolution.action.label_id as string | undefined : undefined;
+        label = labelId ? `Go to ${titleCase(labelId)}` : "Open label";
+      }
+      label ??= titleCase(binding.name);
+
+      const command = { label, chord: binding.chord };
+      const existing = byLabel.get(label);
+      if (!existing || chordLength(command.chord) < chordLength(existing.chord)) byLabel.set(label, command);
+    }
+    return [...byLabel.values()];
+  }
+
+  function filteredPaletteCommands(currentView: PaletteView) {
+    const query = currentView.query.trim().toLocaleLowerCase();
+    return paletteCommands(currentView.background).filter((command) =>
+      command.label.toLocaleLowerCase().includes(query),
+    );
+  }
+
+  function onPaletteInput(query: string) {
+    if (view.kind === "palette") view = { ...view, query, selected: 0 };
+  }
+
+  function movePaletteSelection(delta: number) {
+    if (view.kind !== "palette") return;
+    const commands = filteredPaletteCommands(view);
+    view = { ...view, selected: clamp(view.selected + delta, 0, commands.length - 1) };
+  }
+
+  function runPaletteCommand(index = view.kind === "palette" ? view.selected : 0) {
+    const currentView = view;
+    if (currentView.kind !== "palette" || !keymap) return;
+    const background = currentView.background;
+    const command = filteredPaletteCommands(currentView)[index];
+    if (!command) return;
+    view = background;
+    const resolution = keymap.resolve(currentMode(background), command.chord, currentContext(background));
+    if (resolution.kind === "action") void runAction(resolution.action);
+  }
+
+  function chordLength(chord: string) {
+    return chord.trim().split(/\s+/).length;
+  }
+
+  function titleCase(value: string) {
+    return value.toLocaleLowerCase().split("_").map((word) =>
+      word ? word[0].toLocaleUpperCase() + word.slice(1) : word,
+    ).join(" ");
   }
 
   async function runAction(action: Record<string, unknown>) {
@@ -620,6 +722,18 @@
         view = { ...view, selected: index };
         void onSearchEnter();
       }}
+    />
+  {:else if view.kind === "palette"}
+    <Palette
+      v={view}
+      commands={paletteCommands(view.background)}
+      onInput={onPaletteInput}
+      onMove={movePaletteSelection}
+      onEnter={() => runPaletteCommand()}
+      onEsc={() => {
+        if (view.kind === "palette") view = view.background;
+      }}
+      onPick={runPaletteCommand}
     />
   {/if}
 

@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cache_dir).ok();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             use tauri::Manager;
 
