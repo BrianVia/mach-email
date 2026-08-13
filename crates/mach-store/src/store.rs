@@ -743,6 +743,30 @@ impl MailStore for SqliteStore {
         let account = scope.account().map(|value| value.as_str().to_string());
         spawn_blocking(move || -> CoreResult<Vec<ThreadSummary>> {
             let conn = pool.get().map_err(map_err)?;
+            // DONE is virtual: Gmail represents archived mail by removing INBOX,
+            // rather than by adding an archive label.
+            if label.as_str() == "DONE" {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT account_id, id, subject, snippet, participants_json, last_message_at,
+                                message_count, unread, starred, label_ids_json
+                         FROM threads
+                         WHERE label_ids_json NOT LIKE '%\"INBOX\"%'
+                           AND label_ids_json NOT LIKE '%\"TRASH\"%'
+                           AND label_ids_json NOT LIKE '%\"SPAM\"%'
+                           AND label_ids_json NOT LIKE '%\"DRAFT\"%'
+                           AND (?2 IS NULL OR account_id = ?2)
+                         ORDER BY last_message_at DESC
+                         LIMIT ?3",
+                    )
+                    .map_err(map_err)?;
+                let rows = stmt
+                    .query_map(params![label.as_str(), account, limit as i64], row_to_thread)
+                    .map_err(map_err)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(map_err)?;
+                return Ok(rows);
+            }
             // Filter via JSON containment. With label-id strings always quoted
             // in the JSON array, a LIKE check is safe — no false positives.
             let needle = format!("\"{}\"", label.as_str());
@@ -1940,6 +1964,29 @@ mod tests {
             .unwrap();
         assert_eq!(starred.len(), 1);
         assert_eq!(starred[0].id.as_str(), "t2");
+    }
+
+    #[tokio::test]
+    async fn list_threads_in_done_returns_only_archived_threads() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "inbox", "inbox", "inbox", &["INBOX"]);
+        seed(&pool, "archived", "archived", "archived", &[]);
+        seed(&pool, "trash", "trash", "trash", &["TRASH"]);
+
+        let store = SqliteStore::new(pool);
+        let done = store
+            .list_threads_in_label(&scope(), &LabelId::new("DONE"), 10)
+            .await
+            .unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].id.as_str(), "archived");
+
+        let inbox = store
+            .list_threads_in_label(&scope(), &LabelId::new("INBOX"), 10)
+            .await
+            .unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].id.as_str(), "inbox");
     }
 
     #[tokio::test]
