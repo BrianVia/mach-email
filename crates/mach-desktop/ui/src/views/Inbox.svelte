@@ -1,9 +1,15 @@
 <script lang="ts">
   import type { ThreadSummary } from "../lib/ipc";
-  import { avatarColor, initialsFor } from "../lib/avatar";
+  import { avatarColor } from "../lib/avatar";
   import Icon from "../lib/Icon.svelte";
 
-  const ROW_H = 64;
+  const ROW_H = 44;
+  const HEADER_H = 28;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  type RenderRow =
+    | { kind: "header"; label: string }
+    | { kind: "thread"; thread: ThreadSummary; index: number };
 
   let {
     v,
@@ -18,12 +24,41 @@
   let highlight = $state<HTMLDivElement>();
   let scroller = $state<HTMLDivElement>();
 
+  let inboxLayout = $derived.by(() => {
+    const now = new Date();
+    const renderRows: RenderRow[] = [];
+    const rowTop: number[] = [];
+    const multipleAccounts = new Set(v.threads.map((thread) => thread.account_id)).size > 1;
+    let offset = 0;
+    let previousGroup: string | null = null;
+
+    for (const [index, thread] of v.threads.entries()) {
+      const date = new Date(thread.last_message_at);
+      const group = dateGroup(date, now);
+      if (group !== null && group !== previousGroup) {
+        renderRows.push({ kind: "header", label: group });
+        offset += HEADER_H;
+      }
+      renderRows.push({ kind: "thread", thread, index });
+      rowTop[index] = offset;
+      offset += ROW_H;
+      previousGroup = group;
+    }
+
+    return { renderRows, rowTop, multipleAccounts };
+  });
+
   $effect(() => {
     const index = v.selected;
     if (!highlight) return;
-    highlight.style.transform = `translateY(${index * ROW_H}px)`;
+    const top = inboxLayout.rowTop[index];
+    if (top === undefined) {
+      highlight.style.display = "none";
+      return;
+    }
+    highlight.style.display = "";
+    highlight.style.transform = `translateY(${top}px)`;
     if (!scroller) return;
-    const top = index * ROW_H;
     const bottom = top + ROW_H;
     const viewTop = scroller.scrollTop;
     const viewBottom = viewTop + scroller.clientHeight;
@@ -43,14 +78,27 @@
 
   function prettyDate(iso: string): string {
     const date = new Date(iso);
-    const diff = Date.now() - date.getTime();
-    const minute = 60 * 1000;
-    const hour = 60 * minute;
-    const day = 24 * hour;
-    if (diff < day) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    if (diff < 7 * day) return date.toLocaleDateString([], { weekday: "short" });
-    if (diff < 365 * day) return date.toLocaleDateString([], { month: "short", day: "numeric" });
-    return date.toLocaleDateString([], { year: "numeric" });
+    const now = new Date();
+    if (isSameDay(date, now)) {
+      return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).toUpperCase();
+    }
+    const monthDay = `${date.toLocaleDateString("en-US", { month: "short" }).toUpperCase()} ${date.getDate()}`;
+    return date.getFullYear() === now.getFullYear() ? monthDay : `${monthDay}, ${date.getFullYear()}`;
+  }
+
+  function isSameDay(left: Date, right: Date): boolean {
+    return left.getFullYear() === right.getFullYear()
+      && left.getMonth() === right.getMonth()
+      && left.getDate() === right.getDate();
+  }
+
+  function dateGroup(date: Date, now: Date): string | null {
+    if (now.getTime() - date.getTime() < 7 * DAY_MS) return null;
+    if (date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()) {
+      return "Earlier this month";
+    }
+    const month = date.toLocaleDateString("en-US", { month: "long" });
+    return date.getFullYear() === now.getFullYear() ? month : `${month} ${date.getFullYear()}`;
   }
 </script>
 
@@ -59,36 +107,42 @@
     <div class="empty"><span>Inbox zero</span><small>Nothing in this view.</small></div>
   {:else}
     <div bind:this={highlight} class="highlight" style:height={`${ROW_H}px`}></div>
-    {#each v.threads as thread, index (thread.id)}
-      <button
-        type="button"
-        class:selected={index === v.selected}
-        class="row"
-        style:height={`${ROW_H}px`}
-        onclick={() => {
-          onSelect(index);
-          onOpen(index);
-        }}
-      >
-        <div class="indicators">
-          {#if thread.unread}<span class="unread" aria-label="unread"></span>{:else}<span class="spacer"></span>{/if}
-          {#if thread.starred}<Icon name="star" size={10} class="star" ariaLabel="starred" />{/if}
-        </div>
-        <span class="avatar" style:background={avatarColor(thread.participants[0] ?? "(no sender)")} aria-hidden="true">
-          {initialsFor(thread.participants[0] ?? "(no sender)")}
-        </span>
-        <div class="content">
-          <div class="line">
-            <span class="account">{thread.account_id}</span>
-            <span class:unread-text={thread.unread} class="sender">{prettySender(thread.participants[0] ?? "(no sender)")}</span>
-            <span class="summary">
-              <span class:unread-text={thread.unread}>{thread.subject || "(no subject)"}</span>
-              <span class="snippet"> — {thread.snippet}</span>
-            </span>
+    {#each inboxLayout.renderRows as item}
+      {#if item.kind === "header"}
+        <div class="group-header">{item.label}</div>
+      {:else}
+        <button
+          type="button"
+          class:selected={item.index === v.selected}
+          class="row"
+          style:height={`${ROW_H}px`}
+          onclick={() => {
+            onSelect(item.index);
+            onOpen(item.index);
+          }}
+        >
+          <div class="indicators">
+            {#if item.thread.unread}<span class="unread" aria-label="unread"></span>{:else}<span class="spacer"></span>{/if}
+            {#if item.thread.starred}<Icon name="star" size={10} class="star" ariaLabel="starred" />{/if}
           </div>
-        </div>
-        <div class:unread-date={thread.unread} class="date">{prettyDate(thread.last_message_at)}</div>
-      </button>
+          {#if inboxLayout.multipleAccounts}
+            <span
+              class="account-marker"
+              style:background={avatarColor(item.thread.account_id)}
+              title={item.thread.account_id}
+              aria-hidden="true"
+            ></span>
+          {/if}
+          <span class:unread-text={item.thread.unread} class="sender">
+            {prettySender(item.thread.participants[0] ?? "(no sender)")}
+          </span>
+          <span class="summary">
+            <span class:unread-text={item.thread.unread} class="subject">{item.thread.subject || "(no subject)"}</span>
+            <span class="snippet">{item.thread.snippet}</span>
+          </span>
+          <div class:unread-date={item.thread.unread} class="date">{prettyDate(item.thread.last_message_at)}</div>
+        </button>
+      {/if}
     {/each}
   {/if}
 </div>
@@ -99,20 +153,18 @@
   .empty span { font-size: 20px; }
   .empty small { font-size: 14px; }
   .highlight { position: absolute; top: 0; right: 0; left: 0; pointer-events: none; background: color-mix(in oklab, var(--accent) 12%, transparent); border-left: 2px solid var(--accent); transition: transform 90ms cubic-bezier(.22,1,.36,1); will-change: transform; }
-  .row { position: relative; display: flex; width: 100%; align-items: center; gap: 12px; padding: 0 20px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; user-select: none; transition: background 150ms; }
+  .group-header { box-sizing: border-box; height: 28px; padding: 12px 0 4px 42px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; line-height: 12px; user-select: none; }
+  .row { position: relative; display: flex; width: 100%; align-items: center; gap: 12px; padding: 0 24px 0 16px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; user-select: none; transition: background 150ms; }
   .row:not(.selected):hover { background: var(--hover); }
-  .indicators { display: flex; width: 12px; flex-shrink: 0; flex-direction: column; align-items: center; gap: 4px; }
+  .indicators { display: flex; width: 14px; flex-shrink: 0; flex-direction: column; align-items: center; gap: 4px; }
   .unread, .spacer { width: 8px; height: 8px; }
   .unread { border-radius: 50%; background: var(--accent); }
   :global(.star) { color: var(--starred); }
-  .avatar { display: inline-flex; width: 32px; height: 32px; flex-shrink: 0; align-items: center; justify-content: center; border-radius: 50%; color: white; font-size: 12px; font-weight: 600; letter-spacing: .02em; }
-  .content { min-width: 0; flex: 1; }
-  .line { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
-  .account { flex-shrink: 0; padding: 2px 6px; border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
-  .sender { max-width: 30%; flex-shrink: 0; overflow: hidden; color: var(--muted); font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-  .summary { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-  .snippet { color: var(--muted); }
+  .account-marker { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; }
+  .sender { width: 13rem; flex-shrink: 0; overflow: hidden; color: color-mix(in oklab, var(--text) 78%, transparent); font-size: 13.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+  .summary { min-width: 0; flex: 1; overflow: hidden; color: color-mix(in oklab, var(--text) 78%, transparent); font-size: 13.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+  .snippet { margin-left: 12px; color: var(--muted); font-weight: 400; }
   .unread-text { color: var(--text); font-weight: 600; }
-  .date { flex-shrink: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
-  .unread-date { color: var(--text); }
+  .date { min-width: 64px; flex-shrink: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+  .unread-date { color: var(--accent); font-weight: 600; }
 </style>
