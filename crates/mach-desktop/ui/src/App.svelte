@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keymap";
+  import { threadToMarkdown } from "./lib/markdown";
   import {
     dispatchAction,
     fetchAccountStatus,
@@ -90,6 +91,12 @@
     if (message) noticeTimer = window.setTimeout(() => (notice = null), 4_000);
   }
 
+  function copyThreadAsMarkdown(threadView: ThreadView) {
+    void navigator.clipboard.writeText(threadToMarkdown(threadView.thread, threadView.messages))
+      .then(() => showNotice("Copied thread as Markdown"))
+      .catch((error) => console.warn("[mach] copying thread as Markdown failed", error));
+  }
+
   async function boot() {
     try {
       try {
@@ -163,6 +170,16 @@
     const currentView = view;
     const chord = keyEventToChord(event);
     if (!chord) return;
+    const openThread = currentView.kind === "thread"
+      ? currentView
+      : currentView.kind === "palette" && currentView.background.kind === "thread"
+        ? currentView.background
+        : null;
+    if (chord === "ctrl+shift+c" && openThread) {
+      event.preventDefault();
+      copyThreadAsMarkdown(openThread);
+      return;
+    }
     if (chord === "ctrl+k") {
       if (currentView.kind === "palette") {
         event.preventDefault();
@@ -277,7 +294,9 @@
       const existing = byLabel.get(label);
       if (!existing || chordLength(command.chord) < chordLength(existing.chord)) byLabel.set(label, command);
     }
-    return [...byLabel.values()];
+    const commands = [...byLabel.values()];
+    if (background.kind === "thread") commands.push({ label: "Copy as Markdown", chord: "ctrl+shift+c" });
+    return commands;
   }
 
   function filteredPaletteCommands(currentView: PaletteView) {
@@ -304,6 +323,10 @@
     const command = filteredPaletteCommands(currentView)[index];
     if (!command) return;
     view = background;
+    if (command.label === "Copy as Markdown" && background.kind === "thread") {
+      copyThreadAsMarkdown(background);
+      return;
+    }
     const resolution = keymap.resolve(currentMode(background), command.chord, currentContext(background));
     if (resolution.kind === "action") void runAction(resolution.action);
   }
