@@ -17,7 +17,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
-use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
+use mach_core::store::{ActivityEntry, Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
     Action, ActionOutcome, Dispatcher, DraftPatch, UnsubscribeTarget, UserConfig,
@@ -70,6 +70,7 @@ pub enum View {
     Thread(Box<ThreadView>),
     Composer(ComposerView),
     Search(SearchView),
+    Activity(ActivityView),
 }
 
 pub struct InboxView {
@@ -119,6 +120,11 @@ pub struct SearchView {
     pub remote_failures: usize,
     /// Background view to fall back to when search closes.
     pub background: Box<View>,
+}
+
+pub struct ActivityView {
+    pub entries: Vec<ActivityEntry>,
+    pub selected: usize,
 }
 
 /// One-line status footer. Sync status + chord hint + binding hint.
@@ -254,6 +260,7 @@ impl App {
                 current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
                 ..Default::default()
             },
+            View::Activity(_) => KeyContext::default(),
         }
     }
 
@@ -263,6 +270,7 @@ impl App {
             View::Thread(_) => Mode::Reading,
             View::Composer(_) => Mode::Composing,
             View::Search(_) => Mode::Search,
+            View::Activity(_) => Mode::Normal,
         }
     }
 }
@@ -516,6 +524,9 @@ fn handle_search_event(app: &mut App, event: SearchEvent) {
 }
 
 async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    if activity_key(app, &k).await {
+        return;
+    }
     if thread_scroll_key(app, &k) {
         return;
     }
@@ -586,6 +597,55 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
             }
         }
     }
+}
+
+async fn activity_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+
+    let View::Activity(activity) = &mut app.view else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            activity.selected =
+                (activity.selected + 1).min(activity.entries.len().saturating_sub(1));
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            activity.selected = activity.selected.saturating_sub(1);
+        }
+        KeyCode::Char('u') => {
+            let Some(id) = activity
+                .entries
+                .get(activity.selected)
+                .map(|entry| entry.id)
+            else {
+                return true;
+            };
+            match app
+                .dispatcher
+                .execute(Action::UndoActivity { outbox_id: id })
+                .await
+            {
+                Ok(_) => match app.store.list_activity(&app.scope, 0, 50).await {
+                    Ok(entries) => {
+                        app.view = View::Activity(ActivityView {
+                            entries,
+                            selected: 0,
+                        })
+                    }
+                    Err(error) => warn!(%error, "refreshing activity failed"),
+                },
+                Err(error) => app.status.hint = error.to_string(),
+            }
+        }
+        KeyCode::Esc => {
+            if let Ok(inbox) = load_inbox(&app.store, &app.scope, "INBOX").await {
+                app.view = View::Inbox(inbox);
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 async fn load_older_mail(app: &mut App) {
@@ -898,6 +958,18 @@ async fn execute_action(app: &mut App, action: Action) {
                 remote_failures: 0,
                 background: Box::new(bg),
             });
+            return;
+        }
+        Action::ShowActivity => {
+            match app.store.list_activity(&app.scope, 0, 50).await {
+                Ok(entries) => {
+                    app.view = View::Activity(ActivityView {
+                        entries,
+                        selected: 0,
+                    })
+                }
+                Err(error) => warn!(%error, "opening activity failed"),
+            }
             return;
         }
         _ => {}
@@ -1216,6 +1288,12 @@ fn advance_selection(app: &mut App, delta: i32) {
                 let next =
                     (v.selected as i32 + delta).clamp(0, v.results.len() as i32 - 1) as usize;
                 v.selected = next;
+            }
+        }
+        View::Activity(v) => {
+            if !v.entries.is_empty() {
+                v.selected =
+                    (v.selected as i32 + delta).clamp(0, v.entries.len() as i32 - 1) as usize;
             }
         }
         _ => {}

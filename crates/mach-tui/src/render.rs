@@ -22,7 +22,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, ComposerField, ComposerView, InboxView, SearchView, SyncState, ThreadView, View,
+    ActivityView, App, ComposerField, ComposerView, InboxView, SearchView, SyncState, ThreadView,
+    View,
 };
 
 const ACCENT: Color = Color::Rgb(0x7c, 0x9c, 0xff);
@@ -56,6 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Thread(v) => draw_thread(f, v, layout[1]),
         View::Composer(v) => draw_composer(f, v, layout[1]),
         View::Search(v) => draw_search(f, v, layout[1]),
+        View::Activity(v) => draw_activity(f, v, layout[1]),
     }
     draw_status_bar(f, app, layout[2]);
 }
@@ -70,6 +72,7 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
         View::Thread(v) => format!("  ← Inbox  •  {}", trunc(&v.summary.subject, 60)),
         View::Composer(v) => format!("  Compose  •  draft {}", v.draft_id),
         View::Search(v) => format!("  / {}", v.query),
+        View::Activity(v) => format!("  Activity ({} changes)", v.entries.len()),
     };
     let bar = Line::from(vec![
         Span::styled(
@@ -333,6 +336,38 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
     }
 
     draw_mailbox_table(f, &v.results, v.selected, 0, chunks[1]);
+}
+
+fn draw_activity(f: &mut Frame, v: &ActivityView, area: Rect) {
+    let rows = v.entries.iter().enumerate().map(|(index, entry)| {
+        Row::new(vec![
+            Cell::from(entry.id.to_string()),
+            Cell::from(pretty_when(&entry.at)),
+            Cell::from(entry.account_id.to_string()),
+            Cell::from(entry.summary.clone()),
+            Cell::from(if entry.undone { "undone" } else { &entry.state }.to_string()),
+        ])
+        .style(if index == v.selected {
+            Style::default().bg(SELECTED_BG)
+        } else {
+            Style::default()
+        })
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(24),
+            Constraint::Min(20),
+            Constraint::Length(10),
+        ],
+    )
+    .header(
+        Row::new(["ID", "Time", "Account", "Activity", "State"]).style(Style::default().fg(DIM)),
+    )
+    .column_spacing(1);
+    f.render_widget(table, area);
 }
 
 /// Render the inbox-shaped projection as an actual table. The table owns

@@ -1,0 +1,1 @@
+ALTER TABLE outbox ADD COLUMN undone_by INTEGER REFERENCES outbox(id);

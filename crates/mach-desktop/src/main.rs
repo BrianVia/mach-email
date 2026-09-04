@@ -176,6 +176,7 @@ async fn main() -> Result<()> {
             commands::unsubscribe_post,
             commands::unsubscribe_mailto,
             commands::outbox_summary,
+            commands::list_activity,
             commands::retry_outbox,
             commands::sync_now,
         ])

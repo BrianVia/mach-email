@@ -8,7 +8,7 @@
 //! need optimistic-update semantics.
 
 use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::store::{Draft, Label, MailStore};
+use mach_core::store::{ActivityEntry, Draft, Label, MailStore};
 use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
 use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
@@ -254,6 +254,24 @@ pub async fn outbox_summary(
         Ok(summary) => Out::ok(summary),
         Err(error) => Out::err(error),
     })
+}
+
+#[tauri::command]
+pub async fn list_activity(
+    state: State<'_, AppState>,
+    since_ms: i64,
+    limit: u32,
+) -> Result<Out<Vec<ActivityEntry>>, String> {
+    Ok(
+        match state
+            .store
+            .list_activity(&state.scope, since_ms, limit)
+            .await
+        {
+            Ok(entries) => Out::ok(entries),
+            Err(error) => Out::err(error),
+        },
+    )
 }
 
 #[tauri::command]

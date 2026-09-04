@@ -49,6 +49,17 @@ enum Command {
     /// Inspect or retry durable outgoing changes.
     #[command(subcommand)]
     Outbox(OutboxCommand),
+    /// Show recent activity or undo an entry from it.
+    Log {
+        #[command(subcommand)]
+        command: Option<LogCommand>,
+        /// How far back to show activity (for example 30m, 24h, or 7d).
+        #[arg(long, default_value = "24h")]
+        since: String,
+        /// Maximum number of entries to show.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
     /// Diagnostics. Use to verify environment and exercise rare code paths.
     Doctor {
         /// Wipe the local sync cursor to force gap recovery on next sync.
@@ -79,6 +90,12 @@ enum OutboxCommand {
     Retry,
 }
 
+#[derive(Subcommand, Debug)]
+enum LogCommand {
+    /// Undo a reversible activity entry.
+    Undo { id: i64 },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Walks up from CWD looking for `.env`. Silent if not found —
@@ -107,6 +124,15 @@ async fn main() -> Result<()> {
         }) => commands::sync::run(bootstrap, older.as_deref(), days, account).await,
         Some(Command::Outbox(OutboxCommand::List)) => commands::outbox::list(account).await,
         Some(Command::Outbox(OutboxCommand::Retry)) => commands::outbox::retry(account).await,
+        Some(Command::Log {
+            command: Some(LogCommand::Undo { id }),
+            ..
+        }) => commands::log::undo(id, account).await,
+        Some(Command::Log {
+            command: None,
+            since,
+            limit,
+        }) => commands::log::list(&since, limit, account).await,
         Some(Command::Doctor { simulate_gap }) => {
             commands::doctor::run(simulate_gap, account).await
         }

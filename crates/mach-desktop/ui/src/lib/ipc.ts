@@ -130,6 +130,17 @@ export type OutboxSummary = {
   last_error: string | null;
 };
 
+export type ActivityEntry = {
+  id: number;
+  account_id: string;
+  at: string;
+  kind: string;
+  thread_ids: string[];
+  summary: string;
+  state: string;
+  undone: boolean;
+};
+
 export type LoadOlderStats = {
   fetched: number;
   oldest_ms: number | null;
@@ -249,6 +260,10 @@ export async function unsubscribeMailto(accountId: string, to: string, subject: 
 
 export async function fetchOutboxSummary(): Promise<OutboxSummary> {
   return unwrap(await invoke<Out<OutboxSummary>>("outbox_summary"));
+}
+
+export async function listActivity(sinceMs = 0, limit = 50): Promise<ActivityEntry[]> {
+  return unwrap(await invoke<Out<ActivityEntry[]>>("list_activity", { sinceMs, limit }));
 }
 
 export async function retryOutbox(): Promise<number> {

@@ -12,6 +12,7 @@
     fetchSettings,
     flushOutbox,
     listLabels,
+    listActivity,
     loadOlder,
     listThreads,
     openThread as openThreadIpc,
@@ -22,6 +23,7 @@
     unsubscribePost,
     unsubscribeMailto,
     type AccountStatus,
+    type ActivityEntry,
     type ActionOutcome,
     type Draft,
     type Label,
@@ -40,6 +42,7 @@
   import SearchOverlay from "./views/Search.svelte";
   import Palette from "./views/Palette.svelte";
   import ChordOverlay from "./views/ChordOverlay.svelte";
+  import Activity from "./views/Activity.svelte";
 
   const INITIAL_LIST_LIMIT = 1000;
 
@@ -50,7 +53,8 @@
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
   type PaletteView = { kind: "palette"; query: string; selected: number; background: AppView };
-  type AppView = InboxView | ThreadView | ComposerView | SearchView | PaletteView;
+  type ActivityView = { kind: "activity"; entries: ActivityEntry[]; selected: number };
+  type AppView = InboxView | ThreadView | ComposerView | SearchView | PaletteView | ActivityView;
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
@@ -81,6 +85,7 @@
     if (view.kind === "inbox") return labelDisplay(view.label);
     if (view.kind === "thread") return view.thread.subject || "(no subject)";
     if (view.kind === "composer") return composerTitle(view.draft);
+    if (view.kind === "activity") return "Activity";
     return "Search";
   });
 
@@ -89,10 +94,11 @@
     if (view.kind === "thread") {
       return `${view.thread.participants.slice(0, 2).join(", ")}${view.thread.participants.length > 2 ? ` +${view.thread.participants.length - 2}` : ""}`;
     }
+    if (view.kind === "activity") return `${view.entries.length} recent changes`;
     return status?.email ?? "";
   });
 
-  let activeLabel = $derived(view.kind === "inbox" ? view.label : undefined);
+  let activeLabel = $derived(view.kind === "inbox" ? view.label : view.kind === "activity" ? "ACTIVITY" : undefined);
   let allAccountsSynced = $derived(
     (status?.accounts.length ?? 0) > 0
       && (status?.accounts.every((account) => syncOkByAccount[account] === true) ?? false),
@@ -281,6 +287,7 @@
       return { selection: thread ? [thread.id] : [], current_thread: thread?.id };
     }
     if (currentView.kind === "palette") return currentContext(currentView.background);
+    if (currentView.kind === "activity") return { selection: [] };
     return { selection: [], current_draft: currentView.draft.id };
   }
 
@@ -291,6 +298,7 @@
       case "composer": return "composing";
       case "search": return "search";
       case "palette": return "normal";
+      case "activity": return "normal";
     }
   }
 
@@ -312,6 +320,7 @@
       refresh: "Refresh",
       mute: "Mute thread",
       unsubscribe: "Unsubscribe",
+      show_activity: "Show activity",
     };
     const byLabel = new Map<string, PaletteCommand>();
 
@@ -386,6 +395,23 @@
     }
   }
 
+  async function openActivity() {
+    try {
+      view = { kind: "activity", entries: await listActivity(), selected: 0 };
+    } catch (error) {
+      showActionError(error);
+    }
+  }
+
+  async function undoActivity(id: number) {
+    try {
+      await dispatchAction({ kind: "undo_activity", outbox_id: id });
+      view = { kind: "activity", entries: await listActivity(), selected: 0 };
+    } catch (error) {
+      showActionError(error);
+    }
+  }
+
   function chordLength(chord: string) {
     return chord.trim().split(/\s+/).length;
   }
@@ -421,6 +447,10 @@
               : clamp(origin.index, 0, threads.length - 1);
           }
           view = { kind: "inbox", label: "INBOX", threads, selected, limit: INITIAL_LIST_LIMIT };
+          return;
+        }
+        case "undo_activity": {
+          await undoActivity(action.outbox_id as number);
           return;
         }
         case "select_next":
@@ -491,6 +521,9 @@
         }
         case "search":
           view = { kind: "search", query: "", results: [], selected: 0, background: currentView };
+          return;
+        case "show_activity":
+          await openActivity();
           return;
         case "refresh": {
           if (currentView.kind === "thread") {
@@ -827,6 +860,7 @@
   {chordConts}
   {userLabels}
   onOpenLabel={(label) => void runAction({ kind: "open_label", label_id: label })}
+  onOpenActivity={() => void openActivity()}
 >
   {#if view.kind === "inbox"}
     <Inbox
@@ -860,6 +894,8 @@
         void onSearchEnter();
       }}
     />
+  {:else if view.kind === "activity"}
+    <Activity entries={view.entries} onUndo={(id) => void undoActivity(id)} />
   {:else if view.kind === "palette"}
     <Palette
       v={view}

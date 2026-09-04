@@ -218,6 +218,9 @@ impl Dispatcher {
             Action::Search { query, limit } => self.search(&query, limit).await,
             Action::Refresh => Ok(ActionOutcome::empty("refresh")),
             Action::Undo => return self.do_undo(history).await,
+            Action::UndoActivity { outbox_id } => {
+                return self.do_undo_activity(outbox_id, history).await
+            }
             Action::Redo => return self.do_redo(history).await,
             other => Err(CoreError::InvalidAction(format!(
                 "{} is not implemented yet",
@@ -479,6 +482,68 @@ impl Dispatcher {
         Ok(outcome)
     }
 
+    async fn do_undo_activity(
+        &self,
+        outbox_id: i64,
+        history: &mut ActionHistory,
+    ) -> CoreResult<ActionOutcome> {
+        let activity = self
+            .store
+            .list_activity(&self.scope, 0, u32::MAX)
+            .await?
+            .into_iter()
+            .find(|entry| entry.id == outbox_id)
+            .ok_or_else(|| CoreError::NotFound(format!("activity {outbox_id}")))?;
+        if activity.undone {
+            return Err(CoreError::InvalidAction(format!(
+                "activity {outbox_id} is already undone"
+            )));
+        }
+        let op = self
+            .store
+            .get_outbox_op(&self.scope, outbox_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(format!("activity {outbox_id}")))?;
+        let inverse = self.inverse_of_op(&op.kind, true).await?;
+        if inverse.is_empty() {
+            return Err(CoreError::InvalidAction(format!(
+                "activity {outbox_id} is not undoable"
+            )));
+        }
+
+        let mut changed_threads = Vec::new();
+        let mut last_op_id = None;
+        let mut inverse_outbox_id = None;
+        for action in inverse {
+            let outcome = Box::pin(self.execute_inner(action, false, history)).await?;
+            changed_threads.extend(outcome.changed_threads);
+            last_op_id = outcome.op_id;
+            inverse_outbox_id = outcome
+                .data
+                .and_then(|data| data.get("outbox_id").and_then(|id| id.as_i64()));
+        }
+        let inverse_outbox_id = inverse_outbox_id.ok_or_else(|| {
+            CoreError::Storage("undo did not create an inverse outbox row".into())
+        })?;
+        self.store
+            .mark_outbox_undone(outbox_id, inverse_outbox_id)
+            .await?;
+        let mut unique_threads = Vec::new();
+        for id in changed_threads {
+            if !unique_threads.contains(&id) {
+                unique_threads.push(id);
+            }
+        }
+        Ok(ActionOutcome {
+            action_name: "undo_activity".into(),
+            op_id: last_op_id,
+            changed_threads: unique_threads,
+            changed_drafts: Vec::new(),
+            data: None,
+            message: format!("undid activity {outbox_id}"),
+        })
+    }
+
     async fn modify_labels(
         &self,
         thread_ids: &[crate::ids::ThreadId],
@@ -497,7 +562,8 @@ impl Dispatcher {
             add: add.to_vec(),
             remove: remove.to_vec(),
         };
-        self.store
+        let outbox_id = self
+            .store
             .apply_thread_mutation(&self.scope, &op_id, &kind)
             .await?;
 
@@ -510,7 +576,7 @@ impl Dispatcher {
             op_id: Some(op_id),
             changed_threads: thread_ids.to_vec(),
             changed_drafts: Vec::new(),
-            data: None,
+            data: Some(serde_json::json!({ "outbox_id": outbox_id })),
             message: format!("{action_name}: {} thread(s)", thread_ids.len()),
         })
     }
@@ -525,7 +591,8 @@ impl Dispatcher {
         let kind = OutboxOpKind::Trash {
             thread_ids: thread_ids.to_vec(),
         };
-        self.store
+        let outbox_id = self
+            .store
             .apply_thread_mutation(&self.scope, &op_id, &kind)
             .await?;
 
@@ -538,7 +605,7 @@ impl Dispatcher {
             op_id: Some(op_id),
             changed_threads: thread_ids.to_vec(),
             changed_drafts: Vec::new(),
-            data: None,
+            data: Some(serde_json::json!({ "outbox_id": outbox_id })),
             message: format!("trashed {} thread(s)", thread_ids.len()),
         })
     }
@@ -637,123 +704,111 @@ impl Dispatcher {
     /// This prevents undo from changing threads on which the original action
     /// was a no-op (for example, starring an already-starred thread).
     async fn compute_inverse(&self, action: &Action) -> CoreResult<Option<Vec<Action>>> {
-        if let Action::Trash { thread_ids } = action {
-            // trash() adds TRASH and removes INBOX; the inverse is exactly that, reversed.
-            let untrash = self.with_label_state(thread_ids, "TRASH", false).await?;
-            let restore_inbox = self.with_label_state(thread_ids, "INBOX", true).await?;
-            let mut inverse = Vec::new();
-            if !untrash.is_empty() {
-                inverse.push(Action::RemoveLabel {
-                    thread_ids: untrash,
-                    label_id: LabelId::new("TRASH"),
-                });
-            }
-            if !restore_inbox.is_empty() {
-                inverse.push(Action::AddLabel {
-                    thread_ids: restore_inbox,
-                    label_id: LabelId::new("INBOX"),
-                });
-            }
-            return Ok((!inverse.is_empty()).then_some(inverse));
-        }
-
-        if let Action::Snooze { thread_ids, until } = action {
-            let snoozed = LabelId::new(format!("MACH/Snoozed/{}", until.to_rfc3339()));
-            let restore_inbox = self.with_label_state(thread_ids, "INBOX", true).await?;
-            let remove_snoozed = self
-                .with_label_state(thread_ids, snoozed.as_str(), false)
-                .await?;
-            let mut inverse = Vec::new();
-            if !restore_inbox.is_empty() {
-                inverse.push(Action::AddLabel {
-                    thread_ids: restore_inbox,
-                    label_id: LabelId::new("INBOX"),
-                });
-            }
-            if !remove_snoozed.is_empty() {
-                inverse.push(Action::RemoveLabel {
-                    thread_ids: remove_snoozed,
-                    label_id: snoozed,
-                });
-            }
-            return Ok((!inverse.is_empty()).then_some(inverse));
-        }
-
-        if let Action::Mute { thread_ids } = action {
-            let restore_inbox = self.with_label_state(thread_ids, "INBOX", true).await?;
-            let remove_muted = self
-                .with_label_state(thread_ids, "MACH/Muted", false)
-                .await?;
-            let mut inverse = Vec::new();
-            if !remove_muted.is_empty() {
-                inverse.push(Action::RemoveLabel {
-                    thread_ids: remove_muted,
-                    label_id: LabelId::new("MACH/Muted"),
-                });
-            }
-            if !restore_inbox.is_empty() {
-                inverse.push(Action::AddLabel {
-                    thread_ids: restore_inbox,
-                    label_id: LabelId::new("INBOX"),
-                });
-            }
-            return Ok((!inverse.is_empty()).then_some(inverse));
-        }
-
-        let inverse = match action {
-            Action::Archive { thread_ids } => {
-                let changed = self.with_label_state(thread_ids, "INBOX", true).await?;
-                (!changed.is_empty()).then(|| Action::AddLabel {
-                    thread_ids: changed,
-                    label_id: LabelId::new("INBOX"),
-                })
-            }
-            Action::MarkRead { thread_ids, read } => {
-                let changed = self.with_label_state(thread_ids, "UNREAD", *read).await?;
-                (!changed.is_empty()).then(|| Action::MarkRead {
-                    thread_ids: changed,
-                    read: !read,
-                })
-            }
+        let kind = match action {
+            Action::Archive { thread_ids } => OutboxOpKind::ModifyLabels {
+                thread_ids: thread_ids.clone(),
+                add: Vec::new(),
+                remove: vec![LabelId::new("INBOX")],
+            },
+            Action::Mute { thread_ids } => OutboxOpKind::ModifyLabels {
+                thread_ids: thread_ids.clone(),
+                add: vec![LabelId::new("MACH/Muted")],
+                remove: vec![LabelId::new("INBOX")],
+            },
+            Action::Trash { thread_ids } => OutboxOpKind::Trash {
+                thread_ids: thread_ids.clone(),
+            },
+            Action::MarkRead { thread_ids, read } => OutboxOpKind::ModifyLabels {
+                thread_ids: thread_ids.clone(),
+                add: (!read)
+                    .then(|| LabelId::new("UNREAD"))
+                    .into_iter()
+                    .collect(),
+                remove: read.then(|| LabelId::new("UNREAD")).into_iter().collect(),
+            },
             Action::Star {
                 thread_ids,
                 starred,
-            } => {
-                let changed = self
-                    .with_label_state(thread_ids, "STARRED", !starred)
-                    .await?;
-                (!changed.is_empty()).then(|| Action::Star {
-                    thread_ids: changed,
-                    starred: !starred,
-                })
-            }
+            } => OutboxOpKind::ModifyLabels {
+                thread_ids: thread_ids.clone(),
+                add: starred
+                    .then(|| LabelId::new("STARRED"))
+                    .into_iter()
+                    .collect(),
+                remove: (!starred)
+                    .then(|| LabelId::new("STARRED"))
+                    .into_iter()
+                    .collect(),
+            },
             Action::AddLabel {
                 thread_ids,
                 label_id,
-            } => {
-                let changed = self
-                    .with_label_state(thread_ids, label_id.as_str(), false)
-                    .await?;
-                (!changed.is_empty()).then(|| Action::RemoveLabel {
-                    thread_ids: changed,
-                    label_id: label_id.clone(),
-                })
-            }
+            } => OutboxOpKind::ModifyLabels {
+                thread_ids: thread_ids.clone(),
+                add: vec![label_id.clone()],
+                remove: Vec::new(),
+            },
             Action::RemoveLabel {
                 thread_ids,
                 label_id,
-            } => {
-                let changed = self
-                    .with_label_state(thread_ids, label_id.as_str(), true)
-                    .await?;
-                (!changed.is_empty()).then(|| Action::AddLabel {
-                    thread_ids: changed,
-                    label_id: label_id.clone(),
-                })
-            }
-            _ => None,
+            } => OutboxOpKind::ModifyLabels {
+                thread_ids: thread_ids.clone(),
+                add: Vec::new(),
+                remove: vec![label_id.clone()],
+            },
+            Action::Snooze { thread_ids, until } => OutboxOpKind::ModifyLabels {
+                thread_ids: thread_ids.clone(),
+                add: vec![LabelId::new(format!("MACH/Snoozed/{}", until.to_rfc3339()))],
+                remove: vec![LabelId::new("INBOX")],
+            },
+            _ => return Ok(None),
         };
-        Ok(inverse.map(|action| vec![action]))
+        let inverse = self.inverse_of_op(&kind, false).await?;
+        Ok((!inverse.is_empty()).then_some(inverse))
+    }
+
+    async fn inverse_of_op(
+        &self,
+        kind: &OutboxOpKind,
+        observed_after: bool,
+    ) -> CoreResult<Vec<Action>> {
+        let (thread_ids, add, remove) = match kind {
+            OutboxOpKind::ModifyLabels {
+                thread_ids,
+                add,
+                remove,
+            } => (thread_ids, add.clone(), remove.clone()),
+            OutboxOpKind::Trash { thread_ids } => (
+                thread_ids,
+                vec![LabelId::new("TRASH")],
+                vec![LabelId::new("INBOX")],
+            ),
+            _ => return Ok(Vec::new()),
+        };
+        let mut inverse = Vec::new();
+        for label_id in add {
+            let changed = self
+                .with_label_state(thread_ids, label_id.as_str(), observed_after)
+                .await?;
+            if !changed.is_empty() {
+                inverse.push(Action::RemoveLabel {
+                    thread_ids: changed,
+                    label_id,
+                });
+            }
+        }
+        for label_id in remove {
+            let changed = self
+                .with_label_state(thread_ids, label_id.as_str(), !observed_after)
+                .await?;
+            if !changed.is_empty() {
+                inverse.push(Action::AddLabel {
+                    thread_ids: changed,
+                    label_id,
+                });
+            }
+        }
+        Ok(inverse)
     }
 
     async fn with_label_state(

@@ -16,6 +16,7 @@
     chordConts,
     userLabels,
     onOpenLabel,
+    onOpenActivity,
     children,
   }: {
     title: string;
@@ -28,6 +29,7 @@
     chordConts: Continuation[];
     userLabels: { id: string; name: string; unread_count: number | null }[];
     onOpenLabel: (label: string) => void;
+    onOpenActivity: () => void;
     children: Snippet;
   } = $props();
 
@@ -77,6 +79,8 @@
           <span class="label-row"><span>{label.name}</span>{#if label.unread_count}<span>{label.unread_count}</span>{/if}</span>
         </SidebarItem>
       {/each}
+      <div class="sidebar-spacer"></div>
+      <SidebarItem active={activeLabel === "ACTIVITY"} onclick={onOpenActivity}>Activity</SidebarItem>
       <div class="sidebar-hint">g then i/s/t/d/e/z/k/j/a</div>
     </aside>
     <main>{@render children()}</main>
@@ -117,11 +121,12 @@
   .status-pill.unsynced { color: #d99500; background: color-mix(in oklab, #d99500 14%, transparent); }
   .status-pill.failed { color: var(--danger); background: color-mix(in oklab, var(--danger) 14%, transparent); }
   .body { display: grid; min-height: 0; grid-template-columns: 210px 1fr; }
-  aside { padding: 14px; border-right: 1px solid var(--border); background: var(--sidebar); }
+  aside { display: flex; min-height: 0; flex-direction: column; padding: 14px; border-right: 1px solid var(--border); background: var(--sidebar); }
   .brand { padding: 8px 9px 18px; font-weight: 750; }
   .section-header { padding: 18px 9px 6px; color: var(--muted); font-size: 11px; font-weight: 600; }
   .label-row { display: flex; width: 100%; justify-content: space-between; gap: 8px; }
   .sidebar-hint { margin: 16px 9px 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+  .sidebar-spacer { flex: 1; }
   main { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
   footer { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 0 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; user-select: none; }
   .chord { margin-right: 2px; color: var(--accent); font-family: var(--font-mono); }

@@ -6,8 +6,8 @@ use mach_core::{
     ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId},
     search_query::SearchQuery,
     store::{
-        Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
-        ThreadSummary,
+        ActivityEntry, Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind,
+        OutboxSummary, ThreadSummary,
     },
 };
 use rusqlite::{params, params_from_iter, types::Value, OptionalExtension, Row};
@@ -1651,6 +1651,85 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
+    async fn list_activity(
+        &self,
+        scope: &AccountScope,
+        since_ms: i64,
+        limit: u32,
+    ) -> CoreResult<Vec<ActivityEntry>> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Vec<ActivityEntry>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, account_id, op_id, op_kind, payload_json, created_at,
+                            attempts, last_error, state, undone_by
+                     FROM outbox
+                     WHERE (?1 IS NULL OR account_id = ?1) AND created_at >= ?2
+                     ORDER BY created_at DESC, id DESC LIMIT ?3",
+                )
+                .map_err(map_err)?;
+            let entries = stmt
+                .query_map(params![account, since_ms, limit], |row| {
+                    let op = row_to_outbox(row)?;
+                    Ok(ActivityEntry::from_outbox(
+                        &op,
+                        row.get("state")?,
+                        row.get::<_, Option<i64>>("undone_by")?.is_some(),
+                    ))
+                })
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(entries)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn get_outbox_op(&self, scope: &AccountScope, id: i64) -> CoreResult<Option<OutboxOp>> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Option<OutboxOp>> {
+            pool.get()
+                .map_err(map_err)?
+                .query_row(
+                    "SELECT id, account_id, op_id, op_kind, payload_json, created_at,
+                            attempts, last_error
+                     FROM outbox WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)",
+                    params![id, account],
+                    row_to_outbox,
+                )
+                .optional()
+                .map_err(map_err)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn mark_outbox_undone(&self, id: i64, undone_by: i64) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        spawn_blocking(move || -> CoreResult<()> {
+            let changed = pool
+                .get()
+                .map_err(map_err)?
+                .execute(
+                    "UPDATE outbox SET undone_by = ?1 WHERE id = ?2 AND undone_by IS NULL",
+                    params![undone_by, id],
+                )
+                .map_err(map_err)?;
+            if changed == 0 {
+                return Err(CoreError::InvalidAction(format!(
+                    "activity {id} was not found or is already undone"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>> {
         let pool = self.pool.clone();
         let account = account.clone();
@@ -1803,6 +1882,32 @@ mod tests {
         let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert!(matches!(pending[0].kind, OutboxOpKind::ModifyLabels { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_activity_summarizes_modify_labels() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "t1", "one", "body", &["INBOX"]);
+        seed(&pool, "t2", "two", "body", &["INBOX"]);
+        let store = SqliteStore::new(pool);
+        store
+            .apply_thread_mutation(
+                &scope(),
+                &OpId::new(),
+                &OutboxOpKind::ModifyLabels {
+                    thread_ids: vec![ThreadId::new("t1"), ThreadId::new("t2")],
+                    add: Vec::new(),
+                    remove: vec![LabelId::new("INBOX")],
+                },
+            )
+            .await
+            .unwrap();
+
+        let activity = store.list_activity(&scope(), 0, 50).await.unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].summary, "Archived 2 threads");
+        assert_eq!(activity[0].thread_ids.len(), 2);
+        assert!(!activity[0].undone);
     }
 
     #[tokio::test]
