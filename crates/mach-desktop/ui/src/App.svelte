@@ -12,10 +12,13 @@
     fetchOutboxSummary,
     fetchSettings,
     fetchSnippets,
+    fetchSendLaterPresets,
     flushOutbox,
     listLabels,
+    listScheduled,
     loadOlder,
     listThreads,
+    openDraft,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
     retryOutbox,
@@ -31,6 +34,7 @@
     type MailSyncedPayload,
     type OutboxSummary,
     type Settings,
+    type ScheduledSend,
     type SyncStatusPayload,
     type ThreadSummary,
     type UnsubscribeTarget,
@@ -42,6 +46,7 @@
   import SearchOverlay from "./views/Search.svelte";
   import Palette from "./views/Palette.svelte";
   import ChordOverlay from "./views/ChordOverlay.svelte";
+  import Scheduled from "./views/Scheduled.svelte";
 
   const INITIAL_LIST_LIMIT = 1000;
 
@@ -50,9 +55,10 @@
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
   type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
+  type ScheduledView = { kind: "scheduled"; sends: ScheduledSend[]; selected: number };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
   type PaletteView = { kind: "palette"; query: string; selected: number; background: AppView };
-  type AppView = InboxView | ThreadView | ComposerView | SearchView | PaletteView;
+  type AppView = InboxView | ThreadView | ComposerView | ScheduledView | SearchView | PaletteView;
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
@@ -72,6 +78,7 @@
   let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "" };
+  let sendLaterOptions = $state<[string, string][]>([]);
 
   function composerTitle(draft: Draft) {
     if (draft.in_reply_to_message_id) return "Reply";
@@ -85,6 +92,7 @@
     if (view.kind === "inbox") return labelDisplay(view.label);
     if (view.kind === "thread") return view.thread.subject || "(no subject)";
     if (view.kind === "composer") return composerTitle(view.draft);
+    if (view.kind === "scheduled") return "Scheduled";
     return "Search";
   });
 
@@ -93,10 +101,11 @@
     if (view.kind === "thread") {
       return `${view.thread.participants.slice(0, 2).join(", ")}${view.thread.participants.length > 2 ? ` +${view.thread.participants.length - 2}` : ""}`;
     }
+    if (view.kind === "scheduled") return `${view.sends.length.toLocaleString()} messages`;
     return status?.email ?? "";
   });
 
-  let activeLabel = $derived(view.kind === "inbox" ? view.label : undefined);
+  let activeLabel = $derived(view.kind === "inbox" ? view.label : view.kind === "scheduled" ? "SCHEDULED" : undefined);
   let allAccountsSynced = $derived(
     (status?.accounts.length ?? 0) > 0
       && (status?.accounts.every((account) => syncOkByAccount[account] === true) ?? false),
@@ -213,6 +222,11 @@
         console.warn("[mach] refreshing inbox after sync failed", error);
       });
     }
+    if (view.kind === "scheduled") {
+      void listScheduled().then((sends) => {
+        if (view.kind === "scheduled") view = { ...view, sends, selected: clamp(view.selected, 0, sends.length - 1) };
+      }).catch((error) => console.warn("[mach] refreshing scheduled sends failed", error));
+    }
   }
 
   function handleSyncStatus(payload: SyncStatusPayload) {
@@ -228,6 +242,12 @@
     }
 
     const currentView = view;
+    if (currentView.kind === "scheduled" && (event.key === "Enter" || event.key === "#")) {
+      event.preventDefault();
+      if (event.key === "Enter") void openScheduledRow(currentView.selected);
+      else void cancelScheduledRow(currentView.selected);
+      return;
+    }
     const chord = keyEventToChord(event);
     if (!chord) return;
     const openThread = currentView.kind === "thread"
@@ -305,6 +325,7 @@
       return { selection: thread ? [thread.id] : [], current_thread: thread?.id };
     }
     if (currentView.kind === "palette") return currentContext(currentView.background);
+    if (currentView.kind === "scheduled") return { selection: [] };
     return { selection: [], current_draft: currentView.draft.id };
   }
 
@@ -315,6 +336,7 @@
       case "composer": return "composing";
       case "search": return "search";
       case "palette": return "normal";
+      case "scheduled": return "normal";
     }
   }
 
@@ -494,6 +516,15 @@
           }
           return;
         }
+        case "send_later": {
+          if (currentView.kind !== "composer") return;
+          const draft = await saveComposerDraft(currentView);
+          const at = action.at as string;
+          await dispatchAction({ kind: "send_later", draft_id: draft.id, at });
+          view = currentView.background;
+          showNotice(`Scheduled for ${new Date(at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`);
+          return;
+        }
         case "unsubscribe": {
           await beginUnsubscribe(action.message_id as string);
           return;
@@ -517,6 +548,10 @@
         }
         case "open_label": {
           const label = action.label_id as string;
+          if (label === "SCHEDULED") {
+            view = { kind: "scheduled", sends: await listScheduled(), selected: 0 };
+            return;
+          }
           const threads = await listThreads(label, INITIAL_LIST_LIMIT);
           view = { kind: "inbox", label, threads, selected: 0, limit: INITIAL_LIST_LIMIT };
           return;
@@ -670,6 +705,7 @@
 
   function openComposer(draft: Draft, background: AppView) {
     composerFields = fieldsFromDraft(draft);
+    void fetchSendLaterPresets().then((presets) => (sendLaterOptions = presets)).catch(showActionError);
     view = { kind: "composer", draft, background };
   }
 
@@ -724,6 +760,8 @@
       view = { ...currentView, selectedMsg: clamp(currentView.selectedMsg + delta, 0, currentView.messages.length - 1) };
     } else if (currentView.kind === "search") {
       view = { ...currentView, selected: clamp(currentView.selected + delta, 0, currentView.results.length - 1) };
+    } else if (currentView.kind === "scheduled") {
+      view = { ...currentView, selected: clamp(currentView.selected + delta, 0, currentView.sends.length - 1) };
     }
   }
 
@@ -776,6 +814,33 @@
       await openThreadView(thread, { threads, index });
     } catch (error) {
       console.warn("open thread failed", error);
+      showActionError(error);
+    }
+  }
+
+  async function openScheduledRow(index: number) {
+    const currentView = view;
+    if (currentView.kind !== "scheduled") return;
+    const send = currentView.sends[index];
+    if (!send) return;
+    try {
+      openComposer(await openDraft(send.draft_id), currentView);
+    } catch (error) {
+      showActionError(error);
+    }
+  }
+
+  async function cancelScheduledRow(index: number) {
+    const currentView = view;
+    if (currentView.kind !== "scheduled") return;
+    const send = currentView.sends[index];
+    if (!send) return;
+    try {
+      await dispatchAction({ kind: "cancel_send_later", send_later_id: send.send_later_id });
+      const sends = currentView.sends.filter((candidate) => candidate.send_later_id !== send.send_later_id);
+      view = { ...currentView, sends, selected: clamp(currentView.selected, 0, sends.length - 1) };
+      showNotice("Scheduled send cancelled");
+    } catch (error) {
       showActionError(error);
     }
   }
@@ -846,7 +911,7 @@
 
   function labelDisplay(id: string) {
     const names: Record<string, string> = {
-      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", DONE: "Done", SNOOZED: "Snoozed", MUTED: "Muted", ALL: "All Mail",
+      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", SCHEDULED: "Scheduled", TRASH: "Trash", SPAM: "Spam", DONE: "Done", SNOOZED: "Snoozed", MUTED: "Muted", ALL: "All Mail",
     };
     return names[id] ?? userLabels.find((label) => label.id === id)?.name ?? id;
   }
@@ -875,6 +940,14 @@
       onOpen={(index) => void openInboxRow(index)}
       onLoadOlder={loadOlderMail}
     />
+  {:else if view.kind === "scheduled"}
+    <Scheduled
+      sends={view.sends}
+      selected={view.selected}
+      onSelect={(selected) => { if (view.kind === "scheduled") view = { ...view, selected }; }}
+      onOpen={(index) => void openScheduledRow(index)}
+      onCancel={(index) => void cancelScheduledRow(index)}
+    />
   {:else if view.kind === "thread"}
     <ThreadReader v={view} onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)} />
   {:else if view.kind === "composer"}
@@ -883,6 +956,8 @@
       title={composerTitle(view.draft)}
       onFieldsChange={(fields) => (composerFields = fields)}
       onSend={() => void runAction({ kind: "send_draft", draft_id: view.kind === "composer" ? view.draft.id : "" })}
+      presets={sendLaterOptions}
+      onSchedule={(at) => void runAction({ kind: "send_later", at })}
       onClose={closeComposer}
       {snippets}
     />

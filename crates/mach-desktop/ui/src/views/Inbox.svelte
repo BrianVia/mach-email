@@ -51,7 +51,7 @@
     if (fetched !== null) noOlder = fetched === 0;
   }
 
-  // ponytail: client-side split is capped by INBOX_LIMIT; move it into the store if pagination needs category-complete results.
+  // ponytail: client-side split is capped by the current list limit; move it into the store if pagination needs category-complete results.
   let threads = $derived(v.label === "INBOX" ? v.threads.filter((thread) => splitOf(thread.label_ids) === split) : v.threads);
   let splits = $derived((["important", "other", "newsletters"] as const).map((candidate) => ({
     value: candidate,

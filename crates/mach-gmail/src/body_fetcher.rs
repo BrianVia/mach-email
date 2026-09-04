@@ -15,6 +15,7 @@ use mach_core::{
     store::{MailStore, ThreadSummary},
 };
 use mach_store::{MessageBodyUpdate, SqliteStore};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::body::{self, ParsedBody};
@@ -24,6 +25,7 @@ pub struct BodyFetcher {
     account: AccountId,
     client: Arc<GmailClient>,
     store: Arc<SqliteStore>,
+    sync_lock: Mutex<()>,
 }
 
 /// Account-indexed Gmail services. This is the only owner of choosing which
@@ -61,6 +63,7 @@ impl BodyFetcher {
             account,
             client,
             store,
+            sync_lock: Mutex::new(()),
         }
     }
 
@@ -75,6 +78,11 @@ impl BodyFetcher {
 
     pub fn client(&self) -> &Arc<GmailClient> {
         &self.client
+    }
+
+    pub async fn sync_tick(&self) -> Result<crate::sync::TickReport> {
+        let _guard = self.sync_lock.lock().await;
+        crate::sync::sync_account_tick(&self.account, self.client.clone(), self.store.clone()).await
     }
 
     /// Check the local cache; if any message in the thread lacks a full body,
@@ -158,6 +166,13 @@ impl GmailAccountPool {
 
     pub fn is_empty(&self) -> bool {
         self.fetchers.is_empty()
+    }
+
+    pub fn pubsub_client(&self) -> Option<Arc<GmailClient>> {
+        self.fetchers
+            .values()
+            .next()
+            .map(|fetcher| fetcher.client.clone())
     }
 
     /// Pull new Gmail history for every account in scope. This deliberately
@@ -301,6 +316,12 @@ impl GmailAccountPool {
 
 impl BodyFetcher {
     async fn pull_updates(&self) -> Result<()> {
+        let _guard = self.sync_lock.lock().await;
+        if let Err(error) =
+            crate::sync::ensure_watch(&self.account, &self.client, &self.store).await
+        {
+            warn!(account = %self.account, %error, "Gmail watch renewal failed; polling remains active");
+        }
         if self
             .store
             .get_history_cursor(&self.account)
