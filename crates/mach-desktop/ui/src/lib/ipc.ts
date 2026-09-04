@@ -149,6 +149,7 @@ export type AccountStatus = {
 
 export type MailSyncedPayload = {
   account: string;
+  new_threads: ThreadSummary[];
 };
 
 export type SyncStatusPayload = {

@@ -10,12 +10,13 @@
 
 mod commands;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use mach_core::ids::AccountScope;
+use mach_core::ids::{AccountId, AccountScope};
 use mach_core::Dispatcher;
 use mach_core::UserConfig;
 use mach_gmail::GmailAccountPool;
@@ -30,6 +31,7 @@ pub struct AppState {
     pub default_keymap_toml: String,
     pub user_keymap_toml: Option<String>,
     pub account_emails: Vec<String>,
+    pub synced_accounts: Arc<Mutex<HashSet<AccountId>>>,
     pub user_config: UserConfig,
 }
 
@@ -124,10 +126,12 @@ async fn main() -> Result<()> {
         default_keymap_toml: mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string(),
         user_keymap_toml: load_user_keymap_toml(),
         account_emails,
+        synced_accounts: Arc::new(Mutex::new(HashSet::new())),
         user_config,
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             use tauri::Manager;

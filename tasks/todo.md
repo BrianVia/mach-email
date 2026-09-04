@@ -1,96 +1,67 @@
 # mach — Roadmap
 
-Last updated: 2026-05-14.
+Last updated: 2026-09-04.
 
-Status legend: ✅ done · 🔄 in progress · ⏳ pending · ❌ dropped.
+Status legend: ✅ done · ⏳ pending · ❌ dropped.
 
-## Shipped (v0.1.0)
+Work is tracked as GitHub issues at https://github.com/BrianVia/mach-email/issues.
+This file is the short map; the issues hold the detail.
+
+## Shipped
 
 ### Foundation
-- ✅ **Workspace skeleton** — 7 crates + CLI stub.
-- ✅ **Action enum + Dispatcher** — single mutation point across surfaces.
-- ✅ **SQLite store** — STRICT tables, WAL, FTS5, refinery migrations.
+- ✅ Workspace of 7 crates: core, store, gmail, tui, cli, mcp, desktop.
+- ✅ One `Action` enum + `Dispatcher` as the single mutation point for every surface.
+- ✅ SQLite (STRICT, WAL, FTS5), refinery migrations V1–V10.
+- ✅ Multi-account: per-account credentials, cursors, outbox; unified and single-account scopes.
 
-### Gmail integration
-- ✅ **OAuth installed-app flow** — PKCE, loopback redirect, per-account file-based credentials in the platform app-data `accounts/` directory (mode 0600).
-- ✅ **HTTP client** — gzip, rustls, proactive token refresh, 401 retry.
-- ✅ **Bootstrap** — snapshots historyId, fetches labels + last-30-days threads (10x parallel).
-- ✅ **Body backfill (Milestone P)** — lazy `format=full` fetch on first thread open, MIME walker handles padded/unpadded base64url, falls back to `html2text` for HTML-only messages.
-- ✅ **Triage mutation endpoints** — `threads.modify` and `threads.trash`.
-- ⏳ **Safe send activation** — the `messages.send` client exists, but remains
-  unavailable until the draft pipeline and crash/retry semantics are complete.
-- ✅ **Outbox drain worker** — replays optimistic local mutations to Gmail.
-- ✅ **Incremental sync** — `users.history.list` with messageAdded/Deleted/labelAdded/labelRemoved events.
-- ✅ **Gap recovery** — falls back to a 7-day re-bootstrap on 404 cursor-too-old, reconciles by `messageId` upsert.
+### Sync and reliability
+- ✅ OAuth PKCE login; `invalid_grant` detected, account flagged `needs_reauth`, surfaced in CLI/TUI/desktop, skipped by sync loops (#6).
+- ✅ Bootstrap (30 days) + incremental history sync + gap recovery, one shared thread-hydration path.
+- ✅ Load older mail per label: desktop "Load older…", TUI `shift+l`, `mach sync --older` (#10).
+- ✅ Durable outbox with backoff (1m/5m/30m/2h/12h), dead-letter after 5, `mach outbox list|retry`, "N unsynced / N failed" pill (#2).
+- ✅ Echo suppression of our own label changes within 60s (#5).
+- ✅ Optional Gmail Pub/Sub push sync with watch renewal; 60s poll kept as fallback (#17).
+- ✅ Background sync in TUI and desktop every 60s.
 
-### Milestones (against real Gmail)
-- ✅ **A** — Auth round-trips. `mach auth login/status/logout` work.
-- ✅ **B** — Bootstrap populates cache: 1039 threads / 1228 msgs / 40 labels in ~22s, 0 failures.
-- ✅ **C** — Real reads. FTS5 search, `open_thread` with full bodies, hyphenated terms fixed via phrase-quoting.
-- ✅ **P** — Body backfill: first open ~280ms (multi-msg), second open ~14ms (cache hit), FTS5 trigger reindexes on body UPDATE.
-- ✅ **D** — `mach-tui` dogfoodable inbox: ratatui app, inbox/thread/composer/search views, Superhuman keymap, chord prefixes, user keymap.toml override, ~35 workspace tests including keymap golden files and key-event normalization.
-- ✅ **E** — `mach-desktop` Tauri 2.x + SolidJS + Tailwind v4 + Motion One; same Action JSON dispatched via `invoke`, same keymap TOML shared, spring-eased selection, FLIP'd archive, backdrop-blur composer, chord overlay. Builds: 104KB JS / 16KB CSS.
+### Triage
+- ✅ Archive, trash, read/unread, star, labels, snooze, mute (#12).
+- ✅ Undo/redo including trash and snooze via compound history entries (#1).
+- ✅ Activity log (`mach log`, desktop Activity view, TUI `g v`) with undo of any completed op (#21).
+- ✅ Split inbox: Important / Other / Newsletters, keys 1/2/3 (#13).
+- ✅ Sidebar: Inbox, Starred, Sent, Drafts, Scheduled, Done, Snoozed, Muted, Trash, Spam, All Mail, user labels (#9).
+- ✅ Unsubscribe from `List-Unsubscribe` (one-click POST, https, mailto) with confirm (#12).
+- ✅ Search operators: `from: to: subject: label: is: has: newer_than: older_than:` (#4).
 
-### Multi-surface
-- ✅ **CLI** — `mach do '{...}'` dispatches Action JSON.
-- ✅ **TUI** — `mach` launches ratatui app.
-- ✅ **Desktop** — `mach-desktop` launches Tauri app.
-- ✅ **MCP** — `mach mcp` speaks JSON-RPC over stdio; one `mach` tool exposes
-  only dispatcher-supported actions. Tested handshake + tools/list + tools/call.
+### Reading
+- ✅ Sanitized HTML; remote images blocked by default with per-message show and per-sender allowlist (#3).
+- ✅ Attachments listed per message; download to ~/Downloads from desktop and TUI (#8).
+- ✅ Calendar invites parsed from ICS; accept / tentative / decline sends a METHOD:REPLY (#20).
+- ✅ Copy thread as Markdown; links open in the system browser.
 
-### Polish
-- ✅ **Undo/redo** — 20-deep in-memory stack on `Dispatcher`. Inverse computed before mutation; new mutation clears redo. Tests: round-trip + empty-stack + redo-invalidation.
-- ✅ **Snooze sweeper** — `mach sync` scans `MACH/Snoozed/<rfc3339>` labels, un-snoozes when due.
-- ⏳ **Send-later delivery** — `mach sync` detects due rows, but delivery stays
-  disabled until `SendDraft` has the same safe pipeline as interactive send.
-- ✅ **`mach doctor`** — env health (paths, cursor, creds, account, outbox); `--simulate-gap` wipes cursor for gap-recovery regression.
+### Compose
+- ✅ Compose, reply, reply-all, forward with quoting and RFC threading headers.
+- ✅ To / Cc / Bcc, per-account signatures and snippets from `config.toml` (#7, #14).
+- ✅ File attachments on send (#8).
+- ✅ Send later with presets and a Scheduled folder with cancel (#16).
+- ✅ Draft persistence and real send through the outbox.
 
-## Out of scope for v0.1 (open ideas)
+### Surfaces
+- ✅ TUI (ratatui), desktop (Tauri 2 + Svelte 5), CLI (`mach do`), MCP server.
+- ✅ MCP high-level tools: `inbox_overview`, `read_thread`, `find_threads`, `draft_reply`, `daily_digest` (#18).
+- ✅ Desktop notifications on new mail (#15).
+- ✅ Cmd+K palette, chord keymap with user overrides.
 
-These weren't requested as tasks but are obvious next steps. Reorganized as
-they emerge from feedback. They aren't blocking the v0.1 ship.
+## Open
 
-### Sync robustness
-- ⏳ **Echo suppression**: tag history events whose net effect matches a recent (<60s) own `op_id` and drop them. Prevents UI flicker after archive.
-- ⏳ **Auto re-auth on `invalid_grant`**: detect refresh failure → remove that account's credential file → auto-pop browser for re-login. Surface a "refresh token expires in <N>h" status pill 18h before due.
-- ⏳ **Periodic sync in TUI/Desktop**: background tokio task that fires `mach sync` equivalent every 60s; right now the user runs `mach sync` manually.
-- ⏳ **List-Unsubscribe**: parse the header → `unsubscribe` action.
-
-### Composer wiring
-- ⏳ **Compose → SendDraft pipeline**: TUI/Desktop composer state isn't yet serialized into a Draft record. Send-later infra exists but no UI fires it.
-- ⏳ **Reply/Forward pre-population**: actions exist but bodies/headers aren't auto-prefixed.
-- ⏳ **Snippets** (`;`): templated message fragments.
-- ⏳ **HTML→Markdown round-trip for replies**.
-
-### UX
-- ✅ **Multi-account**: additive OAuth logins, per-account sync/cursors/outbox,
-  unified inbox/search, and `--account <email>` filtering.
-- ⏳ **Pub/Sub watch** for push notifications (vs polling).
-- ⏳ **Calendar / contacts** integration.
-- ⏳ **Theme system**: ship 2-3 themes, not just one light + dark.
-- ⏳ **Mouse support** in TUI.
-- ⏳ **Mute** (`Shift+M`).
-- ⏳ **Hot-reload keymap.toml on file change** via `notify`.
-- ⏳ **System notifications** on new mail (Desktop).
-- ⏳ **Drag-and-drop attachments**.
-- ⏳ **Tauri Mobile** build (iOS/Android).
-
-### Search
-- ⏳ **Gmail-operator awareness** (`is:unread`, `from:foo`, `has:attachment`) — currently we quote everything as a literal phrase.
-- ⏳ **Fallback to remote `users.messages.list?q=` for older mail** beyond the 30-day cache window.
-
-### Bug fixes discovered along the way
-- ✅ **keyring 3.x silently drops writes** on unsigned macOS binaries — switched to per-account file storage (mode 0600). Documented in `crates/mach-gmail/src/credentials.rs`.
-- ✅ **Gmail body base64 has padding sometimes** — original `URL_SAFE_NO_PAD` rejected it. Switched to `Indifferent` padding mode.
-- ✅ **FTS5 interpreted `-` as NOT operator** on hyphenated user queries — wrapped queries in `"…"` for literal-phrase matching.
-- ✅ **`open_thread` returned empty data** — was a TUI navigation action only; now populates `data: { thread, messages }` for CLI/MCP.
-- ✅ **Doctest treated ASCII layout diagram as Rust code** — added ` ```text ` fence.
-- ✅ **Duplicate `r` binding in default keymap** — `refresh` moved to `ctrl+r`.
+- ⏳ #19 Local AI triage at sync time (needs a runtime decision and a review UI).
+- ⏳ #22 Tauri Mobile build (touch-first shell, signing, background fetch).
+- ⏳ #23 IMAP backend behind the `MailStore` seam.
 
 ## Decisions locked
 
-- Desktop frontend: **SolidJS** (vs React; the VDOM cost matters at 16ms).
-- Default keymap: **Superhuman bindings** lifted verbatim; user can override per-binding.
-- Storage: one file per account under the OS app-data `accounts/` directory, mode 0600. (Keyring 3.x silently fails on unsigned macOS binaries.)
-- Same SQLite DB shared across all surfaces (WAL handles concurrent processes).
-- One unified `Action` enum drives TUI / CLI / Desktop / MCP. Adding a feature = one variant + one dispatcher arm + one keymap binding.
+- Default keymap follows Superhuman; users override per binding in `~/.config/mach/keymap.toml`.
+- Credentials: one file per account under the OS app-data `accounts/` dir, mode 0600.
+- One SQLite DB shared by all surfaces (WAL).
+- Virtual labels (DONE, SNOOZED, MUTED, ALL, SCHEDULED) are derived in the store, never stored.
+- Adapters (CLI, TUI, desktop, MCP) never rebuild domain orchestration; they call the dispatcher or one `mach-gmail` entry point.
