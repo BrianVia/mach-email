@@ -108,12 +108,26 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .first()
         .map(|email| format!(" · re-auth needed: {email}"))
         .unwrap_or_default();
+    let (outbox, outbox_color) = if app.status.outbox.failed > 0 {
+        (
+            format!(" · {} failed", app.status.outbox.failed),
+            Color::Red,
+        )
+    } else if app.status.outbox.pending > 0 {
+        (
+            format!(" · {} unsynced", app.status.outbox.pending),
+            Color::Yellow,
+        )
+    } else {
+        (String::new(), DIM)
+    };
 
     let line = Line::from(vec![
         Span::raw(" "),
         sync,
         Span::styled(chord_hint, Style::default().fg(DIM)),
         Span::styled(reauth, Style::default().fg(Color::Red)),
+        Span::styled(outbox, Style::default().fg(outbox_color)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }

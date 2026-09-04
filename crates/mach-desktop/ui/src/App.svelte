@@ -7,11 +7,13 @@
     dispatchAction,
     fetchAccountStatus,
     fetchKeymapSources,
+    fetchOutboxSummary,
     fetchSettings,
     flushOutbox,
     listThreads,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
+    retryOutbox,
     searchThreads,
     syncNow,
     type AccountStatus,
@@ -19,6 +21,7 @@
     type Draft,
     type Message,
     type MailSyncedPayload,
+    type OutboxSummary,
     type Settings,
     type SyncStatusPayload,
     type ThreadSummary,
@@ -52,6 +55,7 @@
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
   let status = $state<AccountStatus | null>(null);
+  let outbox = $state<OutboxSummary>({ pending: 0, failed: 0, last_error: null });
   let settings = $state<Settings>({});
   let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
@@ -131,6 +135,14 @@
     }
   }
 
+  async function refreshOutboxSummary() {
+    try {
+      outbox = await fetchOutboxSummary();
+    } catch (error) {
+      console.warn("[mach] outbox summary failed", error);
+    }
+  }
+
   async function refreshInboxPreservingSelection() {
     const currentView = view;
     if (currentView.kind !== "inbox") return;
@@ -160,6 +172,7 @@
   function handleSyncStatus(payload: SyncStatusPayload) {
     syncOkByAccount = { ...syncOkByAccount, [payload.account]: payload.ok };
     if (!payload.ok) void refreshStatus();
+    void refreshOutboxSummary();
   }
 
   function handleKey(event: KeyboardEvent) {
@@ -297,6 +310,7 @@
     }
     const commands = [...byLabel.values()];
     if (background.kind === "thread") commands.push({ label: "Copy as Markdown", chord: "ctrl+shift+c" });
+    commands.push({ label: "Retry failed changes", chord: "retry" });
     return commands;
   }
 
@@ -328,8 +342,24 @@
       copyThreadAsMarkdown(background);
       return;
     }
+    if (command.label === "Retry failed changes") {
+      void retryFailedChanges();
+      return;
+    }
     const resolution = keymap.resolve(currentMode(background), command.chord, currentContext(background));
     if (resolution.kind === "action") void runAction(resolution.action);
+  }
+
+  async function retryFailedChanges() {
+    try {
+      const retried = await retryOutbox();
+      const report = await flushOutbox();
+      await refreshOutboxSummary();
+      if (report.failed > 0) showActionError(report.last_error ?? "Outbox retry failed");
+      else showNotice(`${retried} failed change(s) retried`);
+    } catch (error) {
+      showActionError(error);
+    }
   }
 
   function chordLength(chord: string) {
@@ -658,6 +688,7 @@
   onMount(() => {
     void boot();
     void refreshStatus();
+    void refreshOutboxSummary();
     let destroyed = false;
     const unlisteners: Array<() => void> = [];
     const keepUnlistener = (unlisten: () => void) => {
@@ -712,6 +743,7 @@
   {subtitle}
   accountEmail={status?.email}
   online={allAccountsSynced}
+  {outbox}
   {activeLabel}
   {chordBuf}
   {chordConts}

@@ -103,6 +103,12 @@ export type SyncNowReport = {
   last_error: string | null;
 };
 
+export type OutboxSummary = {
+  pending: number;
+  failed: number;
+  last_error: string | null;
+};
+
 export type KeymapSources = {
   defaults: string;
   user: string | null;
@@ -194,6 +200,14 @@ export async function flushOutbox(): Promise<{
     last_error: string | null;
   }>>("flush_outbox");
   return unwrap(result);
+}
+
+export async function fetchOutboxSummary(): Promise<OutboxSummary> {
+  return unwrap(await invoke<Out<OutboxSummary>>("outbox_summary"));
+}
+
+export async function retryOutbox(): Promise<number> {
+  return unwrap(await invoke<Out<number>>("retry_outbox"));
 }
 
 export async function syncNow(): Promise<SyncNowReport> {

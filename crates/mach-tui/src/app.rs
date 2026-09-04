@@ -17,7 +17,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use mach_core::ids::{AccountScope, DraftId, LabelId, ThreadId};
-use mach_core::store::{Draft, MailStore, Message, ThreadSummary};
+use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
     Action, ActionOutcome, Dispatcher, DraftPatch,
@@ -117,6 +117,7 @@ pub struct StatusLine {
     pub sync: SyncState,
     pub hint: String,
     pub needs_reauth: Vec<String>,
+    pub outbox: OutboxSummary,
 }
 
 pub enum SyncState {
@@ -173,6 +174,7 @@ impl App {
             }
             AccountScope::All => "offline".into(),
         };
+        let outbox = store.outbox_summary(&scope).await?;
         let status = StatusLine {
             account,
             sync: if !needs_reauth.is_empty() && body_fetchers.is_empty() {
@@ -184,6 +186,7 @@ impl App {
             },
             hint: "j/k:nav  e:archive  c:compose  /:search  q:quit".into(),
             needs_reauth,
+            outbox,
         };
 
         Ok(Self {
@@ -410,6 +413,10 @@ async fn handle_pull_event(app: &mut App, event: PullEvent) {
             };
             if report.succeeded > 0 {
                 refresh_visible_inbox(app).await;
+            }
+            match app.store.outbox_summary(&app.scope).await {
+                Ok(summary) => app.status.outbox = summary,
+                Err(error) => warn!(%error, "refreshing outbox summary failed"),
             }
         }
     }

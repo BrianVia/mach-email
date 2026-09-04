@@ -14,7 +14,7 @@ mod store;
 
 pub use store::{
     DeadLetter, DraftStateCount, DueSend, DueSnooze, LabelUpsert, MessageBodyUpdate, MessageUpsert,
-    SqliteStore, ThreadUpsert,
+    OutboxEntry, SqliteStore, ThreadUpsert,
 };
 
 mod embedded {

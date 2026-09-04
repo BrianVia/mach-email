@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use crate::action::OpId;
 use crate::error::CoreResult;
 use crate::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
-use crate::store::{Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, ThreadSummary};
+use crate::store::{
+    Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, OutboxSummary, ThreadSummary,
+};
 
 #[derive(Default)]
 pub struct InMemoryStore {
@@ -26,6 +28,7 @@ struct Inner {
     drafts: HashMap<(AccountId, DraftId), Draft>,
     scheduled_sends: HashMap<(AccountId, DraftId), DateTime<Utc>>,
     outbox: Vec<OutboxOp>,
+    outbox_next_attempt_at: HashMap<i64, i64>,
     next_outbox_id: i64,
     history_cursors: HashMap<AccountId, u64>,
 }
@@ -351,17 +354,27 @@ impl MailStore for InMemoryStore {
         max: u32,
     ) -> CoreResult<Vec<OutboxOp>> {
         let inner = self.inner.lock().unwrap();
+        let now = Utc::now().timestamp_millis();
         Ok(inner
             .outbox
             .iter()
-            .filter(|op| &op.account_id == account && op.attempts < 5)
+            .filter(|op| {
+                &op.account_id == account
+                    && op.attempts < 5
+                    && inner
+                        .outbox_next_attempt_at
+                        .get(&op.id)
+                        .map_or(true, |next| *next <= now)
+            })
             .take(max as usize)
             .cloned()
             .collect())
     }
 
     async fn mark_outbox_done(&self, id: i64) -> CoreResult<()> {
-        self.inner.lock().unwrap().outbox.retain(|o| o.id != id);
+        let mut inner = self.inner.lock().unwrap();
+        inner.outbox.retain(|o| o.id != id);
+        inner.outbox_next_attempt_at.remove(&id);
         Ok(())
     }
 
@@ -370,8 +383,44 @@ impl MailStore for InMemoryStore {
         if let Some(op) = inner.outbox.iter_mut().find(|o| o.id == id) {
             op.attempts += 1;
             op.last_error = Some(error.to_string());
+            if op.attempts < 5 {
+                const BACKOFF_MS: [i64; 5] = [60_000, 300_000, 1_800_000, 7_200_000, 43_200_000];
+                let next = Utc::now().timestamp_millis() + BACKOFF_MS[op.attempts as usize - 1];
+                inner.outbox_next_attempt_at.insert(id, next);
+            }
         }
         Ok(())
+    }
+
+    async fn outbox_summary(&self, scope: &AccountScope) -> CoreResult<OutboxSummary> {
+        let inner = self.inner.lock().unwrap();
+        let relevant: Vec<_> = inner
+            .outbox
+            .iter()
+            .filter(|op| scope_matches(scope, &op.account_id))
+            .collect();
+        Ok(OutboxSummary {
+            pending: relevant.iter().filter(|op| op.attempts < 5).count() as u32,
+            failed: relevant.iter().filter(|op| op.attempts >= 5).count() as u32,
+            last_error: relevant.iter().rev().find_map(|op| op.last_error.clone()),
+        })
+    }
+
+    async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32> {
+        let mut inner = self.inner.lock().unwrap();
+        let ids: Vec<_> = inner
+            .outbox
+            .iter_mut()
+            .filter(|op| &op.account_id == account && op.attempts >= 5)
+            .map(|op| {
+                op.attempts = 0;
+                op.id
+            })
+            .collect();
+        for id in &ids {
+            inner.outbox_next_attempt_at.remove(id);
+        }
+        Ok(ids.len() as u32)
     }
 
     async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>> {

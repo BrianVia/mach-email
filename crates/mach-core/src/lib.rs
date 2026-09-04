@@ -24,4 +24,6 @@ pub use ids::{DraftId, LabelId, MessageId, ThreadId};
 pub use keymap::{Chord, KeyContext, Keymap, KeymapError, Mode};
 pub use search_query::SearchQuery;
 pub use state::AppState;
-pub use store::{InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind};
+pub use store::{
+    InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
+};

@@ -189,6 +189,39 @@ pub async fn flush_outbox(state: State<'_, AppState>) -> Result<Out<serde_json::
 }
 
 #[tauri::command]
+pub async fn outbox_summary(
+    state: State<'_, AppState>,
+) -> Result<Out<mach_core::OutboxSummary>, String> {
+    Ok(match state.store.outbox_summary(&state.scope).await {
+        Ok(summary) => Out::ok(summary),
+        Err(error) => Out::err(error),
+    })
+}
+
+#[tauri::command]
+pub async fn retry_outbox(state: State<'_, AppState>) -> Result<Out<u32>, String> {
+    let entries = match state.store.list_outbox(&state.scope).await {
+        Ok(entries) => entries,
+        Err(error) => return Ok(Out::err(error)),
+    };
+    let mut accounts = entries
+        .into_iter()
+        .filter(|entry| entry.state == "failed")
+        .map(|entry| entry.account_id)
+        .collect::<Vec<_>>();
+    accounts.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    accounts.dedup();
+    let mut retried = 0;
+    for account in accounts {
+        match state.store.retry_failed_outbox(&account).await {
+            Ok(count) => retried += count,
+            Err(error) => return Ok(Out::err(error)),
+        }
+    }
+    Ok(Out::ok(retried))
+}
+
+#[tauri::command]
 pub async fn sync_now(
     app: AppHandle,
     state: State<'_, AppState>,
