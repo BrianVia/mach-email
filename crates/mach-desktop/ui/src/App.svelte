@@ -41,7 +41,7 @@
   type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
   type ThreadOrigin = { threads: ThreadSummary[]; index: number };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
-  type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
+  type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
   type PaletteView = { kind: "palette"; query: string; selected: number; background: AppView };
@@ -61,14 +61,20 @@
   let settings = $state<Settings>({});
   let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
-  let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
+  let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "" };
+
+  function composerTitle(draft: Draft) {
+    if (draft.in_reply_to_message_id) return "Reply";
+    if (draft.subject.startsWith("Fwd:")) return "Forward";
+    return "New message";
+  }
   let actionErrorTimer: number | undefined;
   let noticeTimer: number | undefined;
 
   let title = $derived.by(() => {
     if (view.kind === "inbox") return labelDisplay(view.label);
     if (view.kind === "thread") return view.thread.subject || "(no subject)";
-    if (view.kind === "composer") return "New message";
+    if (view.kind === "composer") return composerTitle(view.draft);
     return "Search";
   });
 
@@ -600,6 +606,7 @@
     return {
       to: draft.to.join(", "),
       cc: draft.cc.join(", "),
+      bcc: draft.bcc.join(", "),
       subject: draft.subject,
       body_md: draft.body_md,
     };
@@ -609,6 +616,7 @@
     return {
       to: parseRecipients(composerFields.to),
       cc: parseRecipients(composerFields.cc),
+      bcc: parseRecipients(composerFields.bcc),
       subject: composerFields.subject,
       body_md: composerFields.body_md,
     };
@@ -773,6 +781,7 @@
   {:else if view.kind === "composer"}
     <Composer
       draft={view.draft}
+      title={composerTitle(view.draft)}
       onFieldsChange={(fields) => (composerFields = fields)}
       onSend={() => void runAction({ kind: "send_draft", draft_id: view.kind === "composer" ? view.draft.id : "" })}
       onClose={closeComposer}

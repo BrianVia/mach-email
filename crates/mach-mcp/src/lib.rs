@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mach_core::ids::AccountScope;
-use mach_core::{action::DISPATCHER_ACTION_NAMES, Action, Dispatcher};
+use mach_core::{action::DISPATCHER_ACTION_NAMES, Action, Dispatcher, UserConfig};
 use mach_gmail::GmailAccountPool;
 use mach_store::SqliteStore;
 use schemars::schema_for;
@@ -45,6 +45,11 @@ impl Server {
             dispatcher: Dispatcher::with_scope(store, scope),
             body_fetchers,
         }
+    }
+
+    pub fn with_user_config(mut self, user_config: UserConfig) -> Self {
+        self.dispatcher = self.dispatcher.with_user_config(user_config);
+        self
     }
 
     /// Run the server to completion. Returns when stdin closes (client

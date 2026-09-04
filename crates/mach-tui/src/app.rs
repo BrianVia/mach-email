@@ -20,7 +20,7 @@ use mach_core::ids::{AccountScope, DraftId, LabelId, ThreadId};
 use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
-    Action, ActionOutcome, Dispatcher, DraftPatch,
+    Action, ActionOutcome, Dispatcher, DraftPatch, UserConfig,
 };
 use mach_store::SqliteStore;
 use ratatui::Terminal;
@@ -87,6 +87,7 @@ pub struct ComposerView {
     pub draft_id: DraftId,
     pub to: String,
     pub cc: String,
+    pub bcc: String,
     pub subject: String,
     pub body: String,
     pub field: ComposerField,
@@ -97,6 +98,7 @@ pub struct ComposerView {
 pub enum ComposerField {
     To,
     Cc,
+    Bcc,
     Subject,
     Body,
 }
@@ -138,9 +140,14 @@ struct SearchEvent {
 }
 
 impl App {
-    pub async fn new(store: Arc<SqliteStore>, scope: AccountScope) -> Result<Self> {
+    pub async fn new(
+        store: Arc<SqliteStore>,
+        scope: AccountScope,
+        user_config: UserConfig,
+    ) -> Result<Self> {
         let keymap = load_keymap()?;
-        let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone());
+        let dispatcher =
+            Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
 
         // Try to construct a body fetcher; if OAuth creds aren't set up,
         // boot offline. The user can still browse cached mail.
@@ -294,7 +301,15 @@ async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> R
 
 /// Run the TUI to completion. Returns when the user quits.
 pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
-    let mut app = App::new(store, scope).await?;
+    run_with_user_config(store, scope, UserConfig::default()).await
+}
+
+pub async fn run_with_user_config(
+    store: Arc<SqliteStore>,
+    scope: AccountScope,
+    user_config: UserConfig,
+) -> Result<()> {
+    let mut app = App::new(store, scope, user_config).await?;
     let (search_tx, mut search_rx) = mpsc::unbounded_channel();
     app.search_events = Some(search_tx);
 
@@ -588,7 +603,8 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
         KeyCode::Tab => {
             c.field = match c.field {
                 ComposerField::To => ComposerField::Cc,
-                ComposerField::Cc => ComposerField::Subject,
+                ComposerField::Cc => ComposerField::Bcc,
+                ComposerField::Bcc => ComposerField::Subject,
                 ComposerField::Subject => ComposerField::Body,
                 ComposerField::Body => ComposerField::To,
             };
@@ -598,7 +614,8 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
             c.field = match c.field {
                 ComposerField::To => ComposerField::Body,
                 ComposerField::Cc => ComposerField::To,
-                ComposerField::Subject => ComposerField::Cc,
+                ComposerField::Bcc => ComposerField::Cc,
+                ComposerField::Subject => ComposerField::Bcc,
                 ComposerField::Body => ComposerField::Subject,
             };
             true
@@ -607,6 +624,7 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
             let target = match c.field {
                 ComposerField::To => &mut c.to,
                 ComposerField::Cc => &mut c.cc,
+                ComposerField::Bcc => &mut c.bcc,
                 ComposerField::Subject => &mut c.subject,
                 ComposerField::Body => &mut c.body,
             };
@@ -624,6 +642,7 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
             let target = match c.field {
                 ComposerField::To => &mut c.to,
                 ComposerField::Cc => &mut c.cc,
+                ComposerField::Bcc => &mut c.bcc,
                 ComposerField::Subject => &mut c.subject,
                 ComposerField::Body => &mut c.body,
             };
@@ -927,6 +946,7 @@ fn composer_save_action(view: &View) -> Option<Action> {
         patch: DraftPatch {
             to: Some(split_recipients(&composer.to)),
             cc: Some(split_recipients(&composer.cc)),
+            bcc: Some(split_recipients(&composer.bcc)),
             subject: Some(composer.subject.clone()),
             body_md: Some(composer.body.clone()),
             ..DraftPatch::default()
@@ -967,6 +987,7 @@ impl ComposerView {
             draft_id: draft.id,
             to: draft.to.join(", "),
             cc: draft.cc.join(", "),
+            bcc: draft.bcc.join(", "),
             subject: draft.subject,
             body: draft.body_md,
             field: ComposerField::To,
@@ -1046,7 +1067,7 @@ mod tests {
             in_reply_to_message_id: Some(mach_core::ids::MessageId::new("message-1")),
             to: vec!["Alice <alice@example.com>".into(), "bob@example.com".into()],
             cc: vec!["carol@example.com".into()],
-            bcc: Vec::new(),
+            bcc: vec!["blind@example.com".into()],
             subject: "Re: Plans".into(),
             body_md: "Sounds good".into(),
             updated_at: Utc::now(),
@@ -1071,6 +1092,7 @@ mod tests {
         assert_eq!(composer.draft_id.as_str(), "draft-1");
         assert_eq!(composer.to, "Alice <alice@example.com>, bob@example.com");
         assert_eq!(composer.cc, "carol@example.com");
+        assert_eq!(composer.bcc, "blind@example.com");
         assert_eq!(composer.subject, "Re: Plans");
         assert_eq!(composer.body, "Sounds good");
     }
@@ -1080,6 +1102,7 @@ mod tests {
         let mut composer = ComposerView::from_draft(draft(), empty_inbox_view());
         composer.to = " alice@example.com, bob@example.com, ".into();
         composer.cc = " , carol@example.com ".into();
+        composer.bcc = " blind@example.com ".into();
         composer.subject = "Updated".into();
         composer.body = "New body".into();
 
@@ -1092,6 +1115,7 @@ mod tests {
         assert_eq!(draft_id.as_str(), "draft-1");
         assert_eq!(patch.to.unwrap(), ["alice@example.com", "bob@example.com"]);
         assert_eq!(patch.cc.unwrap(), ["carol@example.com"]);
+        assert_eq!(patch.bcc.unwrap(), ["blind@example.com"]);
         assert_eq!(patch.subject.as_deref(), Some("Updated"));
         assert_eq!(patch.body_md.as_deref(), Some("New body"));
         assert!(patch.in_reply_to_message_id.is_none());
