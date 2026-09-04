@@ -147,6 +147,7 @@ pub struct MessageBodyUpdate {
     pub id: String,
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
+    pub calendar_ics: Option<String>,
     /// JSON-encoded `Vec<InlineImageRef>` if the message has inline images.
     pub inline_images_json: Option<String>,
 }
@@ -629,6 +630,7 @@ impl SqliteStore {
                        SET body_plain         = NULL,
                            body_html          = NULL,
                            inline_images_json = NULL,
+                           calendar_ics       = NULL,
                            fetched_full       = 0
                      WHERE account_id = ?1 AND thread_id = ?2",
                     params![account.as_str(), tid],
@@ -662,12 +664,14 @@ impl SqliteStore {
                          SET body_plain         = ?1,
                              body_html          = ?2,
                              inline_images_json = ?3,
+                             calendar_ics       = ?4,
                              fetched_full       = 1
-                         WHERE account_id = ?4 AND id = ?5",
+                         WHERE account_id = ?5 AND id = ?6",
                         params![
                             u.body_plain,
                             u.body_html,
                             u.inline_images_json,
+                            u.calendar_ics,
                             account.as_str(),
                             u.id
                         ],
@@ -735,8 +739,13 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
     let headers_json: Option<String> = row.get("headers_json")?;
+    let account_id = AccountId::new(row.get::<_, String>("account_id")?);
+    let calendar_ics: Option<String> = row.get("calendar_ics")?;
+    let calendar = calendar_ics
+        .as_deref()
+        .and_then(|ics| mach_core::parse_calendar(ics, account_id.as_str()));
     Ok(Message {
-        account_id: AccountId::new(row.get::<_, String>("account_id")?),
+        account_id,
         id: MessageId::new(row.get::<_, String>("id")?),
         thread_id: ThreadId::new(row.get::<_, String>("thread_id")?),
         from: row.get("from_addr")?,
@@ -750,6 +759,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         internal_date: ms_to_dt(row.get("internal_date")?),
         body_plain: row.get("body_plain")?,
         body_html: row.get("body_html")?,
+        calendar,
         headers: headers_json
             .as_deref()
             .and_then(|value| serde_json::from_str::<MessageHeaders>(value).ok()),
@@ -790,6 +800,7 @@ fn row_to_draft(row: &Row) -> rusqlite::Result<Draft> {
         bcc: serde_json::from_str(&bcc_addrs).unwrap_or_default(),
         subject: row.get("subject")?,
         body_md: row.get("body_md")?,
+        calendar_reply_ics: row.get("calendar_reply_ics")?,
         updated_at: ms_to_dt(row.get("updated_at")?),
     })
 }
@@ -945,7 +956,7 @@ impl MailStore for SqliteStore {
                 .prepare_cached(
                     "SELECT account_id, id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
                             subject, snippet, body_plain, body_html, headers_json, label_ids_json,
-                            fetched_full, inline_images_json
+                            fetched_full, inline_images_json, calendar_ics
                      FROM messages
                      WHERE account_id = ?1 AND thread_id = ?2
                      ORDER BY internal_date",
@@ -976,7 +987,7 @@ impl MailStore for SqliteStore {
                 .prepare_cached(
                     "SELECT account_id, id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
                             subject, snippet, body_plain, body_html, headers_json, label_ids_json,
-                            fetched_full, inline_images_json
+                            fetched_full, inline_images_json, calendar_ics
                      FROM messages
                      WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
                      LIMIT 2",
@@ -1246,7 +1257,8 @@ impl MailStore for SqliteStore {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
-                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at
+                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at,
+                            calendar_reply_ics
                      FROM drafts WHERE account_id = ?1 AND id = ?2",
                 )
                 .map_err(map_err)?;
@@ -1267,7 +1279,8 @@ impl MailStore for SqliteStore {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
-                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at
+                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at,
+                            calendar_reply_ics
                      FROM drafts
                      WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
                      LIMIT 2",
@@ -1296,8 +1309,8 @@ impl MailStore for SqliteStore {
             conn.execute(
                 "INSERT INTO drafts (account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
                                      to_addrs, cc_addrs, bcc_addrs, subject, body_md,
-                                     updated_at, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'draft')
+                                     updated_at, state, calendar_reply_ics)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'draft', ?12)
                  ON CONFLICT(account_id, id) DO UPDATE SET
                    gmail_draft_id         = excluded.gmail_draft_id,
                    thread_id              = excluded.thread_id,
@@ -1307,6 +1320,7 @@ impl MailStore for SqliteStore {
                    bcc_addrs              = excluded.bcc_addrs,
                    subject                = excluded.subject,
                    body_md                = excluded.body_md,
+                   calendar_reply_ics     = excluded.calendar_reply_ics,
                    updated_at             = excluded.updated_at",
                 params![
                     draft.account_id.as_str(),
@@ -1323,6 +1337,7 @@ impl MailStore for SqliteStore {
                     draft.subject,
                     draft.body_md,
                     dt_to_ms(&draft.updated_at),
+                    draft.calendar_reply_ics,
                 ],
             )
             .map_err(map_err)?;
@@ -1722,6 +1737,7 @@ mod tests {
             bcc: vec![],
             subject: "Subject".into(),
             body_md: "Body".into(),
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         }
     }
@@ -2248,6 +2264,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(message.headers, Some(headers));
+    }
+
+    #[tokio::test]
+    async fn body_update_persists_parsed_calendar() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "invite", "subject", "body", &["INBOX"]);
+        let store = SqliteStore::new(pool);
+        store
+            .update_message_bodies(
+                &account(),
+                vec![MessageBodyUpdate {
+                    id: "invite-m".into(),
+                    body_plain: Some("body".into()),
+                    body_html: None,
+                    calendar_ics: Some("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:event-1\r\nSUMMARY:Planning\r\nDTSTART:20260908T140000Z\r\nDTEND:20260908T143000Z\r\nORGANIZER:mailto:alice@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:test@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".into()),
+                    inline_images_json: None,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let message = store
+            .get_message(&scope(), &MessageId::new("invite-m"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.calendar.unwrap().uid, "event-1");
     }
 
     #[tokio::test]

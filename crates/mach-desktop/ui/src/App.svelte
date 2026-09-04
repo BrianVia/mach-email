@@ -646,6 +646,12 @@
     unsubscribeConfirm = { sender: message.from, accountId: message.account_id, target: targets[0] };
   }
 
+  async function respondToInvite(messageId: string, response: "accepted" | "tentative" | "declined") {
+    await dispatchAction({ kind: "respond_to_invite", message_id: messageId, response });
+    const report = await flushOutbox();
+    if (report.failed > 0) throw new Error(report.last_error ?? "calendar reply failed");
+  }
+
   async function confirmUnsubscribe() {
     const confirmation = unsubscribeConfirm;
     unsubscribeConfirm = null;
@@ -873,7 +879,11 @@
       onLoadOlder={loadOlderMail}
     />
   {:else if view.kind === "thread"}
-    <ThreadReader v={view} onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)} />
+    <ThreadReader
+      v={view}
+      onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)}
+      onRespond={respondToInvite}
+    />
   {:else if view.kind === "composer"}
     <Composer
       draft={view.draft}

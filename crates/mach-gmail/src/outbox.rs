@@ -231,6 +231,13 @@ fn build_mime_raw(d: &mach_core::store::Draft, source: Option<&Message>) -> Resu
         );
     }
     b = b.subject(&d.subject).text_body(&d.body_md);
+    if let Some(ics) = &d.calendar_reply_ics {
+        b = b.attachment(
+            "text/calendar; method=REPLY; charset=utf-8",
+            "invite.ics",
+            ics.as_bytes(),
+        );
+    }
     if let Some(headers) = source.and_then(|message| message.headers.as_ref()) {
         if let Some(message_id) = headers.message_id.as_deref() {
             let references = format!(
@@ -283,6 +290,7 @@ mod tests {
             bcc: vec![],
             subject: "Reply".into(),
             body_md: "Hello".into(),
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         }
     }
@@ -300,6 +308,7 @@ mod tests {
             internal_date: Utc::now(),
             body_plain: Some("Original body".into()),
             body_html: None,
+            calendar: None,
             headers,
             label_ids: vec![LabelId::new("INBOX")],
             fetched_full: true,
@@ -335,6 +344,16 @@ mod tests {
 
         assert!(!mime.contains("In-Reply-To:"));
         assert!(!mime.contains("References:"));
+    }
+
+    #[test]
+    fn mime_includes_calendar_reply_part() {
+        let mut draft = draft();
+        draft.calendar_reply_ics =
+            Some("BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n".into());
+        let mime = decoded_mime(&draft, None);
+        assert!(mime.contains("Content-Type: text/calendar;"));
+        assert!(mime.contains("method=REPLY"));
     }
 
     #[test]

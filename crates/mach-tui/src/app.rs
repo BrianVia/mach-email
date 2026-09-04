@@ -961,6 +961,9 @@ async fn execute_action(app: &mut App, action: Action) {
     match app.dispatcher.execute(action.clone()).await {
         Ok(outcome) => {
             debug!(?outcome, "dispatched");
+            if matches!(action, Action::RespondToInvite { .. }) {
+                app.status.hint = outcome.message.clone();
+            }
 
             // From inbox view: drop the affected row in place (Superhuman feel —
             // the list visibly closes the gap).
@@ -1290,6 +1293,7 @@ mod tests {
             bcc: vec!["blind@example.com".into()],
             subject: "Re: Plans".into(),
             body_md: "Sounds good".into(),
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         }
     }

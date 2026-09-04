@@ -101,11 +101,26 @@ impl BodyFetcher {
             .await
             .with_context(|| format!("get_thread_full({thread_id})"))?;
 
-        let updates: Vec<MessageBodyUpdate> = full
-            .messages
-            .iter()
-            .map(parse_message_into_update)
-            .collect();
+        let mut updates = Vec::with_capacity(full.messages.len());
+        for message in &full.messages {
+            let mut parsed = message
+                .payload
+                .as_ref()
+                .map(body::extract)
+                .unwrap_or_default();
+            if parsed.calendar.is_none() {
+                if let Some(attachment_id) = parsed.calendar_attachment_id.as_deref() {
+                    let bytes = self
+                        .client
+                        .get_attachment_bytes(&message.id, attachment_id)
+                        .await
+                        .context("fetching calendar attachment")?;
+                    parsed.calendar =
+                        Some(String::from_utf8(bytes).context("calendar attachment is not UTF-8")?);
+                }
+            }
+            updates.push(parse_message_into_update(message, parsed));
+        }
 
         let touched = self
             .store
@@ -315,9 +330,7 @@ impl BodyFetcher {
     }
 }
 
-fn parse_message_into_update(m: &RemoteMessage) -> MessageBodyUpdate {
-    let parsed: ParsedBody = m.payload.as_ref().map(body::extract).unwrap_or_default();
-
+fn parse_message_into_update(m: &RemoteMessage, parsed: ParsedBody) -> MessageBodyUpdate {
     // Prefer raw plain. Fall back to html→text via html2text inside
     // ParsedBody::effective_plain. We persist both: body_plain feeds the
     // FTS5 index + TUI; body_html sticks around for the desktop renderer.
@@ -333,6 +346,7 @@ fn parse_message_into_update(m: &RemoteMessage) -> MessageBodyUpdate {
         id: m.id.clone(),
         body_plain,
         body_html,
+        calendar_ics: parsed.calendar,
         inline_images_json,
     }
 }

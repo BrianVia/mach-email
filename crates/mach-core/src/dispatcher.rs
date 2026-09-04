@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, instrument};
 
-use crate::action::{Action, ActionOutcome, DraftPatch, OpId};
+use crate::action::{Action, ActionOutcome, DraftPatch, InviteResponse, OpId};
+use crate::calendar::{build_reply_ics, PartStat};
 use crate::compose::{forward_prefill, reply_prefill, Prefill};
 use crate::error::{CoreError, CoreResult};
 use crate::event::StateEvent;
@@ -209,6 +210,10 @@ impl Dispatcher {
                     .await
             }
             Action::Unsubscribe { message_id } => self.unsubscribe(&message_id).await,
+            Action::RespondToInvite {
+                message_id,
+                response,
+            } => self.respond_to_invite(&message_id, response).await,
             Action::ComposeNew => self.compose_new().await,
             Action::Reply { message_id, all } => self.reply(&message_id, all).await,
             Action::Forward { message_id } => self.forward(&message_id).await,
@@ -251,6 +256,7 @@ impl Dispatcher {
         let account_id = self.draft_account()?;
         let draft = Draft {
             body_md: self.body_with_signature(&account_id, ""),
+            calendar_reply_ics: None,
             account_id,
             id: new_draft_id(),
             gmail_draft_id: None,
@@ -298,6 +304,46 @@ impl Dispatcher {
         Ok(outcome)
     }
 
+    async fn respond_to_invite(
+        &self,
+        message_id: &crate::ids::MessageId,
+        response: InviteResponse,
+    ) -> CoreResult<ActionOutcome> {
+        let source = self
+            .store
+            .get_message(&self.scope, message_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(format!("message {message_id}")))?;
+        let invite = source
+            .calendar
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidAction("message has no calendar invite".into()))?;
+        let (word, status) = match response {
+            InviteResponse::Accepted => ("Accepted", PartStat::Accepted),
+            InviteResponse::Declined => ("Declined", PartStat::Declined),
+            InviteResponse::Tentative => ("Tentative", PartStat::Tentative),
+        };
+        let draft = Draft {
+            account_id: source.account_id.clone(),
+            id: new_draft_id(),
+            gmail_draft_id: None,
+            thread_id: Some(source.thread_id.clone()),
+            in_reply_to_message_id: Some(source.id.clone()),
+            to: vec![invite.organizer.clone()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: format!("{word}: {}", invite.summary),
+            body_md: format!("{word}: {}", invite.summary),
+            calendar_reply_ics: Some(build_reply_ics(invite, source.account_id.as_str(), status)),
+            updated_at: chrono::Utc::now(),
+        };
+        self.store.save_draft_local(&draft).await?;
+        let mut outcome = self.send_draft(&draft.id).await?;
+        outcome.action_name = "respond_to_invite".into();
+        outcome.message = "Reply sent".into();
+        Ok(outcome)
+    }
+
     async fn forward(&self, message_id: &crate::ids::MessageId) -> CoreResult<ActionOutcome> {
         let source = self
             .store
@@ -327,6 +373,7 @@ impl Dispatcher {
             bcc: Vec::new(),
             subject: prefill.subject,
             body_md,
+            calendar_reply_ics: None,
             updated_at: chrono::Utc::now(),
         };
         self.store.save_draft_local(&draft).await?;

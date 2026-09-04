@@ -62,6 +62,7 @@ export type Message = {
   internal_date: string;
   body_plain: string | null;
   body_html: string | null;
+  calendar: CalendarInvite | null;
   headers: {
     message_id?: string;
     in_reply_to?: string;
@@ -73,6 +74,19 @@ export type Message = {
   label_ids: string[];
   fetched_full: boolean;
   inline_images: InlineImageRef[];
+};
+
+export type CalendarInvite = {
+  uid: string;
+  summary: string;
+  starts_at: string;
+  ends_at: string;
+  location: string | null;
+  organizer: string;
+  attendees: { email: string; partstat: "needs_action" | "accepted" | "declined" | "tentative" }[];
+  method: string | null;
+  sequence: number;
+  my_status: "needs_action" | "accepted" | "declined" | "tentative" | null;
 };
 
 export type UnsubscribeTarget =
@@ -89,6 +103,7 @@ export type Draft = {
   bcc: string[];
   subject: string;
   body_md: string;
+  calendar_reply_ics: string | null;
   updated_at: string;
 };
 

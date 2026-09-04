@@ -487,7 +487,7 @@ fn resolve_mutation_account(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Action, DraftPatch};
+    use crate::action::{Action, DraftPatch, InviteResponse};
     use crate::dispatcher::Dispatcher;
     use crate::store::MessageHeaders;
     use std::sync::Arc;
@@ -523,6 +523,7 @@ mod tests {
             internal_date: Utc::now(),
             body_plain: Some("Can you help?".into()),
             body_html: None,
+            calendar: None,
             headers: Some(MessageHeaders {
                 message_id: Some("<rfc-message@example.com>".into()),
                 ..MessageHeaders::default()
@@ -640,6 +641,7 @@ mod tests {
             bcc: vec![],
             subject: "Before save".into(),
             body_md: String::new(),
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         };
         store.save_draft_local(&draft).await.unwrap();
@@ -705,6 +707,53 @@ mod tests {
         let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
         assert_eq!(draft.thread_id, Some(source.thread_id));
         assert_eq!(draft.in_reply_to_message_id, Some(source.id));
+    }
+
+    #[tokio::test]
+    async fn invite_response_creates_and_queues_calendar_reply() {
+        let store = Arc::new(InMemoryStore::new());
+        let mut source = seed_message(&store);
+        source.calendar = crate::parse_calendar(
+            "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:event-1\r\nSUMMARY:Planning\r\nDTSTART:20260908T140000Z\r\nDTEND:20260908T143000Z\r\nORGANIZER:mailto:alice@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:test@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            "test@example.com",
+        );
+        let summary = store
+            .get_thread(
+                &AccountScope::One(source.account_id.clone()),
+                &source.thread_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        store.insert_thread(summary, vec![source.clone()]);
+        let dispatcher =
+            Dispatcher::with_scope(store.clone(), AccountScope::One(source.account_id.clone()));
+
+        let outcome = dispatcher
+            .execute(Action::RespondToInvite {
+                message_id: source.id,
+                response: InviteResponse::Accepted,
+            })
+            .await
+            .unwrap();
+        let draft = store
+            .get_draft(&source.account_id, &outcome.changed_drafts[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(draft.to, ["alice@example.com"]);
+        assert_eq!(draft.subject, "Accepted: Planning");
+        assert!(draft
+            .calendar_reply_ics
+            .unwrap()
+            .contains("PARTSTAT=ACCEPTED"));
+        assert!(matches!(
+            store.outbox_snapshot().as_slice(),
+            [OutboxOp {
+                kind: OutboxOpKind::SendDraft { .. },
+                ..
+            }]
+        ));
     }
 
     #[tokio::test]

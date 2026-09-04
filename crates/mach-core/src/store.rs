@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::action::OpId;
+use crate::calendar::CalendarInvite;
 use crate::error::CoreResult;
 use crate::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 
@@ -48,6 +49,8 @@ pub struct Message {
     pub internal_date: DateTime<Utc>,
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
+    #[serde(default)]
+    pub calendar: Option<CalendarInvite>,
     #[serde(default)]
     pub headers: Option<MessageHeaders>,
     pub label_ids: Vec<LabelId>,
@@ -111,6 +114,8 @@ pub struct Draft {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_md: String,
+    #[serde(default)]
+    pub calendar_reply_ics: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -302,6 +307,7 @@ mod tests {
             internal_date: Utc::now(),
             body_plain: None,
             body_html: None,
+            calendar: None,
             headers: None,
             label_ids: Vec::new(),
             fetched_full: false,

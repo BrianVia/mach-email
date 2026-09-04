@@ -5,6 +5,7 @@
 //! `Dispatcher::execute` — never bypass the dispatcher.
 
 pub mod action;
+pub mod calendar;
 pub mod compose;
 pub mod dispatcher;
 pub mod error;
@@ -19,7 +20,8 @@ pub mod store;
 pub mod unsubscribe;
 pub mod user_config;
 
-pub use action::{Action, ActionOutcome, DraftPatch, OpId};
+pub use action::{Action, ActionOutcome, DraftPatch, InviteResponse, OpId};
+pub use calendar::{build_reply_ics, parse_calendar, CalendarAttendee, CalendarInvite, PartStat};
 pub use dispatcher::Dispatcher;
 pub use error::{CoreError, CoreResult};
 pub use event::StateEvent;

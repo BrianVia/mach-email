@@ -91,6 +91,9 @@
 "shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
 "shift+m"  = { kind = "mute",      thread_ids = "$selection" }
 "ctrl+u"   = { kind = "unsubscribe", message_id = "$current_message" }
+"shift+a"  = { kind = "respond_to_invite", message_id = "$current_message", response = "accepted" }
+"shift+t"  = { kind = "respond_to_invite", message_id = "$current_message", response = "tentative" }
+"shift+d"  = { kind = "respond_to_invite", message_id = "$current_message", response = "declined" }
 
 "r"        = { kind = "reply",   message_id = "$current_message", all = false }
 "shift+r"  = { kind = "reply",   message_id = "$current_message", all = true  }

@@ -232,6 +232,32 @@ fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
         ]));
         lines.push(Line::raw(""));
 
+        if let Some(invite) = &m.calendar {
+            lines.push(Line::styled(
+                format!("  📅 {}", invite.summary),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::raw(format!(
+                "     {} – {}",
+                pretty_full_when(&invite.starts_at),
+                pretty_full_when(&invite.ends_at)
+            )));
+            if let Some(location) = &invite.location {
+                lines.push(Line::raw(format!("     {location}")));
+            }
+            lines.push(Line::raw(format!("     Organizer: {}", invite.organizer)));
+            if let Some(status) = invite.my_status {
+                lines.push(Line::raw(format!("     Status: {status:?}")));
+            }
+            lines.push(Line::styled(
+                "     shift+a accept · shift+t tentative · shift+d decline",
+                Style::default().fg(DIM),
+            ));
+            lines.push(Line::raw(""));
+        }
+
         let body_lines = v.body_renderer.lines(m, inner.width.saturating_sub(2));
         lines.extend(
             body_lines
