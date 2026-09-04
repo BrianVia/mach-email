@@ -21,11 +21,17 @@ pub struct StoredCredentials {
     pub refresh_token: String,
     pub access_token: String,
     pub expires_at: DateTime<Utc>,
+    #[serde(default)]
+    pub needs_reauth: Option<String>,
 }
 
 impl StoredCredentials {
     pub fn is_access_expired(&self) -> bool {
         self.expires_at <= Utc::now() + chrono::Duration::seconds(30)
+    }
+
+    pub fn needs_reauth(&self) -> bool {
+        self.needs_reauth.is_some()
     }
 }
 
@@ -55,19 +61,27 @@ fn credentials_path(account: &str) -> Result<PathBuf, CredsError> {
 
 pub fn save(creds: &StoredCredentials) -> Result<(), CredsError> {
     let path = credentials_path(&creds.email)?;
+    save_to(&path, creds)
+}
+
+fn save_to(path: &std::path::Path, creds: &StoredCredentials) -> Result<(), CredsError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_vec_pretty(creds)?;
-    fs::write(&path, &json)?;
-    set_mode_0600(&path)?;
+    fs::write(path, &json)?;
+    set_mode_0600(path)?;
     Ok(())
 }
 
 pub fn load(account: &str) -> Result<Option<StoredCredentials>, CredsError> {
     migrate_legacy()?;
     let path = credentials_path(account)?;
-    match fs::read(&path) {
+    load_from(&path)
+}
+
+fn load_from(path: &std::path::Path) -> Result<Option<StoredCredentials>, CredsError> {
+    match fs::read(path) {
         Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -146,4 +160,38 @@ pub(crate) fn set_mode_0600(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 pub(crate) fn set_mode_0600(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use super::*;
+
+    fn credentials(needs_reauth: Option<&str>) -> StoredCredentials {
+        StoredCredentials {
+            email: "me@example.com".into(),
+            refresh_token: "refresh".into(),
+            access_token: "access".into(),
+            expires_at: Utc::now(),
+            needs_reauth: needs_reauth.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn reauth_state_save_load_round_trips_and_defaults_for_old_files() {
+        let dir = env::temp_dir().join(format!("mach-credentials-{}", uuid::Uuid::new_v4()));
+        for expected in [None, Some("invalid_grant")] {
+            let path = dir.join(format!("{}.json", expected.unwrap_or("none")));
+            save_to(&path, &credentials(expected)).unwrap();
+            let loaded = load_from(&path).unwrap().unwrap();
+            assert_eq!(loaded.needs_reauth.as_deref(), expected);
+        }
+
+        let mut old = serde_json::to_value(credentials(None)).unwrap();
+        old.as_object_mut().unwrap().remove("needs_reauth");
+        let loaded: StoredCredentials = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.needs_reauth, None);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -77,6 +77,9 @@ pub(crate) async fn sync_accounts(
         let Some(fetcher) = accounts.get(account) else {
             continue;
         };
+        if fetcher.client().needs_reauth().await {
+            continue;
+        }
         let email = account.as_str().to_string();
         match sync_account_tick(account, fetcher.client().clone(), store.clone()).await {
             Ok(report) => {
@@ -337,8 +340,14 @@ pub fn settings() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn account_status(state: State<'_, AppState>) -> serde_json::Value {
-    serde_json::json!({
+pub fn account_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let needs_reauth = mach_gmail::credentials::load_all()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|credentials| credentials.needs_reauth())
+        .map(|credentials| credentials.email)
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
         "email": if state.account_emails.len() == 1 {
             state.account_emails.first().cloned().unwrap_or_default()
         } else {
@@ -346,5 +355,6 @@ pub fn account_status(state: State<'_, AppState>) -> serde_json::Value {
         },
         "accounts": state.account_emails,
         "online": !state.body_fetchers.is_empty(),
-    })
+        "needs_reauth": needs_reauth,
+    }))
 }

@@ -48,8 +48,17 @@ impl GmailClient {
         self.creds.lock().await.email.clone()
     }
 
+    pub async fn needs_reauth(&self) -> bool {
+        self.creds.lock().await.needs_reauth()
+    }
+
     async fn access_token(&self) -> Result<String> {
-        let need_refresh = self.creds.lock().await.is_access_expired();
+        let creds = self.creds.lock().await;
+        if let Some(reason) = &creds.needs_reauth {
+            bail!("account {} needs re-authentication: {reason}", creds.email);
+        }
+        let need_refresh = creds.is_access_expired();
+        drop(creds);
         if need_refresh {
             self.refresh().await?;
         }
@@ -60,10 +69,20 @@ impl GmailClient {
         let refresh_token = self.creds.lock().await.refresh_token.clone();
         debug!("refreshing access token");
         let (access_token, expires_at) =
-            oauth::refresh_access_token(&self.config, &refresh_token).await?;
+            match oauth::refresh_access_token(&self.config, &refresh_token).await {
+                Ok(token) => token,
+                Err(oauth::RefreshError::NeedsReauth(reason)) => {
+                    let mut creds = self.creds.lock().await;
+                    creds.needs_reauth = Some(reason.clone());
+                    credentials::save(&creds).context("persisting re-authentication state")?;
+                    bail!("account {} needs re-authentication: {reason}", creds.email);
+                }
+                Err(oauth::RefreshError::Other(error)) => return Err(error),
+            };
         let mut c = self.creds.lock().await;
         c.access_token = access_token;
         c.expires_at = expires_at;
+        c.needs_reauth = None;
         credentials::save(&c).context("persisting refreshed credentials")?;
         Ok(())
     }

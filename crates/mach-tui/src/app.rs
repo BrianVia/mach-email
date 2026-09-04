@@ -116,9 +116,9 @@ pub struct StatusLine {
     pub account: String,
     pub sync: SyncState,
     pub hint: String,
+    pub needs_reauth: Vec<String>,
 }
 
-#[allow(dead_code)] // AuthExpired is reserved for typed OAuth failure reporting.
 pub enum SyncState {
     Ok,
     Syncing,
@@ -155,6 +155,16 @@ impl App {
         let inbox = load_inbox(&store, &scope, "INBOX").await?;
         let view = View::Inbox(inbox);
         let hyperlinks = Arc::new(HyperlinkRegistry::default());
+        let needs_reauth = mach_gmail::credentials::load_all()?
+            .into_iter()
+            .filter(|credentials| {
+                credentials.needs_reauth()
+                    && scope
+                        .account()
+                        .map_or(true, |account| account.as_str() == credentials.email)
+            })
+            .map(|credentials| credentials.email)
+            .collect::<Vec<_>>();
 
         let account = match &scope {
             AccountScope::One(account) => account.to_string(),
@@ -165,12 +175,15 @@ impl App {
         };
         let status = StatusLine {
             account,
-            sync: if !body_fetchers.is_empty() {
+            sync: if !needs_reauth.is_empty() && body_fetchers.is_empty() {
+                SyncState::AuthExpired
+            } else if !body_fetchers.is_empty() {
                 SyncState::Ok
             } else {
                 SyncState::Offline
             },
             hint: "j/k:nav  e:archive  c:compose  /:search  q:quit".into(),
+            needs_reauth,
         };
 
         Ok(Self {
@@ -382,8 +395,16 @@ async fn handle_pull_event(app: &mut App, event: PullEvent) {
             for (account, error) in &report.failures {
                 warn!(account = %account, error, "background pull failed");
             }
+            for account in report.needs_reauth {
+                let email = account.to_string();
+                if !app.status.needs_reauth.contains(&email) {
+                    app.status.needs_reauth.push(email);
+                }
+            }
             app.status.sync = if report.succeeded > 0 {
                 SyncState::Ok
+            } else if !app.status.needs_reauth.is_empty() {
+                SyncState::AuthExpired
             } else {
                 SyncState::Offline
             };

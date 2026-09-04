@@ -38,6 +38,7 @@ pub struct PullReport {
     pub attempted: usize,
     pub succeeded: usize,
     pub failures: Vec<(AccountId, String)>,
+    pub needs_reauth: Vec<AccountId>,
 }
 
 #[derive(Debug, Default)]
@@ -123,13 +124,24 @@ impl GmailAccountPool {
         // One account with broken credentials must not take the others
         // offline; skip it loudly and keep the rest of the pool alive.
         for credentials in accounts {
+            if credentials.needs_reauth() {
+                warn!(
+                    account = credentials.email,
+                    "skipping account: re-authentication required"
+                );
+                continue;
+            }
             let account = AccountId::new(credentials.email);
             match BodyFetcher::from_stored_credentials(account.as_str(), store.clone()) {
                 Ok(fetcher) => {
                     fetchers.insert(account, Arc::new(fetcher));
                 }
                 Err(e) => {
-                    warn!(account = account.as_str(), error = format!("{e:#}"), "skipping account: client setup failed");
+                    warn!(
+                        account = account.as_str(),
+                        error = format!("{e:#}"),
+                        "skipping account: client setup failed"
+                    );
                 }
             }
         }
@@ -161,8 +173,12 @@ impl GmailAccountPool {
         let attempted = selected.len();
         let results = stream::iter(selected)
             .map(|(account, fetcher)| async move {
+                if fetcher.client.needs_reauth().await {
+                    return (account, None, true);
+                }
                 let result = fetcher.pull_updates().await;
-                (account, result)
+                let needs_reauth = fetcher.client.needs_reauth().await;
+                (account, Some(result), needs_reauth)
             })
             .buffer_unordered(4)
             .collect::<Vec<_>>()
@@ -172,10 +188,14 @@ impl GmailAccountPool {
             attempted,
             ..PullReport::default()
         };
-        for (account, result) in results {
+        for (account, result, needs_reauth) in results {
+            if needs_reauth {
+                report.needs_reauth.push(account.clone());
+            }
             match result {
-                Ok(()) => report.succeeded += 1,
-                Err(error) => report.failures.push((account, format!("{error:#}"))),
+                Some(Ok(())) => report.succeeded += 1,
+                Some(Err(error)) => report.failures.push((account, format!("{error:#}"))),
+                None => {}
             }
         }
         report

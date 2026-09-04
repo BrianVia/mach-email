@@ -42,6 +42,10 @@ pub async fn status(account: Option<&str>) -> Result<()> {
         println!("No matching credentials stored. Run `mach auth login`.");
     }
     for creds in selected {
+        if creds.needs_reauth() {
+            println!("NEEDS RE-AUTH: {} — run: mach auth login", creds.email);
+            continue;
+        }
         println!("Account:        {}", creds.email);
         println!("Token expires:  {}", creds.expires_at.to_rfc3339());
         let now = Utc::now();

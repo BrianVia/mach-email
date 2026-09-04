@@ -159,6 +159,7 @@
 
   function handleSyncStatus(payload: SyncStatusPayload) {
     syncOkByAccount = { ...syncOkByAccount, [payload.account]: payload.ok };
+    if (!payload.ok) void refreshStatus();
   }
 
   function handleKey(event: KeyboardEvent) {
@@ -760,8 +761,11 @@
     />
   {/if}
 
-  {#if bootError || actionError || notice}
+  {#if bootError || actionError || notice || status?.needs_reauth.length}
     <div class="errors">
+      {#each status?.needs_reauth ?? [] as email}
+        <div class="notice reauth">Sign-in expired for {email}. Run mach auth login in a terminal.</div>
+      {/each}
       {#if bootError}<div class="error">⚠ {bootError}</div>{/if}
       {#if actionError}<button class="error" onclick={() => (actionError = null)}>⚠ {actionError}</button>{/if}
       {#if notice}<button class="notice" onclick={() => showNotice(null)}>{notice}</button>{/if}
@@ -782,4 +786,5 @@
   .error { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); background: color-mix(in oklab, var(--danger) 20%, var(--surface)); color: var(--danger); font-size: 14px; text-align: left; }
   button.error { cursor: pointer; }
   .notice { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); background: color-mix(in oklab, var(--accent) 18%, var(--surface)); color: var(--accent); font-size: 14px; text-align: left; cursor: pointer; }
+  .reauth { cursor: default; }
 </style>
