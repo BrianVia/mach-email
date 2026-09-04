@@ -8,7 +8,7 @@
 //! need optimistic-update semantics.
 
 use mach_core::ids::{AccountScope, LabelId, ThreadId};
-use mach_core::store::MailStore;
+use mach_core::store::{Label, MailStore};
 use mach_core::{Action, ActionOutcome};
 use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
@@ -211,6 +211,14 @@ pub async fn list_threads(
         .await
     {
         Ok(threads) => Ok(Out::ok(serde_json::to_value(threads).unwrap())),
+        Err(e) => Ok(Out::err(e)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_labels(state: State<'_, AppState>) -> Result<Out<Vec<Label>>, String> {
+    match state.store.list_labels(&state.scope).await {
+        Ok(labels) => Ok(Out::ok(labels)),
         Err(e) => Ok(Out::err(e)),
     }
 }

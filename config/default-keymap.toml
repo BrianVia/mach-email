@@ -56,6 +56,7 @@
 "g d"      = { kind = "open_label", label_id = "DRAFT"   }
 "g t"      = { kind = "open_label", label_id = "SENT"    }
 "g e"      = { kind = "open_label", label_id = "DONE"    }   # Superhuman "Done" = archived
+"g z"      = { kind = "open_label", label_id = "SNOOZED" }
 "g h"      = { kind = "open_label", label_id = "MUTED"   }
 "g j"      = { kind = "open_label", label_id = "SPAM"    }
 "g k"      = { kind = "open_label", label_id = "TRASH"   }
