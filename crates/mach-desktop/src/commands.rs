@@ -8,7 +8,7 @@
 //! need optimistic-update semantics.
 
 use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::store::{Draft, Label, MailStore};
+use mach_core::store::{Draft, DraftAttachment, Label, MailStore};
 use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
 use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
@@ -18,6 +18,52 @@ use tauri::{AppHandle, Emitter, State};
 use tracing::warn;
 
 use crate::AppState;
+
+#[tauri::command]
+pub async fn save_attachment(
+    state: State<'_, AppState>,
+    account: String,
+    message_id: String,
+    attachment_id: String,
+    filename: String,
+) -> Result<String, String> {
+    let account = AccountId::new(account);
+    let fetcher = state
+        .body_fetchers
+        .get(&account)
+        .ok_or_else(|| "account is offline".to_string())?;
+    mach_gmail::save_attachment_to_downloads(
+        fetcher.client(),
+        &account,
+        &message_id,
+        &attachment_id,
+        &filename,
+    )
+    .await
+    .map(|path| path.display().to_string())
+    .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+pub fn stage_attachment(name: String, bytes: Vec<u8>) -> Result<DraftAttachment, String> {
+    let filename = std::path::Path::new(&name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("attachment")
+        .to_string();
+    let cache = directories::ProjectDirs::from("com", "via", "mach")
+        .map(|dirs| dirs.cache_dir().join("staged"))
+        .unwrap_or_else(|| std::env::temp_dir().join("mach-staged"));
+    std::fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
+    let path = cache.join(format!("{}-{filename}", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    Ok(DraftAttachment {
+        mime_type: mach_gmail::guess_mime_type(&path).into(),
+        path: path.display().to_string(),
+        filename,
+    })
+}
 
 /// Pretty `Result` shape sent to JS: either `{ ok: ... }` or `{ err: "..." }`.
 #[derive(Serialize)]

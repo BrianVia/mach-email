@@ -442,6 +442,7 @@ mod tests {
             label_ids: vec![],
             fetched_full: true,
             inline_images: vec![],
+            attachments: vec![],
         }
     }
 

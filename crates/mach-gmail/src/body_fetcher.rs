@@ -6,6 +6,8 @@
 //! `fetched_full` flag. Idempotent: subsequent calls are no-ops.
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -19,6 +21,106 @@ use tracing::{debug, info, warn};
 
 use crate::body::{self, ParsedBody};
 use crate::client::{GmailClient, RemoteMessage};
+
+pub fn guess_mime_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _ => "application/octet-stream",
+    }
+}
+
+fn attachment_cache_dir() -> PathBuf {
+    directories::ProjectDirs::from("com", "via", "mach")
+        .map(|dirs| dirs.cache_dir().join("attachments"))
+        .unwrap_or_else(|| std::env::temp_dir().join("mach-attachments"))
+}
+
+pub async fn fetch_attachment_cached(
+    client: &GmailClient,
+    account: &AccountId,
+    message_id: &str,
+    attachment_id: &str,
+) -> Result<PathBuf> {
+    let cache_dir = attachment_cache_dir();
+    std::fs::create_dir_all(&cache_dir).context("creating attachment cache")?;
+    let safe_account = account.as_str().replace(['/', '\\'], "_");
+    let safe_attachment = attachment_id.replace(['/', '\\'], "_");
+    let path = cache_dir.join(format!("{safe_account}-{safe_attachment}"));
+    if path.is_file() {
+        return Ok(path);
+    }
+    let bytes = client
+        .get_attachment_bytes(message_id, attachment_id)
+        .await
+        .context("fetching attachment")?;
+    std::fs::write(&path, bytes).context("caching attachment")?;
+    Ok(path)
+}
+
+pub async fn save_attachment_to_downloads(
+    client: &GmailClient,
+    account: &AccountId,
+    message_id: &str,
+    attachment_id: &str,
+    filename: &str,
+) -> Result<PathBuf> {
+    let cached = fetch_attachment_cached(client, account, message_id, attachment_id).await?;
+    let user_dirs = directories::UserDirs::new().context("resolving home directory")?;
+    let downloads = user_dirs
+        .download_dir()
+        .unwrap_or_else(|| user_dirs.home_dir());
+    std::fs::create_dir_all(downloads).context("creating Downloads directory")?;
+    let filename = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment");
+    let source = std::fs::read(cached).context("reading cached attachment")?;
+    for number in 0.. {
+        let candidate = if number == 0 {
+            filename.to_string()
+        } else {
+            let path = Path::new(filename);
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or(filename);
+            let extension = path.extension().and_then(|value| value.to_str());
+            match extension {
+                Some(extension) => format!("{stem} ({number}).{extension}"),
+                None => format!("{stem} ({number})"),
+            }
+        };
+        let path = downloads.join(candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(&source).context("saving attachment")?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).context("creating attachment download"),
+        }
+    }
+    unreachable!()
+}
 
 pub struct BodyFetcher {
     account: AccountId,
@@ -101,10 +203,15 @@ impl BodyFetcher {
             .await
             .with_context(|| format!("get_thread_full({thread_id})"))?;
 
-        let updates: Vec<MessageBodyUpdate> = full
+        let parsed: Vec<_> = full
             .messages
             .iter()
-            .map(parse_message_into_update)
+            .map(|message| (message, parse_message(message)))
+            .collect();
+
+        let updates = parsed
+            .iter()
+            .map(|(message, body)| message_body_update(message, body))
             .collect();
 
         let touched = self
@@ -112,6 +219,12 @@ impl BodyFetcher {
             .update_message_bodies(&self.account, updates)
             .await
             .context("persisting full bodies")?;
+        for (message, body) in parsed {
+            self.store
+                .upsert_attachments(&self.account, &message.id, body.attachments)
+                .await
+                .context("persisting attachments")?;
+        }
         info!(touched, "body backfill complete");
         Ok(FetchOutcome::Fetched(touched))
     }
@@ -315,9 +428,11 @@ impl BodyFetcher {
     }
 }
 
-fn parse_message_into_update(m: &RemoteMessage) -> MessageBodyUpdate {
-    let parsed: ParsedBody = m.payload.as_ref().map(body::extract).unwrap_or_default();
+fn parse_message(m: &RemoteMessage) -> ParsedBody {
+    m.payload.as_ref().map(body::extract).unwrap_or_default()
+}
 
+fn message_body_update(m: &RemoteMessage, parsed: &ParsedBody) -> MessageBodyUpdate {
     // Prefer raw plain. Fall back to html→text via html2text inside
     // ParsedBody::effective_plain. We persist both: body_plain feeds the
     // FTS5 index + TUI; body_html sticks around for the desktop renderer.

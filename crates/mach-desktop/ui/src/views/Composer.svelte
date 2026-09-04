@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import Icon from "../lib/Icon.svelte";
-  import type { Draft } from "../lib/ipc";
+  import { stageAttachment, type Draft, type DraftAttachment } from "../lib/ipc";
 
-  export type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
+  export type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string; attachments: DraftAttachment[] };
 
   let {
     draft,
@@ -11,24 +11,46 @@
     onFieldsChange,
     onSend,
     onClose,
+    onError,
   }: {
     draft: Draft;
     title: string;
     onFieldsChange: (fields: ComposerFields) => void;
     onSend: () => void;
     onClose: () => void;
+    onError: (error: unknown) => void;
   } = $props();
   let to = $state(untrack(() => draft.to.join(", ")));
   let cc = $state(untrack(() => draft.cc.join(", ")));
   let bcc = $state(untrack(() => draft.bcc.join(", ")));
   let subject = $state(untrack(() => draft.subject));
   let body = $state(untrack(() => draft.body_md));
+  let attachments = $state<DraftAttachment[]>(untrack(() => draft.attachments ?? []));
   let firstInput: HTMLInputElement;
 
   onMount(() => firstInput?.focus());
 
   function fieldsChanged() {
-    onFieldsChange({ to, cc, bcc, subject, body_md: body });
+    onFieldsChange({ to, cc, bcc, subject, body_md: body, attachments });
+  }
+
+  async function attachFiles(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    try {
+      for (const file of Array.from(input.files ?? [])) {
+        attachments = [...attachments, await stageAttachment(file.name, Array.from(new Uint8Array(await file.arrayBuffer())))];
+      }
+      fieldsChanged();
+    } catch (error) {
+      onError(error);
+    } finally {
+      input.value = "";
+    }
+  }
+
+  function removeAttachment(path: string) {
+    attachments = attachments.filter((attachment) => attachment.path !== path);
+    fieldsChanged();
   }
 </script>
 
@@ -45,11 +67,19 @@
       <label><span>Subject</span><input bind:value={subject} oninput={fieldsChanged} /></label>
     </div>
     <textarea bind:value={body} oninput={fieldsChanged} placeholder="Write your message…"></textarea>
+    {#if attachments.length}
+      <div class="attachments">
+        {#each attachments as attachment (attachment.path)}
+          <span>📎 {attachment.filename}<button type="button" aria-label={`Remove ${attachment.filename}`} onclick={() => removeAttachment(attachment.path)}>×</button></span>
+        {/each}
+      </div>
+    {/if}
     <footer>
       <div><kbd>⌘↵</kbd> send · <kbd>⌘S</kbd> save · <kbd>esc</kbd> close</div>
-      <button class="send" onclick={onSend}>
-        <Icon name="send" size={13} /> Send
-      </button>
+      <div class="actions">
+        <label class="attach">Attach<input type="file" multiple onchange={attachFiles} /></label>
+        <button class="send" onclick={onSend}><Icon name="send" size={13} /> Send</button>
+      </div>
     </footer>
   </div>
 </div>
@@ -68,7 +98,13 @@
   input { min-width: 0; flex: 1; font-size: 14px; }
   textarea { width: 100%; height: 14rem; padding: 16px 24px; resize: none; font-size: 14px; line-height: 1.6; }
   textarea::placeholder { color: var(--muted); }
+  .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 24px 12px; }
+  .attachments span { padding: 5px 8px; border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: 12px; }
+  .attachments button { margin-left: 6px; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; }
   footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11.5px; }
+  .actions { display: flex; align-items: center; gap: 8px; }
+  .attach { width: auto; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); letter-spacing: 0; text-transform: none; cursor: pointer; }
+  .attach input { display: none; }
   kbd { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
   .send { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 0; border-radius: 999px; background: color-mix(in oklab, var(--accent) 15%, transparent); color: var(--accent); font-size: 12.5px; font-weight: 500; }
 </style>

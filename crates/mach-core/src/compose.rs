@@ -157,6 +157,7 @@ mod tests {
             label_ids: vec![LabelId::new("INBOX")],
             fetched_full: true,
             inline_images: vec![],
+            attachments: vec![],
         }
     }
 

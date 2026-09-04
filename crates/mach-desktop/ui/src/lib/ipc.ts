@@ -50,6 +50,13 @@ export type InlineImageRef = {
   size: number | null;
 };
 
+export type AttachmentRef = {
+  attachment_id: string;
+  filename: string;
+  mime_type: string;
+  size: number;
+};
+
 export type Message = {
   account_id: string;
   id: string;
@@ -73,6 +80,13 @@ export type Message = {
   label_ids: string[];
   fetched_full: boolean;
   inline_images: InlineImageRef[];
+  attachments: AttachmentRef[];
+};
+
+export type DraftAttachment = {
+  path: string;
+  filename: string;
+  mime_type: string;
 };
 
 export type UnsubscribeTarget =
@@ -89,6 +103,7 @@ export type Draft = {
   bcc: string[];
   subject: string;
   body_md: string;
+  attachments: DraftAttachment[];
   updated_at: string;
 };
 
@@ -155,6 +170,19 @@ export async function dispatchAction(actionJson: object): Promise<ActionOutcome>
   return invoke<ActionOutcome>("dispatch_action", {
     actionJson: JSON.stringify(actionJson),
   });
+}
+
+export function saveAttachment(
+  account: string,
+  messageId: string,
+  attachmentId: string,
+  filename: string,
+): Promise<string> {
+  return invoke("save_attachment", { account, messageId, attachmentId, filename });
+}
+
+export function stageAttachment(name: string, bytes: number[]): Promise<DraftAttachment> {
+  return invoke("stage_attachment", { name, bytes });
 }
 
 export async function listThreads(

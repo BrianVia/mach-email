@@ -15,7 +15,8 @@ pub mod sync;
 mod unsubscribe;
 
 pub use body_fetcher::{
-    BodyFetcher, FetchOutcome, GmailAccountPool, PullReport, RemoteSearchReport,
+    fetch_attachment_cached, guess_mime_type, save_attachment_to_downloads, BodyFetcher,
+    FetchOutcome, GmailAccountPool, PullReport, RemoteSearchReport,
 };
 pub use client::GmailClient;
 pub use config::OAuthConfig;

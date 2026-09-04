@@ -47,6 +47,8 @@ pub struct Message {
     /// rewrites `<img src="cid:...">` against this map.
     #[serde(default)]
     pub inline_images: Vec<InlineImageRow>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +78,21 @@ pub struct InlineImageRow {
     pub size: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentRef {
+    pub attachment_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct DraftAttachment {
+    pub path: String,
+    pub filename: String,
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Label {
     pub account_id: AccountId,
@@ -98,6 +115,8 @@ pub struct Draft {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_md: String,
+    #[serde(default)]
+    pub attachments: Vec<DraftAttachment>,
     pub updated_at: DateTime<Utc>,
 }
 

@@ -530,6 +530,7 @@ mod tests {
             label_ids: vec![LabelId::new("INBOX")],
             fetched_full: true,
             inline_images: vec![],
+            attachments: vec![],
         };
         store.insert_thread(
             ThreadSummary {
@@ -640,6 +641,7 @@ mod tests {
             bcc: vec![],
             subject: "Before save".into(),
             body_md: String::new(),
+            attachments: vec![],
             updated_at: Utc::now(),
         };
         store.save_draft_local(&draft).await.unwrap();

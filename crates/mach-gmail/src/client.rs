@@ -485,6 +485,8 @@ pub struct RemoteMessage {
 pub struct MessagePayload {
     #[serde(default)]
     pub headers: Vec<MessageHeader>,
+    #[serde(default)]
+    pub filename: Option<String>,
     #[serde(rename = "mimeType")]
     pub mime_type: Option<String>,
     pub body: Option<MessageBody>,

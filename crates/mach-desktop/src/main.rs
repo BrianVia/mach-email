@@ -125,11 +125,6 @@ async fn main() -> Result<()> {
         account_emails,
     };
 
-    let cache_dir = ProjectDirs::from("com", "via", "mach")
-        .map(|d| d.cache_dir().join("attachments"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/mach-attachments"));
-    std::fs::create_dir_all(&cache_dir).ok();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -149,16 +144,12 @@ async fn main() -> Result<()> {
             });
             Ok(())
         })
-        .register_asynchronous_uri_scheme_protocol("mach", {
-            let cache_dir = cache_dir.clone();
-            move |ctx, req, responder| {
-                let cache_dir = cache_dir.clone();
-                let app_handle = ctx.app_handle().clone();
-                tokio::spawn(async move {
-                    let resp = serve_mach_uri(req, app_handle, &cache_dir).await;
-                    responder.respond(resp);
-                });
-            }
+        .register_asynchronous_uri_scheme_protocol("mach", move |ctx, req, responder| {
+            let app_handle = ctx.app_handle().clone();
+            tokio::spawn(async move {
+                let resp = serve_mach_uri(req, app_handle).await;
+                responder.respond(resp);
+            });
         })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -178,6 +169,8 @@ async fn main() -> Result<()> {
             commands::outbox_summary,
             commands::retry_outbox,
             commands::sync_now,
+            commands::save_attachment,
+            commands::stage_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri app");
@@ -190,7 +183,6 @@ async fn main() -> Result<()> {
 async fn serve_mach_uri(
     req: tauri::http::Request<Vec<u8>>,
     app: tauri::AppHandle,
-    cache_dir: &std::path::Path,
 ) -> tauri::http::Response<Vec<u8>> {
     use tauri::http::Response;
     use tauri::Manager;
@@ -210,7 +202,6 @@ async fn serve_mach_uri(
             .unwrap();
     };
 
-    // Cache hit?
     let account_id = mach_core::ids::AccountId::new(account);
     let Some(fetcher) = app
         .state::<AppState>()
@@ -223,28 +214,21 @@ async fn serve_mach_uri(
             .body(b"offline - account unavailable".to_vec())
             .unwrap();
     };
-    let cache_path = cache_dir.join(format!("{account}-{att_id}"));
-    if let Ok(bytes) = std::fs::read(&cache_path) {
-        let mime = sniff_mime(&bytes);
-        return Response::builder()
-            .header("Content-Type", mime)
-            .header("Cache-Control", "max-age=86400, immutable")
-            .body(bytes)
-            .unwrap();
-    }
-
-    // Cache miss — fetch via Gmail.
-    let client = fetcher.client();
-    match client.get_attachment_bytes(msg_id, att_id).await {
-        Ok(bytes) => {
-            let _ = std::fs::write(&cache_path, &bytes);
-            let mime = sniff_mime(&bytes);
-            Response::builder()
-                .header("Content-Type", mime)
-                .header("Cache-Control", "max-age=86400, immutable")
-                .body(bytes)
-                .unwrap()
-        }
+    match mach_gmail::fetch_attachment_cached(fetcher.client(), &account_id, msg_id, att_id).await {
+        Ok(path) => match std::fs::read(path) {
+            Ok(bytes) => {
+                let mime = sniff_mime(&bytes);
+                Response::builder()
+                    .header("Content-Type", mime)
+                    .header("Cache-Control", "max-age=86400, immutable")
+                    .body(bytes)
+                    .unwrap()
+            }
+            Err(error) => Response::builder()
+                .status(500)
+                .body(error.to_string().into_bytes())
+                .unwrap(),
+        },
         Err(e) => {
             tracing::warn!(error = %e, "attachment fetch failed");
             Response::builder()

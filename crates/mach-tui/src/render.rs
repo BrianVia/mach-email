@@ -86,6 +86,13 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    if let Some(path) = &app.attachment_prompt {
+        f.render_widget(
+            Paragraph::new(format!(" Attach path: {path}▏")).style(Style::default().fg(ACCENT)),
+            area,
+        );
+        return;
+    }
     let sync = match app.status.sync {
         SyncState::Ok => Span::styled("✓ Live", Style::default().fg(Color::Green)),
         SyncState::Syncing => Span::styled("⟳ Sync", Style::default().fg(Color::Yellow)),
@@ -201,6 +208,13 @@ fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
                 .into_iter()
                 .take(if selected { usize::MAX } else { 5 }),
         );
+        for attachment in &m.attachments {
+            lines.push(Line::raw(format!(
+                "  📎 {} ({})",
+                attachment.filename,
+                human_size(attachment.size)
+            )));
+        }
         lines.push(Line::raw(""));
         lines.push(Line::styled("  ─────", Style::default().fg(DIM)));
         lines.push(Line::raw(""));
@@ -210,6 +224,16 @@ fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((v.scroll, 0));
     f.render_widget(par, inner);
+}
+
+fn human_size(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+    }
 }
 
 fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {

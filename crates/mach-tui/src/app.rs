@@ -17,7 +17,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
-use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
+use mach_core::store::{Draft, DraftAttachment, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
     Action, ActionOutcome, Dispatcher, DraftPatch, UnsubscribeTarget, UserConfig,
@@ -53,6 +53,7 @@ pub struct App {
     pub chord_buffer: String,
     pub last_chord_continuations: Vec<String>,
     pending_unsubscribe: Option<PendingUnsubscribe>,
+    pub attachment_prompt: Option<String>,
 
     pub running: bool,
 }
@@ -98,6 +99,7 @@ pub struct ComposerView {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    pub attachments: Vec<DraftAttachment>,
     pub field: ComposerField,
     previous_view: Box<View>,
 }
@@ -218,6 +220,7 @@ impl App {
             chord_buffer: String::new(),
             last_chord_continuations: Vec::new(),
             pending_unsubscribe: None,
+            attachment_prompt: None,
             running: true,
         })
     }
@@ -516,6 +519,9 @@ fn handle_search_event(app: &mut App, event: SearchEvent) {
 }
 
 async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    if attachment_key(app, &k).await {
+        return;
+    }
     if thread_scroll_key(app, &k) {
         return;
     }
@@ -583,6 +589,100 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
                 {
                     execute_action(app, action).await;
                 }
+            }
+        }
+    }
+}
+
+async fn attachment_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    if let Some(prompt) = &mut app.attachment_prompt {
+        match key.code {
+            KeyCode::Esc => app.attachment_prompt = None,
+            KeyCode::Backspace => {
+                prompt.pop();
+            }
+            KeyCode::Enter => {
+                let path = std::path::PathBuf::from(prompt.trim());
+                let Some(filename) = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string)
+                else {
+                    app.status.hint = "Attachment path needs a filename".into();
+                    app.attachment_prompt = None;
+                    return true;
+                };
+                if !path.is_file() {
+                    app.status.hint = format!("Attachment not found: {}", path.display());
+                    app.attachment_prompt = None;
+                    return true;
+                }
+                if let View::Composer(composer) = &mut app.view {
+                    composer.attachments.push(DraftAttachment {
+                        mime_type: mach_gmail::guess_mime_type(&path).into(),
+                        path: path.display().to_string(),
+                        filename,
+                    });
+                }
+                app.attachment_prompt = None;
+                if save_composer(app).await {
+                    app.status.hint = "Attachment added".into();
+                }
+            }
+            KeyCode::Char(character) => prompt.push(character),
+            _ => {}
+        }
+        return true;
+    }
+
+    if matches!(app.view, View::Composer(_))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('a'))
+    {
+        app.attachment_prompt = Some(String::new());
+        return true;
+    }
+    if matches!(app.view, View::Thread(_))
+        && key.modifiers.is_empty()
+        && matches!(key.code, KeyCode::Char('a'))
+    {
+        save_selected_attachments(app).await;
+        return true;
+    }
+    false
+}
+
+async fn save_selected_attachments(app: &mut App) {
+    let Some(message) = (match &app.view {
+        View::Thread(thread) => thread.current_message().cloned(),
+        _ => None,
+    }) else {
+        return;
+    };
+    let Some(fetcher) = app.body_fetchers.get(&message.account_id) else {
+        app.status.hint = "Account is offline".into();
+        return;
+    };
+    if message.attachments.is_empty() {
+        app.status.hint = "No attachments".into();
+        return;
+    }
+    for attachment in &message.attachments {
+        match mach_gmail::save_attachment_to_downloads(
+            fetcher.client(),
+            &message.account_id,
+            message.id.as_str(),
+            &attachment.attachment_id,
+            &attachment.filename,
+        )
+        .await
+        {
+            Ok(path) => app.status.hint = format!("Saved to {}", path.display()),
+            Err(error) => {
+                app.status.hint = format!("Attachment save failed: {error}");
+                break;
             }
         }
     }
@@ -1120,6 +1220,7 @@ fn composer_save_action(view: &View) -> Option<Action> {
             bcc: Some(split_recipients(&composer.bcc)),
             subject: Some(composer.subject.clone()),
             body_md: Some(composer.body.clone()),
+            attachments: Some(composer.attachments.clone()),
             ..DraftPatch::default()
         },
     })
@@ -1161,6 +1262,7 @@ impl ComposerView {
             bcc: draft.bcc.join(", "),
             subject: draft.subject,
             body: draft.body_md,
+            attachments: draft.attachments,
             field: ComposerField::To,
             previous_view: Box::new(previous_view),
         }
@@ -1241,6 +1343,7 @@ mod tests {
             bcc: vec!["blind@example.com".into()],
             subject: "Re: Plans".into(),
             body_md: "Sounds good".into(),
+            attachments: vec![],
             updated_at: Utc::now(),
         }
     }

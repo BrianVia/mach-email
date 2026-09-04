@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{DraftId, LabelId, MessageId, ThreadId};
+use crate::store::DraftAttachment;
 
 pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
     "select_next",
@@ -208,6 +209,7 @@ pub struct DraftPatch {
     pub bcc: Option<Vec<String>>,
     pub subject: Option<String>,
     pub body_md: Option<String>,
+    pub attachments: Option<Vec<DraftAttachment>>,
     pub in_reply_to_message_id: Option<MessageId>,
     pub thread_id: Option<ThreadId>,
 }

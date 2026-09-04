@@ -231,6 +231,11 @@ fn build_mime_raw(d: &mach_core::store::Draft, source: Option<&Message>) -> Resu
         );
     }
     b = b.subject(&d.subject).text_body(&d.body_md);
+    for attachment in &d.attachments {
+        let bytes = std::fs::read(&attachment.path)
+            .with_context(|| format!("reading attachment {}", attachment.path))?;
+        b = b.attachment(&attachment.mime_type, &attachment.filename, bytes);
+    }
     if let Some(headers) = source.and_then(|message| message.headers.as_ref()) {
         if let Some(message_id) = headers.message_id.as_deref() {
             let references = format!(
@@ -283,6 +288,7 @@ mod tests {
             bcc: vec![],
             subject: "Reply".into(),
             body_md: "Hello".into(),
+            attachments: vec![],
             updated_at: Utc::now(),
         }
     }
@@ -304,6 +310,7 @@ mod tests {
             label_ids: vec![LabelId::new("INBOX")],
             fetched_full: true,
             inline_images: vec![],
+            attachments: vec![],
         }
     }
 
@@ -366,6 +373,24 @@ mod tests {
             "unexpected To header: {mime}"
         );
         assert_eq!(mime.matches("<jane@x.com>").count(), 1);
+    }
+
+    #[test]
+    fn mime_contains_file_attachment() {
+        let path = std::env::temp_dir().join(format!("mach-{}.pdf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"fake pdf").unwrap();
+        let mut draft = draft();
+        draft.attachments.push(mach_core::store::DraftAttachment {
+            path: path.display().to_string(),
+            filename: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+        });
+
+        let mime = decoded_mime(&draft, None);
+        std::fs::remove_file(path).unwrap();
+
+        assert!(mime.contains("multipart/mixed"));
+        assert!(mime.contains("report.pdf"));
     }
 
     #[test]

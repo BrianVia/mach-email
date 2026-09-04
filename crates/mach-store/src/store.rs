@@ -6,8 +6,8 @@ use mach_core::{
     ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId},
     search_query::SearchQuery,
     store::{
-        Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
-        ThreadSummary,
+        AttachmentRef, Draft, DraftAttachment, Label, MailStore, Message, MessageHeaders, OutboxOp,
+        OutboxOpKind, OutboxSummary, ThreadSummary,
     },
 };
 use rusqlite::{params, params_from_iter, types::Value, OptionalExtension, Row};
@@ -26,6 +26,45 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    pub async fn upsert_attachments(
+        &self,
+        account: &AccountId,
+        message_id: &str,
+        attachments: Vec<AttachmentRef>,
+    ) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        let message_id = message_id.to_string();
+        spawn_blocking(move || -> CoreResult<()> {
+            let mut conn = pool.get().map_err(map_err)?;
+            let tx = conn.transaction().map_err(map_err)?;
+            tx.execute(
+                "DELETE FROM attachments WHERE account_id = ?1 AND message_id = ?2",
+                params![account.as_str(), message_id],
+            )
+            .map_err(map_err)?;
+            for attachment in attachments {
+                tx.execute(
+                    "INSERT INTO attachments (account_id, id, message_id, filename, mime_type, size)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        account.as_str(),
+                        attachment.attachment_id,
+                        message_id,
+                        attachment.filename,
+                        attachment.mime_type,
+                        attachment.size,
+                    ],
+                )
+                .map_err(map_err)?;
+            }
+            tx.commit().map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
@@ -735,6 +774,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
     let headers_json: Option<String> = row.get("headers_json")?;
+    let attachments_json: String = row.get("attachments_json")?;
     Ok(Message {
         account_id: AccountId::new(row.get::<_, String>("account_id")?),
         id: MessageId::new(row.get::<_, String>("id")?),
@@ -756,6 +796,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         label_ids: serde_json::from_str(&label_ids_json).unwrap_or_default(),
         fetched_full: row.get::<_, i64>("fetched_full").unwrap_or(0) != 0,
         inline_images,
+        attachments: serde_json::from_str(&attachments_json).unwrap_or_default(),
     })
 }
 
@@ -775,6 +816,7 @@ fn row_to_draft(row: &Row) -> rusqlite::Result<Draft> {
     let to_addrs: String = row.get("to_addrs")?;
     let cc_addrs: String = row.get("cc_addrs")?;
     let bcc_addrs: String = row.get("bcc_addrs")?;
+    let attachments_json: String = row.get("attachments_json")?;
     Ok(Draft {
         account_id: AccountId::new(row.get::<_, String>("account_id")?),
         id: DraftId::new(row.get::<_, String>("id")?),
@@ -790,6 +832,8 @@ fn row_to_draft(row: &Row) -> rusqlite::Result<Draft> {
         bcc: serde_json::from_str(&bcc_addrs).unwrap_or_default(),
         subject: row.get("subject")?,
         body_md: row.get("body_md")?,
+        attachments: serde_json::from_str::<Vec<DraftAttachment>>(&attachments_json)
+            .unwrap_or_default(),
         updated_at: ms_to_dt(row.get("updated_at")?),
     })
 }
@@ -945,7 +989,14 @@ impl MailStore for SqliteStore {
                 .prepare_cached(
                     "SELECT account_id, id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
                             subject, snippet, body_plain, body_html, headers_json, label_ids_json,
-                            fetched_full, inline_images_json
+                            fetched_full, inline_images_json,
+                            (SELECT json_group_array(json_object(
+                                'attachment_id', a.id, 'filename', COALESCE(a.filename, ''),
+                                'mime_type', COALESCE(a.mime_type, 'application/octet-stream'),
+                                'size', COALESCE(a.size, 0)))
+                             FROM attachments a
+                             WHERE a.account_id = messages.account_id AND a.message_id = messages.id)
+                            AS attachments_json
                      FROM messages
                      WHERE account_id = ?1 AND thread_id = ?2
                      ORDER BY internal_date",
@@ -976,7 +1027,14 @@ impl MailStore for SqliteStore {
                 .prepare_cached(
                     "SELECT account_id, id, thread_id, internal_date, from_addr, to_addrs, cc_addrs,
                             subject, snippet, body_plain, body_html, headers_json, label_ids_json,
-                            fetched_full, inline_images_json
+                            fetched_full, inline_images_json,
+                            (SELECT json_group_array(json_object(
+                                'attachment_id', a.id, 'filename', COALESCE(a.filename, ''),
+                                'mime_type', COALESCE(a.mime_type, 'application/octet-stream'),
+                                'size', COALESCE(a.size, 0)))
+                             FROM attachments a
+                             WHERE a.account_id = messages.account_id AND a.message_id = messages.id)
+                            AS attachments_json
                      FROM messages
                      WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
                      LIMIT 2",
@@ -1246,7 +1304,8 @@ impl MailStore for SqliteStore {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
-                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at
+                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, attachments_json,
+                            updated_at
                      FROM drafts WHERE account_id = ?1 AND id = ?2",
                 )
                 .map_err(map_err)?;
@@ -1267,7 +1326,8 @@ impl MailStore for SqliteStore {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
-                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, updated_at
+                            to_addrs, cc_addrs, bcc_addrs, subject, body_md, attachments_json,
+                            updated_at
                      FROM drafts
                      WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
                      LIMIT 2",
@@ -1296,8 +1356,8 @@ impl MailStore for SqliteStore {
             conn.execute(
                 "INSERT INTO drafts (account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
                                      to_addrs, cc_addrs, bcc_addrs, subject, body_md,
-                                     updated_at, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'draft')
+                                     attachments_json, updated_at, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'draft')
                  ON CONFLICT(account_id, id) DO UPDATE SET
                    gmail_draft_id         = excluded.gmail_draft_id,
                    thread_id              = excluded.thread_id,
@@ -1307,6 +1367,7 @@ impl MailStore for SqliteStore {
                    bcc_addrs              = excluded.bcc_addrs,
                    subject                = excluded.subject,
                    body_md                = excluded.body_md,
+                   attachments_json       = excluded.attachments_json,
                    updated_at             = excluded.updated_at",
                 params![
                     draft.account_id.as_str(),
@@ -1322,6 +1383,7 @@ impl MailStore for SqliteStore {
                     serde_json::to_string(&draft.bcc)?,
                     draft.subject,
                     draft.body_md,
+                    serde_json::to_string(&draft.attachments)?,
                     dt_to_ms(&draft.updated_at),
                 ],
             )
@@ -1722,6 +1784,7 @@ mod tests {
             bcc: vec![],
             subject: "Subject".into(),
             body_md: "Body".into(),
+            attachments: vec![],
             updated_at: Utc::now(),
         }
     }
@@ -2509,6 +2572,46 @@ mod tests {
         store.set_history_cursor(&second, 20).await.unwrap();
         assert_eq!(store.get_history_cursor(&first).await.unwrap(), Some(10));
         assert_eq!(store.get_history_cursor(&second).await.unwrap(), Some(20));
+    }
+
+    #[tokio::test]
+    async fn attachments_round_trip_with_messages_and_drafts() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "attached", "Files", "See files", &["INBOX"]);
+        let store = SqliteStore::new(pool);
+        let attachment = AttachmentRef {
+            attachment_id: "attachment-1".into(),
+            filename: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 42,
+        };
+        store
+            .upsert_attachments(&account(), "attached-m", vec![attachment.clone()])
+            .await
+            .unwrap();
+        let message = store
+            .get_message(&scope(), &MessageId::new("attached-m"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.attachments, [attachment]);
+
+        let mut draft = draft("draft-with-files");
+        draft.attachments.push(DraftAttachment {
+            path: "/tmp/report.pdf".into(),
+            filename: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+        });
+        store.save_draft_local(&draft).await.unwrap();
+        assert_eq!(
+            store
+                .get_draft(&account(), &draft.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .attachments,
+            draft.attachments
+        );
     }
 
     #[tokio::test]

@@ -260,6 +260,7 @@ impl Dispatcher {
             cc: Vec::new(),
             bcc: Vec::new(),
             subject: String::new(),
+            attachments: Vec::new(),
             updated_at: chrono::Utc::now(),
         };
         self.store.save_draft_local(&draft).await?;
@@ -327,6 +328,7 @@ impl Dispatcher {
             bcc: Vec::new(),
             subject: prefill.subject,
             body_md,
+            attachments: Vec::new(),
             updated_at: chrono::Utc::now(),
         };
         self.store.save_draft_local(&draft).await?;
@@ -364,6 +366,9 @@ impl Dispatcher {
         }
         if let Some(body_md) = patch.body_md {
             draft.body_md = body_md;
+        }
+        if let Some(attachments) = patch.attachments {
+            draft.attachments = attachments;
         }
         if let Some(message_id) = patch.in_reply_to_message_id {
             draft.in_reply_to_message_id = Some(message_id);

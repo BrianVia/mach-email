@@ -10,6 +10,7 @@ use base64::{
     engine::{general_purpose::GeneralPurpose, DecodePaddingMode, GeneralPurposeConfig},
     Engine as _,
 };
+use mach_core::store::AttachmentRef;
 use tracing::trace;
 
 /// URL-safe base64 that accepts EITHER padded or unpadded input. Gmail
@@ -32,6 +33,13 @@ pub struct ParsedBody {
     /// Populated only when at least one `image/*` part with a `Content-ID`
     /// header is seen during the MIME walk.
     pub inline_images: Vec<InlineImageRef>,
+    pub attachments: Vec<AttachmentRef>,
+}
+
+struct AttachmentCandidate {
+    attachment: AttachmentRef,
+    content_id: Option<String>,
+    disposition_attachment: bool,
 }
 
 /// Reference to one inline image. We don't fetch bytes here — that's
@@ -223,12 +231,61 @@ fn lookup_entity(name: &str) -> Option<String> {
 /// (`attachment_id` present) and parts without `body.data`.
 pub fn extract(payload: &MessagePayload) -> ParsedBody {
     let mut out = ParsedBody::default();
-    walk(payload, &mut out);
+    let mut candidates = Vec::new();
+    walk(payload, &mut out, &mut candidates);
+    let html = out.html.as_deref().unwrap_or_default().to_ascii_lowercase();
+    out.attachments = candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.disposition_attachment
+                || candidate.content_id.as_ref().map_or(true, |cid| {
+                    !html.contains(&format!("cid:{}", cid.to_ascii_lowercase()))
+                })
+        })
+        .map(|candidate| candidate.attachment)
+        .collect();
     out
 }
 
-fn walk(p: &MessagePayload, out: &mut ParsedBody) {
+fn walk(p: &MessagePayload, out: &mut ParsedBody, attachments: &mut Vec<AttachmentCandidate>) {
     let mime = p.mime_type.as_deref().unwrap_or("");
+    let disposition = header_value(&p.headers, "Content-Disposition");
+    let filename = p
+        .filename
+        .clone()
+        .filter(|filename| !filename.is_empty())
+        .or_else(|| {
+            disposition
+                .clone()
+                .and_then(extract_filename)
+                .or_else(|| header_value(&p.headers, "Content-Type").and_then(extract_filename))
+        });
+
+    if let (Some(body), Some(filename)) = (&p.body, filename.clone()) {
+        if let Some(attachment_id) = body.attachment_id.clone() {
+            attachments.push(AttachmentCandidate {
+                attachment: AttachmentRef {
+                    attachment_id,
+                    filename,
+                    mime_type: if mime.is_empty() {
+                        "application/octet-stream".into()
+                    } else {
+                        mime.into()
+                    },
+                    size: body.size.unwrap_or_default(),
+                },
+                content_id: header_value(&p.headers, "Content-ID").map(|cid| {
+                    cid.trim()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .to_string()
+                }),
+                disposition_attachment: disposition.as_deref().is_some_and(|value| {
+                    value.trim().to_ascii_lowercase().starts_with("attachment")
+                }),
+            });
+        }
+    }
 
     // Inline image: attachment_id present + Content-ID header points back
     // from the message body. We harvest the reference so the desktop can
@@ -242,7 +299,7 @@ fn walk(p: &MessagePayload, out: &mut ParsedBody) {
                         .trim_start_matches('<')
                         .trim_end_matches('>')
                         .to_string();
-                    let filename = header_value(&p.headers, "Content-Disposition")
+                    let inline_filename = header_value(&p.headers, "Content-Disposition")
                         .and_then(extract_filename)
                         .or_else(|| {
                             header_value(&p.headers, "Content-Type").and_then(extract_filename)
@@ -251,7 +308,7 @@ fn walk(p: &MessagePayload, out: &mut ParsedBody) {
                         content_id: cid,
                         attachment_id: att_id,
                         mime_type: mime.to_string(),
-                        filename,
+                        filename: inline_filename,
                         size: body.size,
                     });
                 }
@@ -284,7 +341,7 @@ fn walk(p: &MessagePayload, out: &mut ParsedBody) {
 
     if let Some(parts) = &p.parts {
         for child in parts {
-            walk(child, out);
+            walk(child, out, attachments);
             // No early break: we want to keep walking to collect inline
             // images even after plain+html are both set.
         }
@@ -303,10 +360,9 @@ fn header_value(headers: &[crate::client::MessageHeader], name: &str) -> Option<
 fn extract_filename(header_value: String) -> Option<String> {
     for part in header_value.split(';') {
         let p = part.trim();
-        if let Some(rest) = p
-            .strip_prefix("filename=")
-            .or_else(|| p.strip_prefix("name="))
-        {
+        let lower = p.to_ascii_lowercase();
+        if lower.starts_with("filename=") || lower.starts_with("name=") {
+            let rest = p.split_once('=')?.1;
             let rest = rest.trim().trim_matches('"');
             if !rest.is_empty() {
                 return Some(rest.to_string());
@@ -330,11 +386,12 @@ fn decode_b64url(data: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{MessageBody, MessagePayload};
+    use crate::client::{MessageBody, MessageHeader, MessagePayload};
 
     fn leaf(mime: &str, raw: &str) -> MessagePayload {
         MessagePayload {
             headers: vec![],
+            filename: None,
             mime_type: Some(mime.into()),
             body: Some(MessageBody {
                 data: Some(B64URL.encode(raw.as_bytes())),
@@ -356,6 +413,7 @@ mod tests {
     fn picks_first_plain_in_multipart_alternative() {
         let p = MessagePayload {
             headers: vec![],
+            filename: None,
             mime_type: Some("multipart/alternative".into()),
             body: None,
             parts: Some(vec![
@@ -379,17 +437,49 @@ mod tests {
     }
 
     #[test]
-    fn ignores_attachment_parts() {
-        let mut att = leaf("application/pdf", "fakepdf");
-        att.body.as_mut().unwrap().attachment_id = Some("att1".into());
+    fn separates_inline_images_from_attachments() {
+        let mut inline = leaf("image/png", "fakepng");
+        inline.body.as_mut().unwrap().attachment_id = Some("inline1".into());
+        inline.headers = vec![
+            MessageHeader {
+                name: "Content-ID".into(),
+                value: "<logo>".into(),
+            },
+            MessageHeader {
+                name: "Content-Disposition".into(),
+                value: "inline; filename=\"logo.png\"".into(),
+            },
+        ];
+        let mut attachment = leaf("application/pdf", "fakepdf");
+        attachment.body.as_mut().unwrap().attachment_id = Some("pdf1".into());
+        attachment.filename = Some("report.pdf".into());
+        attachment.headers = vec![MessageHeader {
+            name: "Content-Disposition".into(),
+            value: "attachment; filename=\"report.pdf\"".into(),
+        }];
         let p = MessagePayload {
             headers: vec![],
+            filename: None,
             mime_type: Some("multipart/mixed".into()),
             body: None,
-            parts: Some(vec![leaf("text/plain", "real body"), att]),
+            parts: Some(vec![
+                leaf("text/html", "<p>Body <img src=\"cid:logo\"></p>"),
+                inline,
+                attachment,
+            ]),
         };
         let body = extract(&p);
-        assert_eq!(body.plain.as_deref(), Some("real body"));
+        assert_eq!(body.inline_images.len(), 1);
+        assert_eq!(body.attachments.len(), 1);
+        assert_eq!(
+            body.attachments[0],
+            AttachmentRef {
+                attachment_id: "pdf1".into(),
+                filename: "report.pdf".into(),
+                mime_type: "application/pdf".into(),
+                size: 7,
+            }
+        );
     }
 
     #[test]
@@ -460,6 +550,7 @@ mod tests {
         // and no text/plain alternative.
         let p = MessagePayload {
             headers: vec![],
+            filename: None,
             mime_type: Some("text/html".into()),
             body: Some(MessageBody {
                 data: Some(B64URL.encode(

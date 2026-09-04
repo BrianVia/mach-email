@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keymap";
   import { threadToMarkdown } from "./lib/markdown";
   import {
@@ -24,6 +24,7 @@
     type AccountStatus,
     type ActionOutcome,
     type Draft,
+    type DraftAttachment,
     type Label,
     type Message,
     type MailSyncedPayload,
@@ -46,7 +47,7 @@
   type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
   type ThreadOrigin = { threads: ThreadSummary[]; index: number };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
-  type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
+  type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string; attachments: DraftAttachment[] };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
   type PaletteView = { kind: "palette"; query: string; selected: number; background: AppView };
@@ -59,6 +60,7 @@
   let bootError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  let noticePath = $state<string | null>(null);
   let unsubscribeConfirm = $state<{ sender: string; accountId: string; target: UnsubscribeTarget } | null>(null);
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
@@ -67,7 +69,7 @@
   let settings = $state<Settings>({});
   let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
-  let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "" };
+  let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "", attachments: [] };
 
   function composerTitle(draft: Draft) {
     if (draft.in_reply_to_message_id) return "Reply";
@@ -109,8 +111,14 @@
 
   function showNotice(message: string | null) {
     notice = message;
+    noticePath = null;
     if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
     if (message) noticeTimer = window.setTimeout(() => (notice = null), 4_000);
+  }
+
+  function showSavedAttachment(path: string) {
+    showNotice(`Saved to ${path}`);
+    noticePath = path;
   }
 
   function copyThreadAsMarkdown(threadView: ThreadView) {
@@ -650,6 +658,7 @@
       bcc: draft.bcc.join(", "),
       subject: draft.subject,
       body_md: draft.body_md,
+      attachments: draft.attachments ?? [],
     };
   }
 
@@ -660,6 +669,7 @@
       bcc: parseRecipients(composerFields.bcc),
       subject: composerFields.subject,
       body_md: composerFields.body_md,
+      attachments: composerFields.attachments,
     };
   }
 
@@ -838,7 +848,12 @@
       onLoadOlder={loadOlderMail}
     />
   {:else if view.kind === "thread"}
-    <ThreadReader v={view} onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)} />
+    <ThreadReader
+      v={view}
+      onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)}
+      onAttachmentSaved={showSavedAttachment}
+      onError={showActionError}
+    />
   {:else if view.kind === "composer"}
     <Composer
       draft={view.draft}
@@ -846,6 +861,7 @@
       onFieldsChange={(fields) => (composerFields = fields)}
       onSend={() => void runAction({ kind: "send_draft", draft_id: view.kind === "composer" ? view.draft.id : "" })}
       onClose={closeComposer}
+      onError={showActionError}
     />
   {:else if view.kind === "search"}
     <SearchOverlay
@@ -881,7 +897,7 @@
       {/each}
       {#if bootError}<div class="error">⚠ {bootError}</div>{/if}
       {#if actionError}<button class="error" onclick={() => (actionError = null)}>⚠ {actionError}</button>{/if}
-      {#if notice}<button class="notice" onclick={() => showNotice(null)}>{notice}</button>{/if}
+      {#if notice}<button class="notice" onclick={() => noticePath ? void openPath(noticePath).catch(showActionError) : showNotice(null)}>{notice}</button>{/if}
       {#if unsubscribeConfirm}
         <div class="notice confirm">
           <span>Unsubscribe from {unsubscribeConfirm.sender}?</span>

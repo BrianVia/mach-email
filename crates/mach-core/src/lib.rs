@@ -27,7 +27,8 @@ pub use keymap::{Chord, KeyContext, Keymap, KeymapError, Mode};
 pub use search_query::SearchQuery;
 pub use state::AppState;
 pub use store::{
-    InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
+    AttachmentRef, DraftAttachment, InlineImageRow, MailRemote, MailStore, MessageHeaders,
+    OutboxOp, OutboxOpKind, OutboxSummary,
 };
 pub use unsubscribe::{unsubscribe_targets, UnsubscribeTarget};
 pub use user_config::UserConfig;
