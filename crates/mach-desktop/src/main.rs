@@ -32,6 +32,7 @@ pub struct AppState {
     pub user_keymap_toml: Option<String>,
     pub account_emails: Vec<String>,
     pub synced_accounts: Arc<Mutex<HashSet<AccountId>>>,
+    pub user_config: UserConfig,
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -103,7 +104,7 @@ async fn main() -> Result<()> {
         .context("loading user config")?
         .unwrap_or_default();
     let dispatcher =
-        Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
+        Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config.clone());
 
     let body_fetchers = match GmailAccountPool::from_stored_credentials(store.clone()) {
         Ok(pool) => {
@@ -126,6 +127,7 @@ async fn main() -> Result<()> {
         user_keymap_toml: load_user_keymap_toml(),
         account_emails,
         synced_accounts: Arc::new(Mutex::new(HashSet::new())),
+        user_config,
     };
 
     let cache_dir = ProjectDirs::from("com", "via", "mach")
@@ -141,18 +143,39 @@ async fn main() -> Result<()> {
 
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>();
-            let store = state.store.clone();
             let body_fetchers = state.body_fetchers.clone();
-            let synced_accounts = state.synced_accounts.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    commands::sync_accounts(&app_handle, &store, &body_fetchers, &synced_accounts)
-                        .await;
+                    commands::sync_accounts(&app_handle, &body_fetchers).await;
                 }
             });
+            if let (Some(subscription), Some(client)) = (
+                mach_gmail::config::pubsub_subscription(),
+                state.body_fetchers.pubsub_client(),
+            ) {
+                let app_handle = app.handle().clone();
+                let body_fetchers = state.body_fetchers.clone();
+                tokio::spawn(async move {
+                    let sync_app = app_handle.clone();
+                    let sync_accounts = body_fetchers.clone();
+                    if let Err(error) =
+                        mach_gmail::pubsub_pull_loop(client, &subscription, move |email| {
+                            let app = sync_app.clone();
+                            let accounts = sync_accounts.clone();
+                            async move {
+                                let account = mach_core::ids::AccountId::new(email);
+                                let _ = commands::sync_account(&app, &accounts, &account).await;
+                            }
+                        })
+                        .await
+                    {
+                        warn!(%error, "Pub/Sub pull loop stopped; polling remains active");
+                    }
+                });
+            }
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol("mach", {
@@ -171,17 +194,22 @@ async fn main() -> Result<()> {
             commands::dispatch_action,
             commands::list_threads,
             commands::list_labels,
+            commands::list_scheduled,
+            commands::open_draft,
+            commands::send_later_presets,
             commands::load_older,
             commands::open_thread,
             commands::refetch_thread,
             commands::search,
             commands::keymap_sources,
             commands::settings,
+            commands::snippets,
             commands::account_status,
             commands::flush_outbox,
             commands::unsubscribe_post,
             commands::unsubscribe_mailto,
             commands::outbox_summary,
+            commands::list_activity,
             commands::retry_outbox,
             commands::sync_now,
         ])

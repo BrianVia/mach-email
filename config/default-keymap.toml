@@ -28,6 +28,11 @@
 "up"       = "select_prev"
 "shift+l"  = "load_older"
 
+# Inbox categories (adapter-resolved; no dispatcher action)
+"1"        = "inbox_split_important"
+"2"        = "inbox_split_other"
+"3"        = "inbox_split_newsletters"
+
 # Open thread
 "enter"    = { kind = "open_thread", id = "$current_thread" }
 "l"        = { kind = "open_thread", id = "$current_thread" }
@@ -56,6 +61,7 @@
 "g i"      = { kind = "open_label", label_id = "INBOX"   }
 "g s"      = { kind = "open_label", label_id = "STARRED" }
 "g d"      = { kind = "open_label", label_id = "DRAFT"   }
+"g l"      = { kind = "open_label", label_id = "SCHEDULED" }
 "g t"      = { kind = "open_label", label_id = "SENT"    }
 "g e"      = { kind = "open_label", label_id = "DONE"    }   # Superhuman "Done" = archived
 "g z"      = { kind = "open_label", label_id = "SNOOZED" }
@@ -63,6 +69,7 @@
 "g j"      = { kind = "open_label", label_id = "SPAM"    }
 "g k"      = { kind = "open_label", label_id = "TRASH"   }
 "g a"      = { kind = "open_label", label_id = "ALL"     }
+"g v"      = "show_activity"
 
 # Meta
 "z"        = "undo"
@@ -86,6 +93,9 @@
 "shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
 "shift+m"  = { kind = "mute",      thread_ids = "$selection" }
 "ctrl+u"   = { kind = "unsubscribe", message_id = "$current_message" }
+"shift+a"  = { kind = "respond_to_invite", message_id = "$current_message", response = "accepted" }
+"shift+t"  = { kind = "respond_to_invite", message_id = "$current_message", response = "tentative" }
+"shift+d"  = { kind = "respond_to_invite", message_id = "$current_message", response = "declined" }
 
 "r"        = { kind = "reply",   message_id = "$current_message", all = false }
 "shift+r"  = { kind = "reply",   message_id = "$current_message", all = true  }

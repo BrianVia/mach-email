@@ -92,7 +92,7 @@ fn reply_all_recipients(source: &Message, self_email: &str) -> (Vec<String>, Vec
     (to, cc)
 }
 
-fn normalized_addr_spec(address: &str) -> String {
+pub(crate) fn normalized_addr_spec(address: &str) -> String {
     addr_spec(address).to_ascii_lowercase()
 }
 
@@ -150,6 +150,7 @@ mod tests {
             internal_date: Utc.with_ymd_and_hms(2026, 8, 11, 14, 0, 0).unwrap(),
             body_plain: Some("first\n\nthird".into()),
             body_html: None,
+            calendar: None,
             headers: Some(MessageHeaders {
                 reply_to: Some("Team Replies <reply@example.com>".into()),
                 ..MessageHeaders::default()

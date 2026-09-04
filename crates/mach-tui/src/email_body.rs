@@ -438,6 +438,7 @@ mod tests {
             internal_date: Utc::now(),
             body_plain: plain.map(str::to_owned),
             body_html: html.map(str::to_owned),
+            calendar: None,
             headers: None,
             label_ids: vec![],
             fetched_full: true,

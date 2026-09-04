@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{DraftId, LabelId, MessageId, ThreadId};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteResponse {
+    Accepted,
+    Declined,
+    Tentative,
+}
+
 pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
     "select_next",
     "select_prev",
@@ -18,10 +26,13 @@ pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
     "remove_label",
     "snooze",
     "unsubscribe",
+    "respond_to_invite",
     "search",
     "undo",
+    "undo_activity",
     "redo",
     "refresh",
+    "cancel_send_later",
 ];
 
 /// Deterministic identifier for a single mutation. Stamped on every outbox op
@@ -102,6 +113,10 @@ pub enum Action {
     Unsubscribe {
         message_id: MessageId,
     },
+    RespondToInvite {
+        message_id: MessageId,
+        response: InviteResponse,
+    },
 
     // --- Compose ---
     ComposeNew,
@@ -123,6 +138,9 @@ pub enum Action {
         draft_id: DraftId,
         at: DateTime<Utc>,
     },
+    CancelSendLater {
+        send_later_id: String,
+    },
 
     // --- Discovery ---
     Search {
@@ -132,9 +150,13 @@ pub enum Action {
     OpenLabel {
         label_id: LabelId,
     },
+    ShowActivity,
 
     // --- Meta ---
     Undo,
+    UndoActivity {
+        outbox_id: i64,
+    },
     Redo,
     Refresh,
     Quit,
@@ -158,15 +180,19 @@ impl Action {
             Action::RemoveLabel { .. } => "remove_label",
             Action::Snooze { .. } => "snooze",
             Action::Unsubscribe { .. } => "unsubscribe",
+            Action::RespondToInvite { .. } => "respond_to_invite",
             Action::ComposeNew => "compose_new",
             Action::Reply { .. } => "reply",
             Action::Forward { .. } => "forward",
             Action::SaveDraft { .. } => "save_draft",
             Action::SendDraft { .. } => "send_draft",
             Action::SendLater { .. } => "send_later",
+            Action::CancelSendLater { .. } => "cancel_send_later",
             Action::Search { .. } => "search",
             Action::OpenLabel { .. } => "open_label",
+            Action::ShowActivity => "show_activity",
             Action::Undo => "undo",
+            Action::UndoActivity { .. } => "undo_activity",
             Action::Redo => "redo",
             Action::Refresh => "refresh",
             Action::Quit => "quit",
@@ -185,9 +211,12 @@ impl Action {
                 | Action::AddLabel { .. }
                 | Action::RemoveLabel { .. }
                 | Action::Snooze { .. }
+                | Action::RespondToInvite { .. }
                 | Action::SaveDraft { .. }
                 | Action::SendDraft { .. }
                 | Action::SendLater { .. }
+                | Action::UndoActivity { .. }
+                | Action::CancelSendLater { .. }
         )
     }
 

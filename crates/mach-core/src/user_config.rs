@@ -8,6 +8,28 @@ use thiserror::Error;
 pub struct UserConfig {
     #[serde(default)]
     pub signatures: BTreeMap<String, String>,
+    #[serde(default)]
+    pub snippets: BTreeMap<String, String>,
+}
+
+pub fn expand_snippet(
+    text: &str,
+    cursor: usize,
+    snippets: &BTreeMap<String, String>,
+) -> Option<(String, usize)> {
+    let before = text.get(..cursor)?;
+    let start = before
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let name = before.get(start..)?.strip_prefix(';')?;
+    let replacement = snippets.get(name)?;
+    let mut expanded = String::with_capacity(text.len() - (cursor - start) + replacement.len());
+    expanded.push_str(&text[..start]);
+    expanded.push_str(replacement);
+    expanded.push_str(&text[cursor..]);
+    Some((expanded, start + replacement.len()))
 }
 
 #[derive(Debug, Error)]
@@ -61,7 +83,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mach-config-{}.toml", uuid::Uuid::new_v4()));
         std::fs::write(
             &path,
-            "[signatures]\ndefault = \"—\\nBrian\"\n\"me@work.com\" = \"Brian Via\\nWork\"\n",
+            "[signatures]\ndefault = \"—\\nBrian\"\n\"me@work.com\" = \"Brian Via\\nWork\"\n\n[snippets]\nthanks = \"Thanks so much,\\nBrian\"\n",
         )
         .unwrap();
 
@@ -70,6 +92,7 @@ mod tests {
 
         assert_eq!(config.signature_for("me@work.com"), Some("Brian Via\nWork"));
         assert_eq!(config.signature_for("x@example.com"), Some("—\nBrian"));
+        assert_eq!(config.snippets["thanks"], "Thanks so much,\nBrian");
     }
 
     #[test]
@@ -77,5 +100,22 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mach-missing-{}.toml", uuid::Uuid::new_v4()));
         let config = UserConfig::load(&path).unwrap();
         assert!(config.signatures.is_empty());
+        assert!(config.snippets.is_empty());
+    }
+
+    #[test]
+    fn expands_only_the_matching_token_at_cursor() {
+        let snippets = [("thanks".into(), "Thanks so much,\nBrian".into())].into();
+        let text = ";thanks earlier\nReply: ;thanks later";
+        let cursor = text.find(" later").unwrap();
+
+        assert_eq!(
+            expand_snippet(text, cursor, &snippets),
+            Some((
+                ";thanks earlier\nReply: Thanks so much,\nBrian later".into(),
+                text.find(";thanks later").unwrap() + "Thanks so much,\nBrian".len()
+            ))
+        );
+        assert_eq!(expand_snippet(";missing", 8, &snippets), None);
     }
 }

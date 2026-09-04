@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::action::OpId;
+use crate::calendar::CalendarInvite;
 use crate::error::CoreResult;
 use crate::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 
@@ -22,6 +23,19 @@ pub struct ThreadSummary {
     pub label_ids: Vec<LabelId>,
 }
 
+/// Whether an inbox thread needs a response from its account owner.
+pub fn is_awaiting_reply(thread: &ThreadSummary, last_message: Option<&Message>) -> bool {
+    thread
+        .label_ids
+        .iter()
+        .any(|label| label.as_str() == "INBOX")
+        && (thread.unread || thread.starred)
+        && last_message.is_some_and(|message| {
+            crate::compose::normalized_addr_spec(&message.from)
+                != crate::compose::normalized_addr_spec(thread.account_id.as_str())
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub account_id: AccountId,
@@ -35,6 +49,8 @@ pub struct Message {
     pub internal_date: DateTime<Utc>,
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
+    #[serde(default)]
+    pub calendar: Option<CalendarInvite>,
     #[serde(default)]
     pub headers: Option<MessageHeaders>,
     pub label_ids: Vec<LabelId>,
@@ -98,7 +114,19 @@ pub struct Draft {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_md: String,
+    #[serde(default)]
+    pub calendar_reply_ics: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledSend {
+    pub send_later_id: String,
+    pub draft_id: DraftId,
+    pub send_at: DateTime<Utc>,
+    pub subject: String,
+    pub to: Vec<String>,
+    pub account_id: AccountId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,6 +160,76 @@ pub struct OutboxOp {
     pub created_at: DateTime<Utc>,
     pub attempts: u32,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityEntry {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub at: DateTime<Utc>,
+    pub kind: String,
+    pub thread_ids: Vec<ThreadId>,
+    pub summary: String,
+    pub state: String,
+    pub undone: bool,
+}
+
+impl ActivityEntry {
+    pub fn from_outbox(op: &OutboxOp, state: String, undone: bool) -> Self {
+        let (kind, thread_ids, summary) = match &op.kind {
+            OutboxOpKind::ModifyLabels {
+                thread_ids,
+                add,
+                remove,
+            } => {
+                let has = |labels: &[LabelId], value: &str| {
+                    labels.iter().any(|label| label.as_str() == value)
+                };
+                let summary = if has(remove, "INBOX") && add.is_empty() {
+                    count_summary("Archived", thread_ids.len())
+                } else if has(add, "STARRED") {
+                    count_summary("Starred", thread_ids.len())
+                } else if has(remove, "STARRED") {
+                    count_summary("Unstarred", thread_ids.len())
+                } else if has(remove, "UNREAD") {
+                    count_summary("Marked read", thread_ids.len())
+                } else if has(add, "UNREAD") {
+                    count_summary("Marked unread", thread_ids.len())
+                } else {
+                    count_summary("Updated labels on", thread_ids.len())
+                };
+                ("modify_labels", thread_ids.clone(), summary)
+            }
+            OutboxOpKind::Trash { thread_ids } => (
+                "trash",
+                thread_ids.clone(),
+                count_summary("Trashed", thread_ids.len()),
+            ),
+            OutboxOpKind::SendDraft { .. } => ("send_draft", Vec::new(), "Sent draft".into()),
+            OutboxOpKind::SaveDraft { .. } => ("save_draft", Vec::new(), "Saved draft".into()),
+            OutboxOpKind::DeleteDraft { .. } => {
+                ("delete_draft", Vec::new(), "Deleted draft".into())
+            }
+        };
+        Self {
+            id: op.id,
+            account_id: op.account_id.clone(),
+            at: op.created_at,
+            kind: kind.into(),
+            thread_ids,
+            summary,
+            state,
+            undone,
+        }
+    }
+}
+
+fn count_summary(verb: &str, count: usize) -> String {
+    if count == 1 {
+        verb.to_string()
+    } else {
+        format!("{verb} {count} threads")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +302,8 @@ pub trait MailStore: Send + Sync {
         draft_id: &DraftId,
         send_at: DateTime<Utc>,
     ) -> CoreResult<()>;
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>>;
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()>;
     async fn complete_send(
         &self,
         outbox_row_id: i64,
@@ -226,6 +326,14 @@ pub trait MailStore: Send + Sync {
     async fn mark_outbox_failed(&self, id: i64, error: &str) -> CoreResult<()>;
     async fn outbox_summary(&self, scope: &AccountScope) -> CoreResult<OutboxSummary>;
     async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32>;
+    async fn list_activity(
+        &self,
+        scope: &AccountScope,
+        since_ms: i64,
+        limit: u32,
+    ) -> CoreResult<Vec<ActivityEntry>>;
+    async fn get_outbox_op(&self, scope: &AccountScope, id: i64) -> CoreResult<Option<OutboxOp>>;
+    async fn mark_outbox_undone(&self, id: i64, undone_by: i64) -> CoreResult<()>;
 
     /// Currently-stored sync cursor for the active account, if any.
     async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>>;
@@ -255,4 +363,74 @@ pub trait MailRemote: Send + Sync {
     async fn update_draft(&self, gmail_draft_id: &str, draft: &Draft) -> CoreResult<()>;
     async fn send_draft(&self, gmail_draft_id: &str) -> CoreResult<MessageId>;
     async fn delete_draft(&self, gmail_draft_id: &str) -> CoreResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread() -> ThreadSummary {
+        ThreadSummary {
+            account_id: AccountId::new("me@example.com"),
+            id: ThreadId::new("thread"),
+            subject: String::new(),
+            snippet: String::new(),
+            participants: Vec::new(),
+            last_message_at: Utc::now(),
+            message_count: 1,
+            unread: true,
+            starred: false,
+            label_ids: vec![LabelId::new("INBOX")],
+        }
+    }
+
+    fn message(from: &str) -> Message {
+        Message {
+            account_id: AccountId::new("me@example.com"),
+            id: MessageId::new("message"),
+            thread_id: ThreadId::new("thread"),
+            from: from.into(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            subject: String::new(),
+            snippet: String::new(),
+            internal_date: Utc::now(),
+            body_plain: None,
+            body_html: None,
+            calendar: None,
+            headers: None,
+            label_ids: Vec::new(),
+            fetched_full: false,
+            inline_images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn awaiting_reply_requires_inbox_attention_and_external_last_sender() {
+        let mut summary = thread();
+        assert!(is_awaiting_reply(
+            &summary,
+            Some(&message("Sender <them@example.com>"))
+        ));
+        assert!(!is_awaiting_reply(
+            &summary,
+            Some(&message("Me <ME@example.com>"))
+        ));
+
+        summary.unread = false;
+        assert!(!is_awaiting_reply(
+            &summary,
+            Some(&message("them@example.com"))
+        ));
+        summary.starred = true;
+        assert!(is_awaiting_reply(
+            &summary,
+            Some(&message("them@example.com"))
+        ));
+        summary.label_ids.clear();
+        assert!(!is_awaiting_reply(
+            &summary,
+            Some(&message("them@example.com"))
+        ));
+    }
 }

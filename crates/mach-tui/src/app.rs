@@ -5,6 +5,7 @@
 //! `Dispatcher::execute` so the TUI never touches state outside the
 //! Action enum — same surface the CLI and MCP use.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,10 +18,13 @@ use crossterm::{
 };
 use futures::StreamExt;
 use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
-use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
+use mach_core::store::{
+    ActivityEntry, Draft, MailStore, Message, OutboxSummary, ScheduledSend, ThreadSummary,
+};
 use mach_core::{
+    expand_snippet,
     keymap::{KeyContext, Keymap, Mode, Resolution},
-    Action, ActionOutcome, Dispatcher, DraftPatch, UnsubscribeTarget, UserConfig,
+    split_of, Action, ActionOutcome, Dispatcher, DraftPatch, Split, UnsubscribeTarget, UserConfig,
 };
 use mach_store::SqliteStore;
 use ratatui::Terminal;
@@ -41,6 +45,7 @@ pub struct App {
     pub store: Arc<SqliteStore>,
     pub scope: AccountScope,
     pub dispatcher: Dispatcher,
+    snippets: BTreeMap<String, String>,
     /// Body fetcher is optional — if creds are missing we run offline,
     /// serving whatever's already cached.
     pub body_fetchers: Arc<mach_gmail::GmailAccountPool>,
@@ -52,6 +57,7 @@ pub struct App {
     pub status: StatusLine,
     pub chord_buffer: String,
     pub last_chord_continuations: Vec<String>,
+    pub inbox_split: Split,
     pending_unsubscribe: Option<PendingUnsubscribe>,
 
     pub running: bool,
@@ -69,7 +75,9 @@ pub enum View {
     Inbox(InboxView),
     Thread(Box<ThreadView>),
     Composer(ComposerView),
+    Scheduled(ScheduledView),
     Search(SearchView),
+    Activity(ActivityView),
 }
 
 pub struct InboxView {
@@ -99,7 +107,13 @@ pub struct ComposerView {
     pub subject: String,
     pub body: String,
     pub field: ComposerField,
+    pub schedule_prompt: bool,
     previous_view: Box<View>,
+}
+
+pub struct ScheduledView {
+    pub sends: Vec<ScheduledSend>,
+    pub selected: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,6 +133,11 @@ pub struct SearchView {
     pub remote_failures: usize,
     /// Background view to fall back to when search closes.
     pub background: Box<View>,
+}
+
+pub struct ActivityView {
+    pub entries: Vec<ActivityEntry>,
+    pub selected: usize,
 }
 
 /// One-line status footer. Sync status + chord hint + binding hint.
@@ -154,6 +173,7 @@ impl App {
         user_config: UserConfig,
     ) -> Result<Self> {
         let keymap = load_keymap()?;
+        let snippets = user_config.snippets.clone();
         let dispatcher =
             Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
 
@@ -209,6 +229,7 @@ impl App {
             store,
             scope,
             dispatcher,
+            snippets,
             body_fetchers,
             hyperlinks,
             search_events: None,
@@ -217,6 +238,7 @@ impl App {
             status,
             chord_buffer: String::new(),
             last_chord_continuations: Vec::new(),
+            inbox_split: Split::Important,
             pending_unsubscribe: None,
             running: true,
         })
@@ -227,10 +249,12 @@ impl App {
         match &self.view {
             View::Inbox(v) => KeyContext {
                 selection: v
-                    .current_thread_id()
+                    .current_thread_id(self.inbox_split)
                     .map(|t| vec![t.as_str().to_string()])
                     .unwrap_or_default(),
-                current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
+                current_thread: v
+                    .current_thread_id(self.inbox_split)
+                    .map(|t| t.as_str().to_string()),
                 current_message: None,
                 current_draft: None,
             },
@@ -246,6 +270,7 @@ impl App {
                 current_message: None,
                 current_draft: Some(v.draft_id.as_str().to_string()),
             },
+            View::Scheduled(_) => KeyContext::default(),
             View::Search(v) => KeyContext {
                 selection: v
                     .current_thread_id()
@@ -254,6 +279,7 @@ impl App {
                 current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
                 ..Default::default()
             },
+            View::Activity(_) => KeyContext::default(),
         }
     }
 
@@ -262,17 +288,30 @@ impl App {
             View::Inbox(_) => Mode::Normal,
             View::Thread(_) => Mode::Reading,
             View::Composer(_) => Mode::Composing,
+            View::Scheduled(_) => Mode::Normal,
             View::Search(_) => Mode::Search,
+            View::Activity(_) => Mode::Normal,
         }
     }
 }
 
 impl InboxView {
-    pub fn current_thread(&self) -> Option<&ThreadSummary> {
-        self.threads.get(self.selected)
+    pub fn visible_threads(&self, split: Split) -> Vec<&ThreadSummary> {
+        if self.label.as_str() == "INBOX" {
+            self.threads
+                .iter()
+                .filter(|thread| split_of(&thread.label_ids) == split)
+                .collect()
+        } else {
+            self.threads.iter().collect()
+        }
     }
-    pub fn current_thread_id(&self) -> Option<&ThreadId> {
-        self.current_thread().map(|t| &t.id)
+
+    pub fn current_thread(&self, split: Split) -> Option<&ThreadSummary> {
+        self.visible_threads(split).get(self.selected).copied()
+    }
+    pub fn current_thread_id(&self, split: Split) -> Option<&ThreadId> {
+        self.current_thread(split).map(|t| &t.id)
     }
 }
 
@@ -317,6 +356,13 @@ async fn load_inbox_limit(
     })
 }
 
+async fn load_scheduled(store: &SqliteStore, scope: &AccountScope) -> Result<ScheduledView> {
+    Ok(ScheduledView {
+        sends: store.list_scheduled(scope).await?,
+        selected: 0,
+    })
+}
+
 /// Run the TUI to completion. Returns when the user quits.
 pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
     run_with_user_config(store, scope, UserConfig::default()).await
@@ -342,10 +388,23 @@ pub async fn run_with_user_config(
     let pull_task = tokio::spawn(periodic_pull(
         app.body_fetchers.clone(),
         app.scope.clone(),
-        pull_tx,
+        pull_tx.clone(),
     ));
+    let push_task = mach_gmail::config::pubsub_subscription().and_then(|subscription| {
+        app.body_fetchers.pubsub_client().map(|client| {
+            tokio::spawn(pubsub_pull(
+                app.body_fetchers.clone(),
+                pull_tx,
+                client,
+                subscription,
+            ))
+        })
+    });
     let result = main_loop(&mut app, &mut terminal, &mut pull_rx, &mut search_rx).await;
     pull_task.abort();
+    if let Some(task) = push_task {
+        task.abort();
+    }
     if let Some(task) = app.remote_search_task.take() {
         task.abort();
     }
@@ -424,6 +483,34 @@ async fn periodic_pull(
     }
 }
 
+async fn pubsub_pull(
+    accounts: Arc<mach_gmail::GmailAccountPool>,
+    events: mpsc::UnboundedSender<PullEvent>,
+    client: Arc<mach_gmail::GmailClient>,
+    subscription: String,
+) {
+    let callback_accounts = accounts.clone();
+    let result = mach_gmail::pubsub_pull_loop(client, &subscription, move |email| {
+        let accounts = callback_accounts.clone();
+        let events = events.clone();
+        async move {
+            let account = AccountId::new(email);
+            if accounts.get(&account).is_none() {
+                return;
+            }
+            if events.send(PullEvent::Started).is_err() {
+                return;
+            }
+            let report = accounts.pull_updates(&AccountScope::One(account)).await;
+            let _ = events.send(PullEvent::Finished(report));
+        }
+    })
+    .await;
+    if let Err(error) = result {
+        warn!(%error, "Pub/Sub pull loop stopped; polling remains active");
+    }
+}
+
 async fn handle_pull_event(app: &mut App, event: PullEvent) {
     match event {
         PullEvent::Started => app.status.sync = SyncState::Syncing,
@@ -461,13 +548,13 @@ async fn refresh_visible_inbox(app: &mut App) {
     };
     let label = current.label.clone();
     let selected = current
-        .current_thread()
+        .current_thread(app.inbox_split)
         .map(|thread| (thread.account_id.clone(), thread.id.clone()));
     match load_inbox(&app.store, &app.scope, label.as_str()).await {
         Ok(mut inbox) => {
             if let Some((account, id)) = selected {
                 inbox.selected = inbox
-                    .threads
+                    .visible_threads(app.inbox_split)
                     .iter()
                     .position(|thread| thread.account_id == account && thread.id == id)
                     .unwrap_or(0);
@@ -516,13 +603,19 @@ fn handle_search_event(app: &mut App, event: SearchEvent) {
 }
 
 async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    if activity_key(app, &k).await {
+        return;
+    }
     if thread_scroll_key(app, &k) {
+        return;
+    }
+    if scheduled_swallow_key(app, &k).await {
         return;
     }
     // Composer text input is special: most keys go to the field, not the
     // keymap. We only consult the keymap for specific control bindings.
     if let View::Composer(_) = &app.view {
-        if composer_swallow_key(app, &k) {
+        if composer_swallow_key(app, &k).await {
             return;
         }
     }
@@ -552,7 +645,7 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
     {
         app.chord_buffer.clear();
         app.last_chord_continuations.clear();
-        load_older_mail(app).await;
+        execute_adapter_action(app, "load_older").await;
         return;
     }
 
@@ -562,6 +655,11 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
             app.chord_buffer.clear();
             app.last_chord_continuations.clear();
             execute_action(app, action).await;
+        }
+        Resolution::AdapterAction(action) => {
+            app.chord_buffer.clear();
+            app.last_chord_continuations.clear();
+            execute_adapter_action(app, &action).await;
         }
         Resolution::Prefix(conts) => {
             app.chord_buffer = new_chord;
@@ -578,13 +676,85 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
                 app.chord_buffer.clear();
                 app.last_chord_continuations.clear();
                 let chord = key_event_to_chord(&k).unwrap_or_default();
-                if let Resolution::Action(action) =
-                    app.keymap.resolve(app.current_mode(), &chord, &ctx)
-                {
-                    execute_action(app, action).await;
+                match app.keymap.resolve(app.current_mode(), &chord, &ctx) {
+                    Resolution::Action(action) => execute_action(app, action).await,
+                    Resolution::AdapterAction(action) => execute_adapter_action(app, &action).await,
+                    Resolution::Prefix(_) | Resolution::Unbound => {}
                 }
             }
         }
+    }
+}
+
+async fn activity_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+
+    let View::Activity(activity) = &mut app.view else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            activity.selected =
+                (activity.selected + 1).min(activity.entries.len().saturating_sub(1));
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            activity.selected = activity.selected.saturating_sub(1);
+        }
+        KeyCode::Char('u') => {
+            let Some(id) = activity
+                .entries
+                .get(activity.selected)
+                .map(|entry| entry.id)
+            else {
+                return true;
+            };
+            match app
+                .dispatcher
+                .execute(Action::UndoActivity { outbox_id: id })
+                .await
+            {
+                Ok(_) => match app.store.list_activity(&app.scope, 0, 50).await {
+                    Ok(entries) => {
+                        app.view = View::Activity(ActivityView {
+                            entries,
+                            selected: 0,
+                        })
+                    }
+                    Err(error) => warn!(%error, "refreshing activity failed"),
+                },
+                Err(error) => app.status.hint = error.to_string(),
+            }
+        }
+        KeyCode::Esc => {
+            if let Ok(inbox) = load_inbox(&app.store, &app.scope, "INBOX").await {
+                app.view = View::Inbox(inbox);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+async fn execute_adapter_action(app: &mut App, action: &str) {
+    if action == "load_older" {
+        load_older_mail(app).await;
+        return;
+    }
+    let split = match action {
+        "inbox_split_important" => Split::Important,
+        "inbox_split_other" => Split::Other,
+        "inbox_split_newsletters" => Split::Newsletters,
+        _ => return,
+    };
+    let View::Inbox(inbox) = &mut app.view else {
+        return;
+    };
+    if inbox.label.as_str() == "INBOX" {
+        app.inbox_split = split;
+        inbox.selected = inbox
+            .selected
+            .min(inbox.visible_threads(split).len().saturating_sub(1));
+        inbox.viewport_top = inbox.viewport_top.min(inbox.selected);
     }
 }
 
@@ -607,7 +777,12 @@ async fn load_older_mail(app: &mut App) {
         Ok(stats) => {
             match load_inbox_limit(&app.store, &app.scope, label.as_str(), limit).await {
                 Ok(mut inbox) => {
-                    inbox.selected = selected.min(inbox.threads.len().saturating_sub(1));
+                    inbox.selected = selected.min(
+                        inbox
+                            .visible_threads(app.inbox_split)
+                            .len()
+                            .saturating_sub(1),
+                    );
                     app.view = View::Inbox(inbox);
                 }
                 Err(error) => warn!(%error, "refreshing after load older failed"),
@@ -644,8 +819,30 @@ fn thread_scroll_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
     }
 }
 
-fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
+async fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
+    if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('l')) {
+        if let View::Composer(c) = &mut app.view {
+            c.schedule_prompt = true;
+        }
+        return true;
+    }
+    if let View::Composer(c) = &app.view {
+        if c.schedule_prompt {
+            match k.code {
+                KeyCode::Char(choice @ '1'..='4') => {
+                    schedule_composer(app, choice as usize - '1' as usize).await;
+                }
+                KeyCode::Esc => {
+                    if let View::Composer(c) = &mut app.view {
+                        c.schedule_prompt = false;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+    }
     let View::Composer(c) = &mut app.view else {
         return false;
     };
@@ -661,6 +858,24 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
     }
     match k.code {
         KeyCode::Tab => {
+            let target = match c.field {
+                ComposerField::To => &mut c.to,
+                ComposerField::Cc => &mut c.cc,
+                ComposerField::Bcc => &mut c.bcc,
+                ComposerField::Subject => &mut c.subject,
+                ComposerField::Body => &mut c.body,
+            };
+            if let Some((expanded, _)) = expand_snippet(target, target.len(), &app.snippets) {
+                *target = expanded;
+                return true;
+            }
+            if target
+                .rsplit(char::is_whitespace)
+                .next()
+                .is_some_and(|token| token.starts_with(';'))
+            {
+                return true;
+            }
             c.field = match c.field {
                 ComposerField::To => ComposerField::Cc,
                 ComposerField::Cc => ComposerField::Bcc,
@@ -707,6 +922,39 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
                 ComposerField::Body => &mut c.body,
             };
             target.push(ch);
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn scheduled_swallow_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    let View::Scheduled(view) = &app.view else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Enter => {
+            if let Some(send) = view.sends.get(view.selected) {
+                let draft_id = send.draft_id.clone();
+                if let Ok(Some(draft)) = app.store.find_draft(&app.scope, &draft_id).await {
+                    let previous = std::mem::replace(&mut app.view, empty_inbox_view());
+                    app.view = View::Composer(ComposerView::from_draft(draft, previous));
+                }
+            }
+            true
+        }
+        KeyCode::Char('#') => {
+            if let Some(send) = view.sends.get(view.selected) {
+                let action = Action::CancelSendLater {
+                    send_later_id: send.send_later_id.clone(),
+                };
+                if app.dispatcher.execute(action).await.is_ok() {
+                    if let Ok(scheduled) = load_scheduled(&app.store, &app.scope).await {
+                        app.view = View::Scheduled(scheduled);
+                    }
+                }
+            }
             true
         }
         _ => false,
@@ -874,6 +1122,13 @@ async fn execute_action(app: &mut App, action: Action) {
             return;
         }
         Action::OpenLabel { label_id } => {
+            if label_id.as_str() == "SCHEDULED" {
+                match load_scheduled(&app.store, &app.scope).await {
+                    Ok(scheduled) => app.view = View::Scheduled(scheduled),
+                    Err(e) => warn!(error = %e, "open scheduled failed"),
+                }
+                return;
+            }
             match load_inbox(&app.store, &app.scope, label_id.as_str()).await {
                 Ok(inbox) => app.view = View::Inbox(inbox),
                 Err(e) => warn!(error = %e, "open_label failed"),
@@ -900,6 +1155,18 @@ async fn execute_action(app: &mut App, action: Action) {
             });
             return;
         }
+        Action::ShowActivity => {
+            match app.store.list_activity(&app.scope, 0, 50).await {
+                Ok(entries) => {
+                    app.view = View::Activity(ActivityView {
+                        entries,
+                        selected: 0,
+                    })
+                }
+                Err(error) => warn!(%error, "opening activity failed"),
+            }
+            return;
+        }
         _ => {}
     }
 
@@ -913,6 +1180,9 @@ async fn execute_action(app: &mut App, action: Action) {
     match app.dispatcher.execute(action.clone()).await {
         Ok(outcome) => {
             debug!(?outcome, "dispatched");
+            if matches!(action, Action::RespondToInvite { .. }) {
+                app.status.hint = outcome.message.clone();
+            }
 
             // From inbox view: drop the affected row in place (Superhuman feel —
             // the list visibly closes the gap).
@@ -920,9 +1190,9 @@ async fn execute_action(app: &mut App, action: Action) {
                 if let View::Inbox(v) = &mut app.view {
                     v.threads
                         .retain(|t| !outcome.changed_threads.iter().any(|c| c == &t.id));
-                    if v.selected >= v.threads.len() && !v.threads.is_empty() {
-                        v.selected = v.threads.len() - 1;
-                    }
+                    v.selected = v
+                        .selected
+                        .min(v.visible_threads(app.inbox_split).len().saturating_sub(1));
                 }
             }
 
@@ -1108,6 +1378,37 @@ async fn send_composer(app: &mut App) {
     }
 }
 
+async fn schedule_composer(app: &mut App, preset: usize) {
+    if !save_composer(app).await {
+        return;
+    }
+    let View::Composer(composer) = &app.view else {
+        return;
+    };
+    let Some((_, at)) = mach_core::send_later_presets(chrono::Local::now())
+        .into_iter()
+        .nth(preset)
+    else {
+        return;
+    };
+    let local: chrono::DateTime<chrono::Local> = at.into();
+    let action = Action::SendLater {
+        draft_id: composer.draft_id.clone(),
+        at,
+    };
+    match app.dispatcher.execute(action).await {
+        Ok(_) => {
+            app.status.hint = format!("Scheduled for {}", local.format("%a %b %-d, %-I:%M %p"));
+            let View::Composer(composer) = std::mem::replace(&mut app.view, empty_inbox_view())
+            else {
+                return;
+            };
+            app.view = *composer.previous_view;
+        }
+        Err(error) => warn!(%error, "scheduling draft failed"),
+    }
+}
+
 fn composer_save_action(view: &View) -> Option<Action> {
     let View::Composer(composer) = view else {
         return None;
@@ -1162,6 +1463,7 @@ impl ComposerView {
             subject: draft.subject,
             body: draft.body_md,
             field: ComposerField::To,
+            schedule_prompt: false,
             previous_view: Box::new(previous_view),
         }
     }
@@ -1197,10 +1499,11 @@ async fn open_thread(app: &mut App, id: ThreadId) {
 fn advance_selection(app: &mut App, delta: i32) {
     match &mut app.view {
         View::Inbox(v) => {
-            if v.threads.is_empty() {
+            let len = v.visible_threads(app.inbox_split).len();
+            if len == 0 {
                 return;
             }
-            let next = (v.selected as i32 + delta).clamp(0, v.threads.len() as i32 - 1) as usize;
+            let next = (v.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
             v.selected = next;
         }
         View::Thread(v) => {
@@ -1216,6 +1519,18 @@ fn advance_selection(app: &mut App, delta: i32) {
                 let next =
                     (v.selected as i32 + delta).clamp(0, v.results.len() as i32 - 1) as usize;
                 v.selected = next;
+            }
+        }
+        View::Activity(v) => {
+            if !v.entries.is_empty() {
+                v.selected =
+                    (v.selected as i32 + delta).clamp(0, v.entries.len() as i32 - 1) as usize;
+            }
+        }
+        View::Scheduled(v) => {
+            if !v.sends.is_empty() {
+                v.selected =
+                    (v.selected as i32 + delta).clamp(0, v.sends.len() as i32 - 1) as usize;
             }
         }
         _ => {}
@@ -1241,6 +1556,7 @@ mod tests {
             bcc: vec!["blind@example.com".into()],
             subject: "Re: Plans".into(),
             body_md: "Sounds good".into(),
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         }
     }

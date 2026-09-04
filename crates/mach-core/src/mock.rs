@@ -12,7 +12,8 @@ use crate::action::OpId;
 use crate::error::CoreResult;
 use crate::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 use crate::store::{
-    Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, OutboxSummary, ThreadSummary,
+    ActivityEntry, Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, OutboxSummary,
+    ScheduledSend, ThreadSummary,
 };
 
 #[derive(Default)]
@@ -26,9 +27,10 @@ struct Inner {
     messages_by_thread: HashMap<(AccountId, ThreadId), Vec<Message>>,
     labels: Vec<Label>,
     drafts: HashMap<(AccountId, DraftId), Draft>,
-    scheduled_sends: HashMap<(AccountId, DraftId), DateTime<Utc>>,
+    scheduled_sends: HashMap<(AccountId, String), (DraftId, DateTime<Utc>)>,
     outbox: Vec<OutboxOp>,
     outbox_next_attempt_at: HashMap<i64, i64>,
+    outbox_undone_by: HashMap<i64, i64>,
     next_outbox_id: i64,
     history_cursors: HashMap<AccountId, u64>,
 }
@@ -306,9 +308,41 @@ impl MailStore for InMemoryStore {
         {
             return Err(crate::error::CoreError::NotFound("draft not found".into()));
         }
-        inner
+        inner.scheduled_sends.insert(
+            (account.clone(), uuid::Uuid::new_v4().simple().to_string()),
+            (draft_id.clone(), send_at),
+        );
+        Ok(())
+    }
+
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>> {
+        let inner = self.inner.lock().unwrap();
+        let mut sends = inner
             .scheduled_sends
-            .insert((account.clone(), draft_id.clone()), send_at);
+            .iter()
+            .filter_map(|((account_id, send_later_id), (draft_id, send_at))| {
+                let draft = inner.drafts.get(&(account_id.clone(), draft_id.clone()))?;
+                scope_matches(scope, account_id).then(|| ScheduledSend {
+                    send_later_id: send_later_id.clone(),
+                    draft_id: draft_id.clone(),
+                    send_at: *send_at,
+                    subject: draft.subject.clone(),
+                    to: draft.to.clone(),
+                    account_id: account_id.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        sends.sort_by_key(|send| send.send_at);
+        Ok(sends)
+    }
+
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .scheduled_sends
+            .remove(&(account.clone(), send_later_id.to_string()))
+            .ok_or_else(|| crate::error::CoreError::NotFound("scheduled send not found".into()))?;
         Ok(())
     }
 
@@ -323,7 +357,9 @@ impl MailStore for InMemoryStore {
         inner.drafts.remove(&(account.clone(), draft_id.clone()));
         inner
             .scheduled_sends
-            .remove(&(account.clone(), draft_id.clone()));
+            .retain(|(scheduled_account, _), (scheduled_draft, _)| {
+                scheduled_account != account || scheduled_draft != draft_id
+            });
         Ok(())
     }
 
@@ -423,6 +459,60 @@ impl MailStore for InMemoryStore {
         Ok(ids.len() as u32)
     }
 
+    async fn list_activity(
+        &self,
+        scope: &AccountScope,
+        since_ms: i64,
+        limit: u32,
+    ) -> CoreResult<Vec<ActivityEntry>> {
+        let inner = self.inner.lock().unwrap();
+        let mut entries = inner
+            .outbox
+            .iter()
+            .filter(|op| {
+                scope_matches(scope, &op.account_id) && op.created_at.timestamp_millis() >= since_ms
+            })
+            .map(|op| {
+                ActivityEntry::from_outbox(
+                    op,
+                    if op.attempts >= 5 {
+                        "failed"
+                    } else {
+                        "pending"
+                    }
+                    .into(),
+                    inner.outbox_undone_by.contains_key(&op.id),
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| std::cmp::Reverse((entry.at, entry.id)));
+        entries.truncate(limit as usize);
+        Ok(entries)
+    }
+
+    async fn get_outbox_op(&self, scope: &AccountScope, id: i64) -> CoreResult<Option<OutboxOp>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .outbox
+            .iter()
+            .find(|op| op.id == id && scope_matches(scope, &op.account_id))
+            .cloned())
+    }
+
+    async fn mark_outbox_undone(&self, id: i64, undone_by: i64) -> CoreResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.outbox.iter().any(|op| op.id == id)
+            || inner.outbox_undone_by.insert(id, undone_by).is_some()
+        {
+            return Err(crate::error::CoreError::InvalidAction(format!(
+                "activity {id} was not found or is already undone"
+            )));
+        }
+        Ok(())
+    }
+
     async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>> {
         Ok(self
             .inner
@@ -487,7 +577,7 @@ fn resolve_mutation_account(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Action, DraftPatch};
+    use crate::action::{Action, DraftPatch, InviteResponse};
     use crate::dispatcher::Dispatcher;
     use crate::store::MessageHeaders;
     use std::sync::Arc;
@@ -523,6 +613,7 @@ mod tests {
             internal_date: Utc::now(),
             body_plain: Some("Can you help?".into()),
             body_html: None,
+            calendar: None,
             headers: Some(MessageHeaders {
                 message_id: Some("<rfc-message@example.com>".into()),
                 ..MessageHeaders::default()
@@ -615,6 +706,7 @@ mod tests {
         let account = AccountId::new("test@example.com");
         let config = crate::UserConfig {
             signatures: [(account.to_string(), "Test Person".into())].into(),
+            ..Default::default()
         };
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(account)).with_user_config(config);
@@ -640,6 +732,7 @@ mod tests {
             bcc: vec![],
             subject: "Before save".into(),
             body_md: String::new(),
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         };
         store.save_draft_local(&draft).await.unwrap();
@@ -708,11 +801,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invite_response_creates_and_queues_calendar_reply() {
+        let store = Arc::new(InMemoryStore::new());
+        let mut source = seed_message(&store);
+        source.calendar = crate::parse_calendar(
+            "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:event-1\r\nSUMMARY:Planning\r\nDTSTART:20260908T140000Z\r\nDTEND:20260908T143000Z\r\nORGANIZER:mailto:alice@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:test@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            "test@example.com",
+        );
+        let summary = store
+            .get_thread(
+                &AccountScope::One(source.account_id.clone()),
+                &source.thread_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        store.insert_thread(summary, vec![source.clone()]);
+        let dispatcher =
+            Dispatcher::with_scope(store.clone(), AccountScope::One(source.account_id.clone()));
+
+        let outcome = dispatcher
+            .execute(Action::RespondToInvite {
+                message_id: source.id,
+                response: InviteResponse::Accepted,
+            })
+            .await
+            .unwrap();
+        let draft = store
+            .get_draft(&source.account_id, &outcome.changed_drafts[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(draft.to, ["alice@example.com"]);
+        assert_eq!(draft.subject, "Accepted: Planning");
+        assert!(draft
+            .calendar_reply_ics
+            .unwrap()
+            .contains("PARTSTAT=ACCEPTED"));
+        assert!(matches!(
+            store.outbox_snapshot().as_slice(),
+            [OutboxOp {
+                kind: OutboxOpKind::SendDraft { .. },
+                ..
+            }]
+        ));
+    }
+
+    #[tokio::test]
     async fn reply_places_signature_before_quote() {
         let store = Arc::new(InMemoryStore::new());
         let source = seed_message(&store);
         let config = crate::UserConfig {
             signatures: [("default".into(), "Test Person".into())].into(),
+            ..Default::default()
         };
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(source.account_id.clone()))
@@ -796,6 +937,65 @@ mod tests {
         let outbox = store.outbox_snapshot();
         assert_eq!(outbox.len(), 1);
         assert!(matches!(outbox[0].kind, OutboxOpKind::ModifyLabels { .. }));
+    }
+
+    #[tokio::test]
+    async fn undo_activity_restores_archive_and_marks_original() {
+        let store = Arc::new(InMemoryStore::new());
+        seed_thread(&store, "t1", &["INBOX"]);
+        let dispatcher = Dispatcher::new(store.clone());
+        dispatcher
+            .execute(Action::Archive {
+                thread_ids: vec![ThreadId::new("t1")],
+            })
+            .await
+            .unwrap();
+
+        dispatcher
+            .execute(Action::UndoActivity { outbox_id: 1 })
+            .await
+            .unwrap();
+
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(thread.label_ids.contains(&LabelId::new("INBOX")));
+        let activity = store
+            .list_activity(&AccountScope::All, 0, 50)
+            .await
+            .unwrap();
+        assert!(activity.iter().find(|entry| entry.id == 1).unwrap().undone);
+    }
+
+    #[tokio::test]
+    async fn undo_activity_rejects_send_draft() {
+        let store = Arc::new(InMemoryStore::new());
+        let account = AccountId::new("test@example.com");
+        let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account));
+        let composed = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let draft: Draft = serde_json::from_value(composed.data.unwrap()["draft"].clone()).unwrap();
+        dispatcher
+            .execute(Action::SaveDraft {
+                draft_id: draft.id.clone(),
+                patch: DraftPatch {
+                    to: Some(vec!["recipient@example.com".into()]),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        dispatcher
+            .execute(Action::SendDraft { draft_id: draft.id })
+            .await
+            .unwrap();
+
+        let error = dispatcher
+            .execute(Action::UndoActivity { outbox_id: 1 })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not undoable"));
     }
 
     #[tokio::test]

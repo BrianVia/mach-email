@@ -7,15 +7,15 @@
 //! store directly without going through the Action surface — those don't
 //! need optimistic-update semantics.
 
-use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::store::{Draft, Label, MailStore, ThreadSummary};
+use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, ThreadId};
+use mach_core::store::{ActivityEntry, Draft, Label, MailStore, ScheduledSend, ThreadSummary};
 use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
-use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
+use mach_gmail::{GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
 use serde::Serialize;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::warn;
 
 use crate::AppState;
@@ -79,86 +79,21 @@ fn emit_sync_event<T: Clone + Serialize>(app: &AppHandle, event: &str, payload: 
 
 pub(crate) async fn sync_accounts(
     app: &AppHandle,
-    store: &Arc<SqliteStore>,
     accounts: &GmailAccountPool,
-    synced_accounts: &Mutex<HashSet<AccountId>>,
 ) -> serde_json::Value {
     let mut synced = 0;
     let mut failed = 0;
     let mut last_error = None;
 
     for account in accounts.accounts() {
-        let Some(fetcher) = accounts.get(account) else {
-            continue;
-        };
-        if fetcher.client().needs_reauth().await {
-            continue;
-        }
-        let email = account.as_str().to_string();
-        let scope = AccountScope::One(account.clone());
-        let before = store
-            .list_threads_in_label(&scope, &LabelId::new("INBOX"), 500)
-            .await
-            .map(|threads| threads.into_iter().map(|thread| thread.id).collect());
-        match sync_account_tick(account, fetcher.client().clone(), store.clone()).await {
-            Ok(report) => {
+        match sync_account(app, accounts, account).await {
+            Ok(true) => {
                 synced += 1;
-                let seen_before = !synced_accounts
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(account.clone());
-                let new_threads = if seen_before {
-                    match before {
-                        Ok(before) => store
-                            .list_threads_in_label(&scope, &LabelId::new("INBOX"), 500)
-                            .await
-                            .map(|after| new_thread_ids(&before, &after))
-                            .unwrap_or_else(|error| {
-                                warn!(account = %account, error = %error, "loading new inbox threads failed");
-                                Vec::new()
-                            }),
-                        Err(error) => {
-                            warn!(account = %account, error = %error, "snapshotting inbox threads failed");
-                            Vec::new()
-                        }
-                    }
-                } else {
-                    Vec::new()
-                };
-                if seen_before && (tick_changed(&report) || !new_threads.is_empty()) {
-                    emit_sync_event(
-                        app,
-                        "mail-synced",
-                        MailSyncedPayload {
-                            account: email.clone(),
-                            new_threads,
-                        },
-                    );
-                }
-                emit_sync_event(
-                    app,
-                    "sync-status",
-                    SyncStatusPayload {
-                        account: email,
-                        ok: true,
-                        error: None,
-                    },
-                );
             }
-            Err(error) => {
-                let message = format!("{error:#}");
-                warn!(account = %account, error = %message, "account sync tick failed");
+            Ok(false) => continue,
+            Err(message) => {
                 failed += 1;
                 last_error = Some(message.clone());
-                emit_sync_event(
-                    app,
-                    "sync-status",
-                    SyncStatusPayload {
-                        account: email,
-                        ok: false,
-                        error: Some(message),
-                    },
-                );
             }
         }
     }
@@ -168,6 +103,89 @@ pub(crate) async fn sync_accounts(
         "failed": failed,
         "last_error": last_error,
     })
+}
+
+pub(crate) async fn sync_account(
+    app: &AppHandle,
+    accounts: &GmailAccountPool,
+    account: &AccountId,
+) -> Result<bool, String> {
+    let Some(fetcher) = accounts.get(account) else {
+        return Ok(false);
+    };
+    if fetcher.client().needs_reauth().await {
+        return Ok(false);
+    }
+    let state = app.state::<AppState>();
+    let email = account.as_str().to_string();
+    let scope = AccountScope::One(account.clone());
+    let before = state
+        .store
+        .list_threads_in_label(&scope, &LabelId::new("INBOX"), 500)
+        .await
+        .map(|threads| threads.into_iter().map(|thread| thread.id).collect());
+    match fetcher.sync_tick().await {
+        Ok(report) => {
+            let seen_before = !state
+                .synced_accounts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(account.clone());
+            let new_threads = if seen_before {
+                match before {
+                    Ok(before) => state
+                        .store
+                        .list_threads_in_label(&scope, &LabelId::new("INBOX"), 500)
+                        .await
+                        .map(|after| new_thread_ids(&before, &after))
+                        .unwrap_or_else(|error| {
+                            warn!(account = %account, error = %error, "loading new inbox threads failed");
+                            Vec::new()
+                        }),
+                    Err(error) => {
+                        warn!(account = %account, error = %error, "snapshotting inbox threads failed");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            if seen_before && (tick_changed(&report) || !new_threads.is_empty()) {
+                emit_sync_event(
+                    app,
+                    "mail-synced",
+                    MailSyncedPayload {
+                        account: email.clone(),
+                        new_threads,
+                    },
+                );
+            }
+            emit_sync_event(
+                app,
+                "sync-status",
+                SyncStatusPayload {
+                    account: email,
+                    ok: true,
+                    error: None,
+                },
+            );
+            Ok(true)
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            warn!(account = %account, error = %message, "account sync tick failed");
+            emit_sync_event(
+                app,
+                "sync-status",
+                SyncStatusPayload {
+                    account: email,
+                    ok: false,
+                    error: Some(message.clone()),
+                },
+            );
+            Err(message)
+        }
+    }
 }
 
 #[tauri::command]
@@ -299,6 +317,24 @@ pub async fn outbox_summary(
 }
 
 #[tauri::command]
+pub async fn list_activity(
+    state: State<'_, AppState>,
+    since_ms: i64,
+    limit: u32,
+) -> Result<Out<Vec<ActivityEntry>>, String> {
+    Ok(
+        match state
+            .store
+            .list_activity(&state.scope, since_ms, limit)
+            .await
+        {
+            Ok(entries) => Out::ok(entries),
+            Err(error) => Out::err(error),
+        },
+    )
+}
+
+#[tauri::command]
 pub async fn retry_outbox(state: State<'_, AppState>) -> Result<Out<u32>, String> {
     let entries = match state.store.list_outbox(&state.scope).await {
         Ok(entries) => entries,
@@ -326,15 +362,7 @@ pub async fn sync_now(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Out<serde_json::Value>, String> {
-    Ok(Out::ok(
-        sync_accounts(
-            &app,
-            &state.store,
-            &state.body_fetchers,
-            &state.synced_accounts,
-        )
-        .await,
-    ))
+    Ok(Out::ok(sync_accounts(&app, &state.body_fetchers).await))
 }
 
 #[cfg(test)]
@@ -393,6 +421,37 @@ pub async fn list_labels(state: State<'_, AppState>) -> Result<Out<Vec<Label>>, 
         Ok(labels) => Ok(Out::ok(labels)),
         Err(e) => Ok(Out::err(e)),
     }
+}
+
+#[tauri::command]
+pub async fn list_scheduled(state: State<'_, AppState>) -> Result<Out<Vec<ScheduledSend>>, String> {
+    Ok(match state.store.list_scheduled(&state.scope).await {
+        Ok(sends) => Out::ok(sends),
+        Err(error) => Out::err(error),
+    })
+}
+
+#[tauri::command]
+pub async fn open_draft(
+    state: State<'_, AppState>,
+    draft_id: String,
+) -> Result<Out<Draft>, String> {
+    Ok(
+        match state
+            .store
+            .find_draft(&state.scope, &DraftId::new(draft_id))
+            .await
+        {
+            Ok(Some(draft)) => Out::ok(draft),
+            Ok(None) => Out::err("draft not found"),
+            Err(error) => Out::err(error),
+        },
+    )
+}
+
+#[tauri::command]
+pub fn send_later_presets() -> Vec<(&'static str, chrono::DateTime<chrono::Utc>)> {
+    mach_core::send_later_presets(chrono::Local::now())
 }
 
 #[tauri::command]
@@ -533,6 +592,11 @@ pub fn settings() -> serde_json::Value {
             serde_json::json!({})
         }
     }
+}
+
+#[tauri::command]
+pub fn snippets(state: State<'_, AppState>) -> BTreeMap<String, String> {
+    state.user_config.snippets.clone()
 }
 
 #[tauri::command]
