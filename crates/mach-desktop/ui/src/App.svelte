@@ -11,6 +11,7 @@
     fetchKeymapSources,
     fetchOutboxSummary,
     fetchSettings,
+    fetchSnippets,
     flushOutbox,
     listLabels,
     loadOlder,
@@ -67,6 +68,7 @@
   let status = $state<AccountStatus | null>(null);
   let outbox = $state<OutboxSummary>({ pending: 0, failed: 0, last_error: null });
   let settings = $state<Settings>({});
+  let snippets = $state<Record<string, string>>({});
   let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "" };
@@ -147,6 +149,7 @@
         console.warn("[mach] settings load failed", error);
         settings = {};
       }
+      snippets = await fetchSnippets();
       labels = await listLabels();
       const sources = await fetchKeymapSources();
       try {
@@ -881,6 +884,7 @@
       onFieldsChange={(fields) => (composerFields = fields)}
       onSend={() => void runAction({ kind: "send_draft", draft_id: view.kind === "composer" ? view.draft.id : "" })}
       onClose={closeComposer}
+      {snippets}
     />
   {:else if view.kind === "search"}
     <SearchOverlay

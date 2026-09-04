@@ -33,4 +33,4 @@ pub use store::{
     OutboxOpKind, OutboxSummary,
 };
 pub use unsubscribe::{unsubscribe_targets, UnsubscribeTarget};
-pub use user_config::UserConfig;
+pub use user_config::{expand_snippet, UserConfig};

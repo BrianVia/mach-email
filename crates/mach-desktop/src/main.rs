@@ -30,6 +30,7 @@ pub struct AppState {
     pub default_keymap_toml: String,
     pub user_keymap_toml: Option<String>,
     pub account_emails: Vec<String>,
+    pub user_config: UserConfig,
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -101,7 +102,7 @@ async fn main() -> Result<()> {
         .context("loading user config")?
         .unwrap_or_default();
     let dispatcher =
-        Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
+        Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config.clone());
 
     let body_fetchers = match GmailAccountPool::from_stored_credentials(store.clone()) {
         Ok(pool) => {
@@ -123,6 +124,7 @@ async fn main() -> Result<()> {
         default_keymap_toml: mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string(),
         user_keymap_toml: load_user_keymap_toml(),
         account_emails,
+        user_config,
     };
 
     let cache_dir = ProjectDirs::from("com", "via", "mach")
@@ -171,6 +173,7 @@ async fn main() -> Result<()> {
             commands::search,
             commands::keymap_sources,
             commands::settings,
+            commands::snippets,
             commands::account_status,
             commands::flush_outbox,
             commands::unsubscribe_post,

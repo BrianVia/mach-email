@@ -95,7 +95,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         SyncState::AuthExpired => Span::styled("⚠ Auth", Style::default().fg(Color::Red)),
     };
 
-    let chord_hint = if !app.chord_buffer.is_empty() {
+    let chord_hint = if matches!(app.view, View::Composer(_)) {
+        " │ ;name<Tab> snippet".into()
+    } else if !app.chord_buffer.is_empty() {
         format!(
             " │ chord: {} → ({})",
             app.chord_buffer,

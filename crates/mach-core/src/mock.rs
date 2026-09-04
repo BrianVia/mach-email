@@ -615,6 +615,7 @@ mod tests {
         let account = AccountId::new("test@example.com");
         let config = crate::UserConfig {
             signatures: [(account.to_string(), "Test Person".into())].into(),
+            ..Default::default()
         };
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(account)).with_user_config(config);
@@ -713,6 +714,7 @@ mod tests {
         let source = seed_message(&store);
         let config = crate::UserConfig {
             signatures: [("default".into(), "Test Person".into())].into(),
+            ..Default::default()
         };
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(source.account_id.clone()))

@@ -13,6 +13,7 @@ use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
 use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tracing::warn;
@@ -452,6 +453,11 @@ pub fn settings() -> serde_json::Value {
             serde_json::json!({})
         }
     }
+}
+
+#[tauri::command]
+pub fn snippets(state: State<'_, AppState>) -> BTreeMap<String, String> {
+    state.user_config.snippets.clone()
 }
 
 #[tauri::command]

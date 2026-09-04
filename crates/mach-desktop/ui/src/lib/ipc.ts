@@ -222,6 +222,10 @@ export async function fetchSettings(): Promise<Settings> {
   return invoke<Settings>("settings");
 }
 
+export async function fetchSnippets(): Promise<Record<string, string>> {
+  return invoke<Record<string, string>>("snippets");
+}
+
 export async function fetchAccountStatus(): Promise<AccountStatus> {
   return invoke<AccountStatus>("account_status");
 }

@@ -5,6 +5,7 @@
 //! `Dispatcher::execute` so the TUI never touches state outside the
 //! Action enum — same surface the CLI and MCP use.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,6 +20,7 @@ use futures::StreamExt;
 use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
+    expand_snippet,
     keymap::{KeyContext, Keymap, Mode, Resolution},
     split_of, Action, ActionOutcome, Dispatcher, DraftPatch, Split, UnsubscribeTarget, UserConfig,
 };
@@ -41,6 +43,7 @@ pub struct App {
     pub store: Arc<SqliteStore>,
     pub scope: AccountScope,
     pub dispatcher: Dispatcher,
+    snippets: BTreeMap<String, String>,
     /// Body fetcher is optional — if creds are missing we run offline,
     /// serving whatever's already cached.
     pub body_fetchers: Arc<mach_gmail::GmailAccountPool>,
@@ -155,6 +158,7 @@ impl App {
         user_config: UserConfig,
     ) -> Result<Self> {
         let keymap = load_keymap()?;
+        let snippets = user_config.snippets.clone();
         let dispatcher =
             Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
 
@@ -210,6 +214,7 @@ impl App {
             store,
             scope,
             dispatcher,
+            snippets,
             body_fetchers,
             hyperlinks,
             search_events: None,
@@ -709,6 +714,24 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
     }
     match k.code {
         KeyCode::Tab => {
+            let target = match c.field {
+                ComposerField::To => &mut c.to,
+                ComposerField::Cc => &mut c.cc,
+                ComposerField::Bcc => &mut c.bcc,
+                ComposerField::Subject => &mut c.subject,
+                ComposerField::Body => &mut c.body,
+            };
+            if let Some((expanded, _)) = expand_snippet(target, target.len(), &app.snippets) {
+                *target = expanded;
+                return true;
+            }
+            if target
+                .rsplit(char::is_whitespace)
+                .next()
+                .is_some_and(|token| token.starts_with(';'))
+            {
+                return true;
+            }
             c.field = match c.field {
                 ComposerField::To => ComposerField::Cc,
                 ComposerField::Cc => ComposerField::Bcc,
