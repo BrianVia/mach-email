@@ -236,6 +236,13 @@ fn build_mime_raw(d: &mach_core::store::Draft, source: Option<&Message>) -> Resu
             .with_context(|| format!("reading attachment {}", attachment.path))?;
         b = b.attachment(&attachment.mime_type, &attachment.filename, bytes);
     }
+    if let Some(ics) = &d.calendar_reply_ics {
+        b = b.attachment(
+            "text/calendar; method=REPLY; charset=utf-8",
+            "invite.ics",
+            ics.as_bytes(),
+        );
+    }
     if let Some(headers) = source.and_then(|message| message.headers.as_ref()) {
         if let Some(message_id) = headers.message_id.as_deref() {
             let references = format!(
@@ -289,6 +296,7 @@ mod tests {
             subject: "Reply".into(),
             body_md: "Hello".into(),
             attachments: vec![],
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         }
     }
@@ -306,6 +314,7 @@ mod tests {
             internal_date: Utc::now(),
             body_plain: Some("Original body".into()),
             body_html: None,
+            calendar: None,
             headers,
             label_ids: vec![LabelId::new("INBOX")],
             fetched_full: true,
@@ -342,6 +351,26 @@ mod tests {
 
         assert!(!mime.contains("In-Reply-To:"));
         assert!(!mime.contains("References:"));
+    }
+
+    #[test]
+    fn mime_includes_file_and_calendar_reply_parts() {
+        let path = std::env::temp_dir().join(format!("mach-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"notes").unwrap();
+        let mut draft = draft();
+        draft.attachments.push(mach_core::store::DraftAttachment {
+            path: path.display().to_string(),
+            filename: "notes.txt".into(),
+            mime_type: "text/plain".into(),
+        });
+        draft.calendar_reply_ics =
+            Some("BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n".into());
+        let mime = decoded_mime(&draft, None);
+        std::fs::remove_file(path).unwrap();
+        assert!(mime.contains("multipart/mixed"));
+        assert!(mime.contains("notes.txt"));
+        assert!(mime.contains("Content-Type: text/calendar;"));
+        assert!(mime.contains("method=REPLY"));
     }
 
     #[test]

@@ -2718,6 +2718,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "html2text",
  "mach-core",
  "mach-gmail",
  "mach-store",

@@ -69,6 +69,7 @@ export type Message = {
   internal_date: string;
   body_plain: string | null;
   body_html: string | null;
+  calendar: CalendarInvite | null;
   headers: {
     message_id?: string;
     in_reply_to?: string;
@@ -89,6 +90,19 @@ export type DraftAttachment = {
   mime_type: string;
 };
 
+export type CalendarInvite = {
+  uid: string;
+  summary: string;
+  starts_at: string;
+  ends_at: string;
+  location: string | null;
+  organizer: string;
+  attendees: { email: string; partstat: "needs_action" | "accepted" | "declined" | "tentative" }[];
+  method: string | null;
+  sequence: number;
+  my_status: "needs_action" | "accepted" | "declined" | "tentative" | null;
+};
+
 export type UnsubscribeTarget =
   | { kind: "https"; url: string; one_click: boolean }
   | { kind: "mailto"; to: string; subject: string };
@@ -104,7 +118,17 @@ export type Draft = {
   subject: string;
   body_md: string;
   attachments: DraftAttachment[];
+  calendar_reply_ics: string | null;
   updated_at: string;
+};
+
+export type ScheduledSend = {
+  send_later_id: string;
+  draft_id: string;
+  send_at: string;
+  subject: string;
+  to: string[];
+  account_id: string;
 };
 
 export type ActionOutcome = {
@@ -143,6 +167,17 @@ export type OutboxSummary = {
   pending: number;
   failed: number;
   last_error: string | null;
+};
+
+export type ActivityEntry = {
+  id: number;
+  account_id: string;
+  at: string;
+  kind: string;
+  thread_ids: string[];
+  summary: string;
+  state: string;
+  undone: boolean;
 };
 
 export type LoadOlderStats = {
@@ -203,6 +238,19 @@ export async function listLabels(): Promise<Label[]> {
   return unwrap(r);
 }
 
+export async function listScheduled(): Promise<ScheduledSend[]> {
+  const result = await invoke<Out<ScheduledSend[]> | null>("list_scheduled");
+  return result ? unwrap(result) : [];
+}
+
+export async function openDraft(draftId: string): Promise<Draft> {
+  return unwrap(await invoke<Out<Draft>>("open_draft", { draftId }));
+}
+
+export async function fetchSendLaterPresets(): Promise<[string, string][]> {
+  return invoke<[string, string][]>("send_later_presets");
+}
+
 export async function loadOlder(label: string, beforeMs: number): Promise<LoadOlderStats> {
   const result = await invoke<Out<LoadOlderStats>>("load_older", { label, beforeMs });
   return unwrap(result);
@@ -250,6 +298,10 @@ export async function fetchSettings(): Promise<Settings> {
   return invoke<Settings>("settings");
 }
 
+export async function fetchSnippets(): Promise<Record<string, string>> {
+  return invoke<Record<string, string>>("snippets");
+}
+
 export async function fetchAccountStatus(): Promise<AccountStatus> {
   return invoke<AccountStatus>("account_status");
 }
@@ -277,6 +329,10 @@ export async function unsubscribeMailto(accountId: string, to: string, subject: 
 
 export async function fetchOutboxSummary(): Promise<OutboxSummary> {
   return unwrap(await invoke<Out<OutboxSummary>>("outbox_summary"));
+}
+
+export async function listActivity(sinceMs = 0, limit = 50): Promise<ActivityEntry[]> {
+  return unwrap(await invoke<Out<ActivityEntry[]>>("list_activity", { sinceMs, limit }));
 }
 
 export async function retryOutbox(): Promise<number> {

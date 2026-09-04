@@ -6,16 +6,28 @@
   import { renderEmailHtml } from "../lib/html";
   import { avatarColor, initialsFor } from "../lib/avatar";
 
-  let { v, onUnsubscribe, onAttachmentSaved, onError }: {
+  let { v, onUnsubscribe, onAttachmentSaved, onError, onRespond }: {
     v: { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number };
     onUnsubscribe: (messageId: string) => void;
     onAttachmentSaved: (path: string) => void;
     onError: (error: unknown) => void;
+    onRespond: (messageId: string, response: "accepted" | "tentative" | "declined") => Promise<void>;
   } = $props();
   let overrides = $state<Record<string, boolean>>({});
   let shownRemoteImages = $state<Record<string, boolean>>({});
   let remoteImageAllow = $state(loadRemoteImageAllow());
   let previousSelected = $state<number | null>(null);
+  let inviteReplies = $state<Record<string, "sending" | "sent" | "failed">>({});
+
+  async function respond(messageId: string, response: "accepted" | "tentative" | "declined") {
+    inviteReplies[messageId] = "sending";
+    try {
+      await onRespond(messageId, response);
+      inviteReplies[messageId] = "sent";
+    } catch {
+      inviteReplies[messageId] = "failed";
+    }
+  }
 
   function loadRemoteImageAllow(): string[] {
     try {
@@ -126,6 +138,27 @@
             {#if !message.fetched_full}
               <p class="preview-only">Preview only — full message not fetched yet. Press <kbd>⌃R</kbd> to retry.</p>
             {/if}
+            {#if message.calendar}
+              <section class="invite-card">
+                <div>
+                  <strong>{message.calendar.summary}</strong>
+                  <p>{new Date(message.calendar.starts_at).toLocaleString()}–{new Date(message.calendar.ends_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</p>
+                  {#if message.calendar.location}<p>{message.calendar.location}</p>{/if}
+                  <p>Organizer: {message.calendar.organizer}</p>
+                  {#if message.calendar.my_status}<p>Status: {message.calendar.my_status.replace("_", " ")}</p>{/if}
+                </div>
+                {#if inviteReplies[message.id] === "sent"}
+                  <span class="reply-sent">Reply sent</span>
+                {:else}
+                  <div class="invite-actions">
+                    <button type="button" disabled={inviteReplies[message.id] === "sending"} onclick={() => respond(message.id, "accepted")}>Accept</button>
+                    <button type="button" disabled={inviteReplies[message.id] === "sending"} onclick={() => respond(message.id, "tentative")}>Tentative</button>
+                    <button type="button" disabled={inviteReplies[message.id] === "sending"} onclick={() => respond(message.id, "declined")}>Decline</button>
+                    {#if inviteReplies[message.id] === "failed"}<span>Reply failed</span>{/if}
+                  </div>
+                {/if}
+              </section>
+            {/if}
             {#if message.body_html && message.body_html.length > 0}
               {@const email = senderEmail(message.from).toLowerCase()}
               {@const rendered = renderEmailHtml(message, { showRemote: shownRemoteImages[message.id] || remoteImageAllow.includes(email) })}
@@ -189,6 +222,14 @@
   .preview-only kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
   .remote-images-bar { display: flex; gap: 6px; align-items: center; padding: 7px 20px; color: var(--muted); font-size: 11.5px; }
   .remote-images-bar button { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; }
+  .invite-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 20px 16px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+  .invite-card strong { color: var(--text); }
+  .invite-card p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .invite-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .invite-actions button { padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+  .invite-actions button:disabled { opacity: .5; cursor: wait; }
+  .invite-actions span { width: 100%; color: var(--danger); font-size: 11px; text-align: right; }
+  .reply-sent { color: var(--success); font-size: 12px; white-space: nowrap; }
   .plain { white-space: pre-wrap; }
   :global(.mach-html img) { display: block; max-width: 100%; height: auto; border-radius: 6px; }
   :global(.mach-html a) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }

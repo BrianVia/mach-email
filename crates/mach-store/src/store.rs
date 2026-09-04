@@ -6,8 +6,8 @@ use mach_core::{
     ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId},
     search_query::SearchQuery,
     store::{
-        AttachmentRef, Draft, DraftAttachment, Label, MailStore, Message, MessageHeaders, OutboxOp,
-        OutboxOpKind, OutboxSummary, ThreadSummary,
+        ActivityEntry, AttachmentRef, Draft, DraftAttachment, Label, MailStore, Message,
+        MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary, ScheduledSend, ThreadSummary,
     },
 };
 use rusqlite::{params, params_from_iter, types::Value, OptionalExtension, Row};
@@ -186,6 +186,7 @@ pub struct MessageBodyUpdate {
     pub id: String,
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
+    pub calendar_ics: Option<String>,
     /// JSON-encoded `Vec<InlineImageRef>` if the message has inline images.
     pub inline_images_json: Option<String>,
 }
@@ -668,6 +669,7 @@ impl SqliteStore {
                        SET body_plain         = NULL,
                            body_html          = NULL,
                            inline_images_json = NULL,
+                           calendar_ics       = NULL,
                            fetched_full       = 0
                      WHERE account_id = ?1 AND thread_id = ?2",
                     params![account.as_str(), tid],
@@ -701,12 +703,14 @@ impl SqliteStore {
                          SET body_plain         = ?1,
                              body_html          = ?2,
                              inline_images_json = ?3,
+                             calendar_ics       = ?4,
                              fetched_full       = 1
-                         WHERE account_id = ?4 AND id = ?5",
+                         WHERE account_id = ?5 AND id = ?6",
                         params![
                             u.body_plain,
                             u.body_html,
                             u.inline_images_json,
+                            u.calendar_ics,
                             account.as_str(),
                             u.id
                         ],
@@ -775,8 +779,13 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         .unwrap_or_default();
     let headers_json: Option<String> = row.get("headers_json")?;
     let attachments_json: String = row.get("attachments_json")?;
+    let account_id = AccountId::new(row.get::<_, String>("account_id")?);
+    let calendar_ics: Option<String> = row.get("calendar_ics")?;
+    let calendar = calendar_ics
+        .as_deref()
+        .and_then(|ics| mach_core::parse_calendar(ics, account_id.as_str()));
     Ok(Message {
-        account_id: AccountId::new(row.get::<_, String>("account_id")?),
+        account_id,
         id: MessageId::new(row.get::<_, String>("id")?),
         thread_id: ThreadId::new(row.get::<_, String>("thread_id")?),
         from: row.get("from_addr")?,
@@ -790,6 +799,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         internal_date: ms_to_dt(row.get("internal_date")?),
         body_plain: row.get("body_plain")?,
         body_html: row.get("body_html")?,
+        calendar,
         headers: headers_json
             .as_deref()
             .and_then(|value| serde_json::from_str::<MessageHeaders>(value).ok()),
@@ -834,6 +844,7 @@ fn row_to_draft(row: &Row) -> rusqlite::Result<Draft> {
         body_md: row.get("body_md")?,
         attachments: serde_json::from_str::<Vec<DraftAttachment>>(&attachments_json)
             .unwrap_or_default(),
+        calendar_reply_ics: row.get("calendar_reply_ics")?,
         updated_at: ms_to_dt(row.get("updated_at")?),
     })
 }
@@ -996,7 +1007,7 @@ impl MailStore for SqliteStore {
                                 'size', COALESCE(a.size, 0)))
                              FROM attachments a
                              WHERE a.account_id = messages.account_id AND a.message_id = messages.id)
-                            AS attachments_json
+                            AS attachments_json, calendar_ics
                      FROM messages
                      WHERE account_id = ?1 AND thread_id = ?2
                      ORDER BY internal_date",
@@ -1034,7 +1045,7 @@ impl MailStore for SqliteStore {
                                 'size', COALESCE(a.size, 0)))
                              FROM attachments a
                              WHERE a.account_id = messages.account_id AND a.message_id = messages.id)
-                            AS attachments_json
+                            AS attachments_json, calendar_ics
                      FROM messages
                      WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
                      LIMIT 2",
@@ -1305,7 +1316,7 @@ impl MailStore for SqliteStore {
                 .prepare_cached(
                     "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
                             to_addrs, cc_addrs, bcc_addrs, subject, body_md, attachments_json,
-                            updated_at
+                            updated_at, calendar_reply_ics
                      FROM drafts WHERE account_id = ?1 AND id = ?2",
                 )
                 .map_err(map_err)?;
@@ -1327,7 +1338,7 @@ impl MailStore for SqliteStore {
                 .prepare_cached(
                     "SELECT account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
                             to_addrs, cc_addrs, bcc_addrs, subject, body_md, attachments_json,
-                            updated_at
+                            updated_at, calendar_reply_ics
                      FROM drafts
                      WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)
                      LIMIT 2",
@@ -1356,8 +1367,8 @@ impl MailStore for SqliteStore {
             conn.execute(
                 "INSERT INTO drafts (account_id, id, gmail_draft_id, thread_id, in_reply_to_message_id,
                                      to_addrs, cc_addrs, bcc_addrs, subject, body_md,
-                                     attachments_json, updated_at, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'draft')
+                                     attachments_json, updated_at, state, calendar_reply_ics)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'draft', ?13)
                  ON CONFLICT(account_id, id) DO UPDATE SET
                    gmail_draft_id         = excluded.gmail_draft_id,
                    thread_id              = excluded.thread_id,
@@ -1368,6 +1379,7 @@ impl MailStore for SqliteStore {
                    subject                = excluded.subject,
                    body_md                = excluded.body_md,
                    attachments_json       = excluded.attachments_json,
+                   calendar_reply_ics     = excluded.calendar_reply_ics,
                    updated_at             = excluded.updated_at",
                 params![
                     draft.account_id.as_str(),
@@ -1385,6 +1397,7 @@ impl MailStore for SqliteStore {
                     draft.body_md,
                     serde_json::to_string(&draft.attachments)?,
                     dt_to_ms(&draft.updated_at),
+                    draft.calendar_reply_ics,
                 ],
             )
             .map_err(map_err)?;
@@ -1478,6 +1491,63 @@ impl MailStore for SqliteStore {
                 ],
             )
             .map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Vec<ScheduledSend>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT s.id, s.draft_id, s.send_at, d.subject, d.to_addrs, s.account_id
+                     FROM send_later s
+                     JOIN drafts d ON d.account_id = s.account_id AND d.id = s.draft_id
+                     WHERE s.state = 'scheduled' AND (?1 IS NULL OR s.account_id = ?1)
+                     ORDER BY s.send_at",
+                )
+                .map_err(map_err)?;
+            let sends = stmt
+                .query_map(params![account], |row| {
+                    let to: String = row.get(4)?;
+                    Ok(ScheduledSend {
+                        send_later_id: row.get(0)?,
+                        draft_id: DraftId::new(row.get::<_, String>(1)?),
+                        send_at: ms_to_dt(row.get(2)?),
+                        subject: row.get(3)?,
+                        to: serde_json::from_str(&to).unwrap_or_default(),
+                        account_id: AccountId::new(row.get::<_, String>(5)?),
+                    })
+                })
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(sends)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        let send_later_id = send_later_id.to_string();
+        spawn_blocking(move || -> CoreResult<()> {
+            let conn = pool.get().map_err(map_err)?;
+            let changed = conn
+                .execute(
+                    "UPDATE send_later SET state = 'cancelled'
+                     WHERE account_id = ?1 AND id = ?2 AND state = 'scheduled'",
+                    params![account.as_str(), send_later_id],
+                )
+                .map_err(map_err)?;
+            if changed == 0 {
+                return Err(CoreError::NotFound("scheduled send not found".into()));
+            }
             Ok(())
         })
         .await
@@ -1713,6 +1783,85 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
+    async fn list_activity(
+        &self,
+        scope: &AccountScope,
+        since_ms: i64,
+        limit: u32,
+    ) -> CoreResult<Vec<ActivityEntry>> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Vec<ActivityEntry>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, account_id, op_id, op_kind, payload_json, created_at,
+                            attempts, last_error, state, undone_by
+                     FROM outbox
+                     WHERE (?1 IS NULL OR account_id = ?1) AND created_at >= ?2
+                     ORDER BY created_at DESC, id DESC LIMIT ?3",
+                )
+                .map_err(map_err)?;
+            let entries = stmt
+                .query_map(params![account, since_ms, limit], |row| {
+                    let op = row_to_outbox(row)?;
+                    Ok(ActivityEntry::from_outbox(
+                        &op,
+                        row.get("state")?,
+                        row.get::<_, Option<i64>>("undone_by")?.is_some(),
+                    ))
+                })
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(entries)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn get_outbox_op(&self, scope: &AccountScope, id: i64) -> CoreResult<Option<OutboxOp>> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Option<OutboxOp>> {
+            pool.get()
+                .map_err(map_err)?
+                .query_row(
+                    "SELECT id, account_id, op_id, op_kind, payload_json, created_at,
+                            attempts, last_error
+                     FROM outbox WHERE id = ?1 AND (?2 IS NULL OR account_id = ?2)",
+                    params![id, account],
+                    row_to_outbox,
+                )
+                .optional()
+                .map_err(map_err)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn mark_outbox_undone(&self, id: i64, undone_by: i64) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        spawn_blocking(move || -> CoreResult<()> {
+            let changed = pool
+                .get()
+                .map_err(map_err)?
+                .execute(
+                    "UPDATE outbox SET undone_by = ?1 WHERE id = ?2 AND undone_by IS NULL",
+                    params![undone_by, id],
+                )
+                .map_err(map_err)?;
+            if changed == 0 {
+                return Err(CoreError::InvalidAction(format!(
+                    "activity {id} was not found or is already undone"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>> {
         let pool = self.pool.clone();
         let account = account.clone();
@@ -1785,6 +1934,7 @@ mod tests {
             subject: "Subject".into(),
             body_md: "Body".into(),
             attachments: vec![],
+            calendar_reply_ics: None,
             updated_at: Utc::now(),
         }
     }
@@ -1866,6 +2016,32 @@ mod tests {
         let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert!(matches!(pending[0].kind, OutboxOpKind::ModifyLabels { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_activity_summarizes_modify_labels() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "t1", "one", "body", &["INBOX"]);
+        seed(&pool, "t2", "two", "body", &["INBOX"]);
+        let store = SqliteStore::new(pool);
+        store
+            .apply_thread_mutation(
+                &scope(),
+                &OpId::new(),
+                &OutboxOpKind::ModifyLabels {
+                    thread_ids: vec![ThreadId::new("t1"), ThreadId::new("t2")],
+                    add: Vec::new(),
+                    remove: vec![LabelId::new("INBOX")],
+                },
+            )
+            .await
+            .unwrap();
+
+        let activity = store.list_activity(&scope(), 0, 50).await.unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].summary, "Archived 2 threads");
+        assert_eq!(activity[0].thread_ids.len(), 2);
+        assert!(!activity[0].undone);
     }
 
     #[tokio::test]
@@ -2148,6 +2324,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduled_send_lists_joined_draft_and_cancel_keeps_draft() {
+        let pool = open_in_memory().unwrap();
+        let store = SqliteStore::new(pool.clone());
+        let draft = draft("scheduled");
+        let at = Utc::now() + chrono::Duration::hours(1);
+        store.save_draft_local(&draft).await.unwrap();
+        store
+            .schedule_send(&account(), &draft.id, at)
+            .await
+            .unwrap();
+
+        let sends = store.list_scheduled(&scope()).await.unwrap();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].draft_id, draft.id);
+        assert_eq!(sends[0].subject, draft.subject);
+        assert_eq!(sends[0].to, draft.to);
+
+        store
+            .cancel_scheduled(&account(), &sends[0].send_later_id)
+            .await
+            .unwrap();
+        assert!(store.list_scheduled(&scope()).await.unwrap().is_empty());
+        assert!(store
+            .get_draft(&account(), &draft.id)
+            .await
+            .unwrap()
+            .is_some());
+        let state: String = pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM send_later WHERE account_id = ?1 AND id = ?2",
+                params![account().as_str(), sends[0].send_later_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "cancelled");
+    }
+
+    #[tokio::test]
     async fn complete_send_atomically_finishes_outbox_draft_and_schedule() {
         let pool = open_in_memory().unwrap();
         let store = SqliteStore::new(pool.clone());
@@ -2311,6 +2527,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(message.headers, Some(headers));
+    }
+
+    #[tokio::test]
+    async fn body_update_persists_parsed_calendar() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "invite", "subject", "body", &["INBOX"]);
+        let store = SqliteStore::new(pool);
+        store
+            .update_message_bodies(
+                &account(),
+                vec![MessageBodyUpdate {
+                    id: "invite-m".into(),
+                    body_plain: Some("body".into()),
+                    body_html: None,
+                    calendar_ics: Some("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:event-1\r\nSUMMARY:Planning\r\nDTSTART:20260908T140000Z\r\nDTEND:20260908T143000Z\r\nORGANIZER:mailto:alice@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:test@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".into()),
+                    inline_images_json: None,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let message = store
+            .get_message(&scope(), &MessageId::new("invite-m"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.calendar.unwrap().uid, "event-1");
     }
 
     #[tokio::test]

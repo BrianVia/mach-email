@@ -29,6 +29,8 @@ use crate::client::MessagePayload;
 pub struct ParsedBody {
     pub plain: Option<String>,
     pub html: Option<String>,
+    pub calendar: Option<String>,
+    pub calendar_attachment_id: Option<String>,
     /// Inline image attachments referenced from `body_html` via `cid:`.
     /// Populated only when at least one `image/*` part with a `Content-ID`
     /// header is seen during the MIME walk.
@@ -319,7 +321,12 @@ fn walk(p: &MessagePayload, out: &mut ParsedBody, attachments: &mut Vec<Attachme
     // Leaf with data → maybe slot it in.
     if let Some(body) = &p.body {
         if body.attachment_id.is_some() {
-            // attachment — body bytes aren't inline; skip.
+            if matches!(mime, "text/calendar" | "application/ics")
+                && out.calendar.is_none()
+                && out.calendar_attachment_id.is_none()
+            {
+                out.calendar_attachment_id = body.attachment_id.clone();
+            }
         } else if let Some(data) = &body.data {
             match mime {
                 "text/plain" if out.plain.is_none() => {
@@ -330,6 +337,13 @@ fn walk(p: &MessagePayload, out: &mut ParsedBody, attachments: &mut Vec<Attachme
                 "text/html" if out.html.is_none() => {
                     if let Some(s) = decode_b64url(data) {
                         out.html = Some(s);
+                    }
+                }
+                "text/calendar" | "application/ics"
+                    if out.calendar.is_none() && out.calendar_attachment_id.is_none() =>
+                {
+                    if let Some(s) = decode_b64url(data) {
+                        out.calendar = Some(s);
                     }
                 }
                 _ => {
@@ -407,6 +421,24 @@ mod tests {
         let body = extract(&leaf("text/plain", "hello world"));
         assert_eq!(body.plain.as_deref(), Some("hello world"));
         assert!(body.html.is_none());
+    }
+
+    #[test]
+    fn extracts_first_calendar_part() {
+        let payload = MessagePayload {
+            headers: vec![],
+            filename: None,
+            mime_type: Some("multipart/mixed".into()),
+            body: None,
+            parts: Some(vec![
+                leaf("text/calendar", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"),
+                leaf("text/calendar", "ignored"),
+            ]),
+        };
+        assert_eq!(
+            extract(&payload).calendar.as_deref(),
+            Some("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+        );
     }
 
     #[test]

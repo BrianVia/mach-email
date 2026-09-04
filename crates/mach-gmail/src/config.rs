@@ -26,6 +26,18 @@ pub enum OAuthConfigSource {
     File,
 }
 
+pub fn pubsub_topic() -> Option<String> {
+    nonempty_env("MACH_PUBSUB_TOPIC")
+}
+
+pub fn pubsub_subscription() -> Option<String> {
+    nonempty_env("MACH_PUBSUB_SUBSCRIPTION")
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("could not resolve OS application-data directory")]

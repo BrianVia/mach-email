@@ -6,9 +6,10 @@
 //! `get_thread_metadata`. Mutating endpoints (modify, send, drafts) come
 //! with the outbox-drain follow-up.
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -19,6 +20,7 @@ use crate::credentials::{self, StoredCredentials};
 use crate::oauth;
 
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
+const PUBSUB_BASE: &str = "https://pubsub.googleapis.com/v1";
 
 pub struct GmailClient {
     config: OAuthConfig,
@@ -137,6 +139,27 @@ impl GmailClient {
 
     pub async fn get_profile(&self) -> Result<Profile> {
         self.get_json(&format!("{BASE}/profile")).await
+    }
+
+    pub async fn watch(&self, topic_name: &str) -> Result<i64> {
+        let response: WatchResponse = self
+            .post_json_with_response(
+                &format!("{BASE}/watch"),
+                &serde_json::json!({
+                    "topicName": topic_name,
+                    "labelIds": ["INBOX"],
+                }),
+            )
+            .await?;
+        response
+            .expiration
+            .parse()
+            .context("parsing Gmail watch expiration")
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        self.post_json(&format!("{BASE}/stop"), &serde_json::json!({}))
+            .await
     }
 
     pub async fn list_labels(&self) -> Result<Vec<RemoteLabel>> {
@@ -360,6 +383,77 @@ impl GmailClient {
     }
 }
 
+pub async fn pubsub_pull_loop<F, Fut>(
+    client: Arc<GmailClient>,
+    subscription: &str,
+    on_message: F,
+) -> Result<()>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let pull_url = format!("{PUBSUB_BASE}/{subscription}:pull");
+    let ack_url = format!("{PUBSUB_BASE}/{subscription}:acknowledge");
+    loop {
+        let response: PullResponse = client
+            .post_json_with_response(
+                &pull_url,
+                &serde_json::json!({ "returnImmediately": false, "maxMessages": 10 }),
+            )
+            .await?;
+        for received in response.received_messages {
+            match decode_pubsub_message(&received.message.data) {
+                Ok(notification) => on_message(notification.email_address).await,
+                Err(error) => warn!(%error, "discarding malformed Pub/Sub notification"),
+            }
+            client
+                .post_json(
+                    &ack_url,
+                    &serde_json::json!({ "ackIds": [received.ack_id] }),
+                )
+                .await?;
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchResponse {
+    expiration: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullResponse {
+    #[serde(default)]
+    received_messages: Vec<ReceivedMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReceivedMessage {
+    ack_id: String,
+    message: PubSubMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct PubSubMessage {
+    data: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PubSubNotification {
+    pub email_address: String,
+    pub history_id: String,
+}
+
+pub fn decode_pubsub_message(data: &str) -> Result<PubSubNotification> {
+    let json = STANDARD
+        .decode(data)
+        .context("decoding Pub/Sub message data")?;
+    serde_json::from_slice(&json).context("parsing Pub/Sub message data")
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Profile {
     #[serde(rename = "emailAddress")]
@@ -519,5 +613,22 @@ impl RemoteMessage {
 
     pub fn internal_date_ms(&self) -> i64 {
         self.internal_date.parse().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_pubsub_message_payload() {
+        let data = STANDARD.encode(br#"{"emailAddress":"me@example.com","historyId":"987"}"#);
+        assert_eq!(
+            decode_pubsub_message(&data).unwrap(),
+            PubSubNotification {
+                email_address: "me@example.com".into(),
+                history_id: "987".into(),
+            }
+        );
     }
 }

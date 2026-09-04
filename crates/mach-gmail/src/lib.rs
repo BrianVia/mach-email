@@ -18,12 +18,12 @@ pub use body_fetcher::{
     fetch_attachment_cached, guess_mime_type, save_attachment_to_downloads, BodyFetcher,
     FetchOutcome, GmailAccountPool, PullReport, RemoteSearchReport,
 };
-pub use client::GmailClient;
+pub use client::{pubsub_pull_loop, GmailClient};
 pub use config::OAuthConfig;
 pub use credentials::{CredsError, StoredCredentials};
 pub use outbox::{DrainStats, OutboxWorker};
 pub use sync::{
-    bootstrap, incremental_sync, load_older, sync_account_tick, BootstrapStats, IncrementalStats,
-    LoadOlderStats, TickReport,
+    bootstrap, incremental_sync, load_older, should_renew, sync_account_tick, BootstrapStats,
+    IncrementalStats, LoadOlderStats, TickReport,
 };
 pub use unsubscribe::one_click_unsubscribe;

@@ -18,3 +18,4 @@ tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
+html2text.workspace = true

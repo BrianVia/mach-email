@@ -17,6 +17,7 @@ use mach_core::{
     store::{MailStore, ThreadSummary},
 };
 use mach_store::{MessageBodyUpdate, SqliteStore};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::body::{self, ParsedBody};
@@ -126,6 +127,7 @@ pub struct BodyFetcher {
     account: AccountId,
     client: Arc<GmailClient>,
     store: Arc<SqliteStore>,
+    sync_lock: Mutex<()>,
 }
 
 /// Account-indexed Gmail services. This is the only owner of choosing which
@@ -163,6 +165,7 @@ impl BodyFetcher {
             account,
             client,
             store,
+            sync_lock: Mutex::new(()),
         }
     }
 
@@ -177,6 +180,11 @@ impl BodyFetcher {
 
     pub fn client(&self) -> &Arc<GmailClient> {
         &self.client
+    }
+
+    pub async fn sync_tick(&self) -> Result<crate::sync::TickReport> {
+        let _guard = self.sync_lock.lock().await;
+        crate::sync::sync_account_tick(&self.account, self.client.clone(), self.store.clone()).await
     }
 
     /// Check the local cache; if any message in the thread lacks a full body,
@@ -203,23 +211,35 @@ impl BodyFetcher {
             .await
             .with_context(|| format!("get_thread_full({thread_id})"))?;
 
-        let parsed: Vec<_> = full
-            .messages
-            .iter()
-            .map(|message| (message, parse_message(message)))
-            .collect();
-
-        let updates = parsed
-            .iter()
-            .map(|(message, body)| message_body_update(message, body))
-            .collect();
+        let mut parsed_messages = Vec::with_capacity(full.messages.len());
+        let mut updates = Vec::with_capacity(full.messages.len());
+        for message in &full.messages {
+            let mut parsed = message
+                .payload
+                .as_ref()
+                .map(body::extract)
+                .unwrap_or_default();
+            if parsed.calendar.is_none() {
+                if let Some(attachment_id) = parsed.calendar_attachment_id.as_deref() {
+                    let bytes = self
+                        .client
+                        .get_attachment_bytes(&message.id, attachment_id)
+                        .await
+                        .context("fetching calendar attachment")?;
+                    parsed.calendar =
+                        Some(String::from_utf8(bytes).context("calendar attachment is not UTF-8")?);
+                }
+            }
+            updates.push(parse_message_into_update(message, &parsed));
+            parsed_messages.push((message, parsed));
+        }
 
         let touched = self
             .store
             .update_message_bodies(&self.account, updates)
             .await
             .context("persisting full bodies")?;
-        for (message, body) in parsed {
+        for (message, body) in parsed_messages {
             self.store
                 .upsert_attachments(&self.account, &message.id, body.attachments)
                 .await
@@ -271,6 +291,13 @@ impl GmailAccountPool {
 
     pub fn is_empty(&self) -> bool {
         self.fetchers.is_empty()
+    }
+
+    pub fn pubsub_client(&self) -> Option<Arc<GmailClient>> {
+        self.fetchers
+            .values()
+            .next()
+            .map(|fetcher| fetcher.client.clone())
     }
 
     /// Pull new Gmail history for every account in scope. This deliberately
@@ -414,6 +441,12 @@ impl GmailAccountPool {
 
 impl BodyFetcher {
     async fn pull_updates(&self) -> Result<()> {
+        let _guard = self.sync_lock.lock().await;
+        if let Err(error) =
+            crate::sync::ensure_watch(&self.account, &self.client, &self.store).await
+        {
+            warn!(account = %self.account, %error, "Gmail watch renewal failed; polling remains active");
+        }
         if self
             .store
             .get_history_cursor(&self.account)
@@ -428,11 +461,7 @@ impl BodyFetcher {
     }
 }
 
-fn parse_message(m: &RemoteMessage) -> ParsedBody {
-    m.payload.as_ref().map(body::extract).unwrap_or_default()
-}
-
-fn message_body_update(m: &RemoteMessage, parsed: &ParsedBody) -> MessageBodyUpdate {
+fn parse_message_into_update(m: &RemoteMessage, parsed: &ParsedBody) -> MessageBodyUpdate {
     // Prefer raw plain. Fall back to html→text via html2text inside
     // ParsedBody::effective_plain. We persist both: body_plain feeds the
     // FTS5 index + TUI; body_html sticks around for the desktop renderer.
@@ -448,6 +477,7 @@ fn message_body_update(m: &RemoteMessage, parsed: &ParsedBody) -> MessageBodyUpd
         id: m.id.clone(),
         body_plain,
         body_html,
+        calendar_ics: parsed.calendar.clone(),
         inline_images_json,
     }
 }
