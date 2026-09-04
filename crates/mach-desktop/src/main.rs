@@ -10,12 +10,13 @@
 
 mod commands;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use mach_core::ids::AccountScope;
+use mach_core::ids::{AccountId, AccountScope};
 use mach_core::Dispatcher;
 use mach_core::UserConfig;
 use mach_gmail::GmailAccountPool;
@@ -30,6 +31,7 @@ pub struct AppState {
     pub default_keymap_toml: String,
     pub user_keymap_toml: Option<String>,
     pub account_emails: Vec<String>,
+    pub synced_accounts: Arc<Mutex<HashSet<AccountId>>>,
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -123,6 +125,7 @@ async fn main() -> Result<()> {
         default_keymap_toml: mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string(),
         user_keymap_toml: load_user_keymap_toml(),
         account_emails,
+        synced_accounts: Arc::new(Mutex::new(HashSet::new())),
     };
 
     let cache_dir = ProjectDirs::from("com", "via", "mach")
@@ -131,6 +134,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cache_dir).ok();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             use tauri::Manager;
@@ -139,12 +143,14 @@ async fn main() -> Result<()> {
             let state = app.state::<AppState>();
             let store = state.store.clone();
             let body_fetchers = state.body_fetchers.clone();
+            let synced_accounts = state.synced_accounts.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    commands::sync_accounts(&app_handle, &store, &body_fetchers).await;
+                    commands::sync_accounts(&app_handle, &store, &body_fetchers, &synced_accounts)
+                        .await;
                 }
             });
             Ok(())

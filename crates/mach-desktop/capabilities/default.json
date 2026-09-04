@@ -18,6 +18,7 @@
     "core:event:default",
     "core:path:default",
     "core:menu:default",
-    "opener:default"
+    "opener:default",
+    "notification:default"
   ]
 }

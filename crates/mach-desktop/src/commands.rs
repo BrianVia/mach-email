@@ -8,12 +8,13 @@
 //! need optimistic-update semantics.
 
 use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::store::{Draft, Label, MailStore};
+use mach_core::store::{Draft, Label, MailStore, ThreadSummary};
 use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
 use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
 use serde::Serialize;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use tracing::warn;
 
@@ -39,6 +40,7 @@ impl<T> Out<T> {
 #[derive(Clone, Serialize)]
 struct MailSyncedPayload {
     account: String,
+    new_threads: Vec<ThreadSummary>,
 }
 
 #[derive(Clone, Serialize)]
@@ -58,6 +60,17 @@ fn tick_changed(report: &TickReport) -> bool {
             .is_some_and(|stats| stats.events > 0)
 }
 
+pub(crate) fn new_thread_ids(
+    before: &HashSet<ThreadId>,
+    after: &[ThreadSummary],
+) -> Vec<ThreadSummary> {
+    after
+        .iter()
+        .filter(|thread| !before.contains(&thread.id))
+        .cloned()
+        .collect()
+}
+
 fn emit_sync_event<T: Clone + Serialize>(app: &AppHandle, event: &str, payload: T) {
     if let Err(error) = app.emit_to("main", event, payload) {
         warn!(event, error = %error, "emitting sync event failed");
@@ -68,6 +81,7 @@ pub(crate) async fn sync_accounts(
     app: &AppHandle,
     store: &Arc<SqliteStore>,
     accounts: &GmailAccountPool,
+    synced_accounts: &Mutex<HashSet<AccountId>>,
 ) -> serde_json::Value {
     let mut synced = 0;
     let mut failed = 0;
@@ -81,15 +95,43 @@ pub(crate) async fn sync_accounts(
             continue;
         }
         let email = account.as_str().to_string();
+        let scope = AccountScope::One(account.clone());
+        let before = store
+            .list_threads_in_label(&scope, &LabelId::new("INBOX"), 500)
+            .await
+            .map(|threads| threads.into_iter().map(|thread| thread.id).collect());
         match sync_account_tick(account, fetcher.client().clone(), store.clone()).await {
             Ok(report) => {
                 synced += 1;
-                if tick_changed(&report) {
+                let seen_before = !synced_accounts
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(account.clone());
+                let new_threads = if seen_before {
+                    match before {
+                        Ok(before) => store
+                            .list_threads_in_label(&scope, &LabelId::new("INBOX"), 500)
+                            .await
+                            .map(|after| new_thread_ids(&before, &after))
+                            .unwrap_or_else(|error| {
+                                warn!(account = %account, error = %error, "loading new inbox threads failed");
+                                Vec::new()
+                            }),
+                        Err(error) => {
+                            warn!(account = %account, error = %error, "snapshotting inbox threads failed");
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                if seen_before && (tick_changed(&report) || !new_threads.is_empty()) {
                     emit_sync_event(
                         app,
                         "mail-synced",
                         MailSyncedPayload {
                             account: email.clone(),
+                            new_threads,
                         },
                     );
                 }
@@ -285,8 +327,47 @@ pub async fn sync_now(
     state: State<'_, AppState>,
 ) -> Result<Out<serde_json::Value>, String> {
     Ok(Out::ok(
-        sync_accounts(&app, &state.store, &state.body_fetchers).await,
+        sync_accounts(
+            &app,
+            &state.store,
+            &state.body_fetchers,
+            &state.synced_accounts,
+        )
+        .await,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use mach_core::ids::AccountId;
+
+    fn thread(id: &str) -> ThreadSummary {
+        ThreadSummary {
+            account_id: AccountId::new("me@example.com"),
+            id: ThreadId::new(id),
+            subject: String::new(),
+            snippet: String::new(),
+            participants: Vec::new(),
+            last_message_at: Utc::now(),
+            message_count: 1,
+            unread: true,
+            starred: false,
+            label_ids: vec![LabelId::new("INBOX")],
+        }
+    }
+
+    #[test]
+    fn finds_only_new_thread_summaries() {
+        let before = HashSet::from([ThreadId::new("existing")]);
+        let after = vec![thread("new"), thread("existing")];
+
+        let found = new_thread_ids(&before, &after);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, ThreadId::new("new"));
+    }
 }
 
 #[tauri::command]

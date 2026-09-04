@@ -1,9 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import {
+    isPermissionGranted,
+    onAction,
+    requestPermission,
+    sendNotification,
+  } from "@tauri-apps/plugin-notification";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keymap";
   import { threadToMarkdown } from "./lib/markdown";
+  import { batchNotifications } from "./lib/notify";
   import {
     dispatchAction,
     fetchAccountStatus,
@@ -68,6 +76,8 @@
   let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "" };
+  let pendingNotificationThread: ThreadSummary | null = null;
+  const notificationThreads = new Map<string, ThreadSummary>();
 
   function composerTitle(draft: Draft) {
     if (draft.in_reply_to_message_id) return "Reply";
@@ -180,7 +190,7 @@
     };
   }
 
-  function handleMailSynced(_payload: MailSyncedPayload) {
+  function handleMailSynced(payload: MailSyncedPayload) {
     void listLabels().then((next) => (labels = next)).catch((error) => {
       console.warn("[mach] refreshing labels after sync failed", error);
     });
@@ -189,6 +199,41 @@
         console.warn("[mach] refreshing inbox after sync failed", error);
       });
     }
+    if (
+      payload.new_threads.length
+      && localStorage.getItem("mach.notifications") !== "off"
+      && !(document.hasFocus() && view.kind === "inbox" && view.label === "INBOX")
+    ) {
+      void notifyNewThreads(payload.new_threads);
+    }
+  }
+
+  async function notifyNewThreads(threads: ThreadSummary[]) {
+    let granted = await isPermissionGranted();
+    if (!granted) granted = await requestPermission() === "granted";
+    if (!granted) return;
+    pendingNotificationThread = threads[0];
+    for (const thread of threads) notificationThreads.set(thread.id, thread);
+    for (const notification of batchNotifications(threads)) {
+      sendNotification({
+        title: notification.title,
+        body: notification.body,
+        extra: { threadId: notification.threadId },
+      });
+    }
+  }
+
+  async function openNotifiedThread(thread = pendingNotificationThread) {
+    if (!thread) return;
+    pendingNotificationThread = null;
+    await getCurrentWindow().setFocus();
+    await openThreadView(thread);
+  }
+
+  function handleNotificationFocus() {
+    void openNotifiedThread().catch((error) => {
+      console.warn("[mach] opening notification thread failed", error);
+    });
   }
 
   function handleSyncStatus(payload: SyncStatusPayload) {
@@ -335,6 +380,10 @@
     const commands = [...byLabel.values()];
     if (background.kind === "thread") commands.push({ label: "Copy as Markdown", chord: "ctrl+shift+c" });
     commands.push({ label: "Retry failed changes", chord: "retry" });
+    commands.push(
+      { label: "Notifications: on", chord: "on" },
+      { label: "Notifications: off", chord: "off" },
+    );
     return commands;
   }
 
@@ -368,6 +417,12 @@
     }
     if (command.label === "Retry failed changes") {
       void retryFailedChanges();
+      return;
+    }
+    if (command.label.startsWith("Notifications: ")) {
+      const enabled = command.label.endsWith("on");
+      localStorage.setItem("mach.notifications", enabled ? "on" : "off");
+      showNotice(`Notifications ${enabled ? "on" : "off"}`);
       return;
     }
     const resolution = keymap.resolve(currentMode(background), command.chord, currentContext(background));
@@ -783,7 +838,17 @@
     }).then(keepUnlistener).catch((error) => {
       console.warn("[mach] sync-status listener failed", error);
     });
+    void onAction((notification) => {
+      const threadId = notification.extra?.threadId;
+      const thread = typeof threadId === "string" ? notificationThreads.get(threadId) : undefined;
+      void openNotifiedThread(thread).catch((error) => {
+        console.warn("[mach] opening notification action failed", error);
+      });
+    }).then((listener) => keepUnlistener(() => void listener.unregister())).catch((error) => {
+      console.warn("[mach] notification action listener failed", error);
+    });
     document.addEventListener("keydown", handleKey, true);
+    window.addEventListener("focus", handleNotificationFocus);
     window.focus();
     document.body.tabIndex = -1;
     document.body.focus();
@@ -792,6 +857,7 @@
       destroyed = true;
       for (const unlisten of unlisteners) unlisten();
       document.removeEventListener("keydown", handleKey, true);
+      window.removeEventListener("focus", handleNotificationFocus);
       if (actionErrorTimer !== undefined) window.clearTimeout(actionErrorTimer);
       if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
     };
