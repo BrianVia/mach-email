@@ -157,6 +157,7 @@ async fn main() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             commands::dispatch_action,
             commands::list_threads,
+            commands::load_older,
             commands::open_thread,
             commands::refetch_thread,
             commands::search,

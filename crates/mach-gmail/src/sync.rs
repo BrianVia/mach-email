@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Duration, TimeZone, Utc};
 use futures::stream::{self, StreamExt};
 use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::store::{MailStore, MessageHeaders};
+use mach_core::store::{Label, MailStore, MessageHeaders};
 use mach_core::{Action, Dispatcher};
 use mach_store::{LabelUpsert, MessageUpsert, SqliteStore, ThreadUpsert};
 use tracing::{info, warn};
@@ -111,6 +111,164 @@ pub struct BootstrapStats {
     pub failed_thread_fetches: u32,
 }
 
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct LoadOlderStats {
+    pub fetched: u32,
+    pub oldest_ms: Option<i64>,
+}
+
+pub(crate) struct HydratedThreads {
+    pub(crate) threads: Vec<RemoteThread>,
+    pub(crate) failed: u32,
+}
+
+pub(crate) async fn fetch_and_upsert_threads(
+    client: Arc<GmailClient>,
+    store: Arc<SqliteStore>,
+    account: &AccountId,
+    ids: Vec<String>,
+) -> Result<HydratedThreads> {
+    let mut threads = Vec::with_capacity(ids.len());
+    let mut failed = 0;
+    let mut fetches = stream::iter(ids)
+        .map(|id| {
+            let client = client.clone();
+            async move { client.get_thread_metadata(&id).await }
+        })
+        .buffer_unordered(BOOTSTRAP_CONCURRENCY);
+
+    while let Some(result) = fetches.next().await {
+        match result {
+            Ok(thread) => threads.push(thread),
+            Err(error) => {
+                failed += 1;
+                warn!(%error, "thread metadata fetch failed");
+            }
+        }
+    }
+    if !threads.is_empty() {
+        store
+            .upsert_threads(
+                account,
+                threads.iter().map(remote_thread_to_upsert).collect(),
+            )
+            .await?;
+    }
+    Ok(HydratedThreads { threads, failed })
+}
+
+fn label_to_gmail_query(
+    label: &LabelId,
+    name_lookup: impl Fn(&LabelId) -> Option<String>,
+) -> String {
+    match label.as_str() {
+        "INBOX" => "in:inbox".into(),
+        "STARRED" => "is:starred".into(),
+        "SENT" => "in:sent".into(),
+        "DRAFT" => "in:draft".into(),
+        "TRASH" => "in:trash".into(),
+        "SPAM" => "in:spam".into(),
+        "DONE" => "-in:inbox -in:trash -in:spam".into(),
+        "ALL" => String::new(),
+        _ => name_lookup(label)
+            .map(|name| format!("label:{name}"))
+            .unwrap_or_else(|| format!("label:{}", label.as_str())),
+    }
+}
+
+fn load_older_query(
+    label: &LabelId,
+    labels: &[Label],
+    before_ms: i64,
+    window_days: u32,
+) -> Result<String> {
+    let before = Utc
+        .timestamp_millis_opt(before_ms)
+        .single()
+        .context("invalid load-older timestamp")?;
+    let after = before
+        .checked_sub_signed(Duration::days(i64::from(window_days)))
+        .context("load-older window is outside the supported date range")?;
+    let label_query = label_to_gmail_query(label, |wanted| {
+        labels
+            .iter()
+            .find(|candidate| candidate.id == *wanted)
+            .map(|candidate| candidate.name.clone())
+    });
+    Ok(format!(
+        "{label_query} before:{} after:{}",
+        before.format("%Y/%m/%d"),
+        after.format("%Y/%m/%d")
+    )
+    .trim()
+    .to_string())
+}
+
+pub async fn load_older(
+    account: &AccountId,
+    client: Arc<GmailClient>,
+    store: Arc<SqliteStore>,
+    label: &LabelId,
+    before_ms: i64,
+    window_days: u32,
+) -> Result<LoadOlderStats> {
+    if window_days == 0 {
+        anyhow::bail!("load-older window must be at least one day");
+    }
+    let meta_key = format!("oldest_loaded:{account}:{label}");
+    let before_ms = store
+        .get_meta(&meta_key)
+        .await?
+        .and_then(|value| value.parse::<i64>().ok())
+        .map_or(before_ms, |stored| stored.min(before_ms));
+    let labels = store
+        .list_labels(&AccountScope::One(account.clone()))
+        .await?;
+    let query = load_older_query(label, &labels, before_ms, window_days)?;
+    let mut ids = Vec::new();
+    let mut page_token = None;
+    loop {
+        let page = client
+            .list_threads_page(&query, page_token.as_deref())
+            .await?;
+        ids.extend(
+            page.threads
+                .unwrap_or_default()
+                .into_iter()
+                .map(|thread| thread.id),
+        );
+        match page.next_page_token {
+            Some(token) => page_token = Some(token),
+            None => break,
+        }
+    }
+
+    let hydrated = fetch_and_upsert_threads(client, store.clone(), account, ids).await?;
+    if hydrated.failed > 0 {
+        anyhow::bail!("load older left {} thread(s) unresolved", hydrated.failed);
+    }
+    let oldest_ms = hydrated
+        .threads
+        .iter()
+        .map(remote_thread_to_upsert)
+        .map(|thread| thread.last_message_at_ms)
+        .min();
+    let next_before_ms = oldest_ms.unwrap_or(
+        Utc.timestamp_millis_opt(before_ms)
+            .single()
+            .and_then(|before| before.checked_sub_signed(Duration::days(i64::from(window_days))))
+            .context("load-older window is outside the supported date range")?
+            .timestamp_millis(),
+    );
+    store
+        .set_meta(&meta_key, &next_before_ms.to_string())
+        .await?;
+    Ok(LoadOlderStats {
+        fetched: hydrated.threads.len() as u32,
+        oldest_ms,
+    })
+}
+
 pub async fn bootstrap(
     client: Arc<GmailClient>,
     store: Arc<SqliteStore>,
@@ -166,37 +324,25 @@ pub async fn bootstrap(
     // 4. Fetch metadata for each stub. Bounded concurrency — Gmail caps at
     //    ~250 concurrent connections per user, but bootstrap should stay
     //    well-mannered. 10 in flight gives ~10x speedup without aggression.
-    let mut threads: Vec<RemoteThread> = Vec::with_capacity(stubs.len());
-    let mut futs = stream::iter(stubs.into_iter().map(|s| s.id))
-        .map({
-            let client = client.clone();
-            move |id| {
-                let client = client.clone();
-                async move { client.get_thread_metadata(&id).await }
-            }
-        })
-        .buffer_unordered(BOOTSTRAP_CONCURRENCY);
-
-    while let Some(result) = futs.next().await {
-        match result {
-            Ok(t) => threads.push(t),
-            Err(e) => {
-                warn!(error = %e, "thread fetch failed");
-                stats.failed_thread_fetches += 1;
-            }
-        }
-    }
+    let hydrated = fetch_and_upsert_threads(
+        client.clone(),
+        store.clone(),
+        &account,
+        stubs.into_iter().map(|stub| stub.id).collect(),
+    )
+    .await?;
+    let threads = hydrated.threads;
+    stats.failed_thread_fetches = hydrated.failed;
     info!(
         ok = threads.len(),
         failed = stats.failed_thread_fetches,
         "thread fetch complete"
     );
 
-    // 5. Convert to upsert structs and persist.
+    // 5. The shared hydration path has persisted the fetched metadata.
     let upserts: Vec<ThreadUpsert> = threads.iter().map(remote_thread_to_upsert).collect();
     stats.threads = upserts.len() as u32;
     stats.messages = upserts.iter().map(|t| t.messages.len() as u32).sum();
-    store.upsert_threads(&account, upserts).await?;
 
     if stats.failed_thread_fetches > 0 {
         anyhow::bail!(
@@ -459,34 +605,18 @@ async fn gap_recover(
         }
     }
 
-    use futures::stream::{self, StreamExt};
-    let mut threads: Vec<RemoteThread> = Vec::with_capacity(stubs.len());
-    let mut failed_fetches = 0usize;
-    let client_for_stream = client.clone();
-    let mut futs = stream::iter(stubs.into_iter().map(|s| s.id))
-        .map(move |id| {
-            let client = client_for_stream.clone();
-            async move { client.get_thread_metadata(&id).await }
-        })
-        .buffer_unordered(10);
-    while let Some(res) = futs.next().await {
-        match res {
-            Ok(thread) => threads.push(thread),
-            Err(error) => {
-                failed_fetches += 1;
-                warn!(error = %error, "thread fetch failed during gap recovery");
-            }
-        }
-    }
-
-    let upserts: Vec<ThreadUpsert> = threads.iter().map(remote_thread_to_upsert).collect();
-    let refetched = upserts.len() as u32;
-    if !upserts.is_empty() {
-        store.upsert_threads(account, upserts).await?;
-    }
-    if failed_fetches > 0 {
+    let hydrated = fetch_and_upsert_threads(
+        client,
+        store.clone(),
+        account,
+        stubs.into_iter().map(|stub| stub.id).collect(),
+    )
+    .await?;
+    let refetched = hydrated.threads.len() as u32;
+    if hydrated.failed > 0 {
         anyhow::bail!(
-            "gap recovery left {failed_fetches} thread(s) unresolved; cursor was not advanced"
+            "gap recovery left {} thread(s) unresolved; cursor was not advanced",
+            hydrated.failed
         );
     }
     store.set_history_cursor(account, new_cursor).await?;
@@ -502,6 +632,33 @@ async fn gap_recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_query_maps_labels_and_date_window() {
+        let user_id = LabelId::new("Label_42");
+        let labels = vec![Label {
+            account_id: AccountId::new("me@example.com"),
+            id: user_id.clone(),
+            name: "Receipts".into(),
+            system: false,
+            color: None,
+            unread_count: None,
+        }];
+        let before = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+
+        assert_eq!(
+            label_to_gmail_query(&LabelId::new("INBOX"), |_| None),
+            "in:inbox"
+        );
+        assert_eq!(
+            label_to_gmail_query(&LabelId::new("DONE"), |_| None),
+            "-in:inbox -in:trash -in:spam"
+        );
+        assert_eq!(
+            load_older_query(&user_id, &labels, before.timestamp_millis(), 30).unwrap(),
+            "label:Receipts before:2026/09/04 after:2026/08/05"
+        );
+    }
 
     #[test]
     fn message_upsert_serializes_only_present_threading_headers() {

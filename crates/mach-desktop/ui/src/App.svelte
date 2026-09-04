@@ -9,6 +9,7 @@
     fetchKeymapSources,
     fetchSettings,
     flushOutbox,
+    loadOlder,
     listThreads,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
@@ -31,9 +32,9 @@
   import Palette from "./views/Palette.svelte";
   import ChordOverlay from "./views/ChordOverlay.svelte";
 
-  const INBOX_LIMIT = 1000;
+  const INITIAL_LIST_LIMIT = 1000;
 
-  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
+  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
   type ThreadOrigin = { threads: ThreadSummary[]; index: number };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
   type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
@@ -44,7 +45,7 @@
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
-  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0 });
+  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0, limit: INITIAL_LIST_LIMIT });
   let keymap = $state<Keymap | null>(null);
   let bootError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
@@ -114,9 +115,9 @@
         console.error("[mach] keymap parse failed:", error);
         bootError = `keymap parse: ${(error as Error).message ?? error}`;
       }
-      const threads = await listThreads("INBOX", INBOX_LIMIT);
+      const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
       console.log(`[mach] loaded ${threads.length} threads`);
-      view = { kind: "inbox", label: "INBOX", threads, selected: 0 };
+      view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT };
     } catch (error) {
       console.error("[mach]", error);
       bootError = `boot failed: ${(error as Error).message ?? error}`;
@@ -135,7 +136,7 @@
     const currentView = view;
     if (currentView.kind !== "inbox") return;
     const selectedId = currentView.threads[currentView.selected]?.id;
-    const threads = await listThreads(currentView.label, INBOX_LIMIT);
+    const threads = await listThreads(currentView.label, currentView.limit);
     if (view.kind !== "inbox" || view.label !== currentView.label) return;
     const preserved = selectedId
       ? threads.findIndex((thread) => thread.id === selectedId)
@@ -354,7 +355,7 @@
             closeComposer();
             return;
           }
-          const threads = await listThreads("INBOX", INBOX_LIMIT);
+          const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
           let selected = 0;
           if (currentView.kind === "thread" && currentView.origin) {
             const { origin } = currentView;
@@ -366,7 +367,7 @@
               ? preserved
               : clamp(origin.index, 0, threads.length - 1);
           }
-          view = { kind: "inbox", label: "INBOX", threads, selected };
+          view = { kind: "inbox", label: "INBOX", threads, selected, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "select_next":
@@ -427,8 +428,8 @@
         }
         case "open_label": {
           const label = action.label_id as string;
-          const threads = await listThreads(label, INBOX_LIMIT);
-          view = { kind: "inbox", label, threads, selected: 0 };
+          const threads = await listThreads(label, INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label, threads, selected: 0, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "search":
@@ -462,8 +463,8 @@
         if (next) {
           await openThreadView(next, { threads: remaining, index: nextIndex });
         } else {
-          const fresh = await listThreads("INBOX", INBOX_LIMIT);
-          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0 };
+          const fresh = await listThreads("INBOX", INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0, limit: INITIAL_LIST_LIMIT };
         }
         return;
       }
@@ -489,7 +490,7 @@
       }
 
       if (isArchiveOrTrash && currentView.kind === "thread") {
-        const threads = await listThreads("INBOX", INBOX_LIMIT);
+        const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
         const at = threads.findIndex((thread) => thread.id === currentView.thread.id);
         // The archived thread is usually gone from the refreshed list; the
         // thread now occupying its date-sorted position is the "next" one.
@@ -499,12 +500,12 @@
         const fallback = at >= 0
           ? Math.min(at, threads.length - 1)
           : successor >= 0 ? successor : Math.max(0, threads.length - 1);
-        view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
+        view = { kind: "inbox", label: "INBOX", threads, selected: fallback, limit: INITIAL_LIST_LIMIT };
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
         const selectedId = currentView.threads[currentView.selected]?.id;
-        const threads = await listThreads(currentView.label, INBOX_LIMIT);
+        const threads = await listThreads(currentView.label, currentView.limit);
         const preserved = selectedId ? threads.findIndex((thread) => thread.id === selectedId) : -1;
         view = {
           ...currentView,
@@ -655,6 +656,25 @@
     }
   }
 
+  async function loadOlderMail(): Promise<number | null> {
+    const currentView = view;
+    if (currentView.kind !== "inbox") return null;
+    const beforeMs = Date.parse(currentView.threads.at(-1)?.last_message_at ?? "");
+    if (!Number.isFinite(beforeMs)) return 0;
+    try {
+      const stats = await loadOlder(currentView.label, beforeMs);
+      const limit = currentView.limit + 200;
+      const threads = await listThreads(currentView.label, limit);
+      if (view.kind === "inbox" && view.label === currentView.label) {
+        view = { ...view, threads, limit };
+      }
+      return stats.fetched;
+    } catch (error) {
+      showActionError(error);
+      return null;
+    }
+  }
+
   onMount(() => {
     void boot();
     void refreshStatus();
@@ -724,6 +744,7 @@
         if (view.kind === "inbox") view = { ...view, selected };
       }}
       onOpen={(index) => void openInboxRow(index)}
+      onLoadOlder={loadOlderMail}
     />
   {:else if view.kind === "thread"}
     <ThreadReader v={view} />

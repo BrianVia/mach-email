@@ -15,14 +15,36 @@
     v,
     onSelect,
     onOpen,
+    onLoadOlder,
   }: {
-    v: { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
+    v: { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
     onSelect: (index: number) => void;
     onOpen: (index: number) => void;
+    onLoadOlder: () => Promise<number | null>;
   } = $props();
 
   let highlight = $state<HTMLDivElement>();
   let scroller = $state<HTMLDivElement>();
+  let scrolledToEnd = $state(false);
+  let loadingOlder = $state(false);
+  let noOlder = $state(false);
+  let previousLabel = $state("");
+
+  $effect(() => {
+    if (v.label !== previousLabel) {
+      previousLabel = v.label;
+      scrolledToEnd = false;
+      noOlder = false;
+    }
+  });
+
+  async function loadMore() {
+    if (loadingOlder) return;
+    loadingOlder = true;
+    const fetched = await onLoadOlder();
+    loadingOlder = false;
+    if (fetched !== null) noOlder = fetched === 0;
+  }
 
   let inboxLayout = $derived.by(() => {
     const now = new Date();
@@ -112,7 +134,16 @@
   }
 </script>
 
-<div bind:this={scroller} class="list" role="list">
+<div
+  bind:this={scroller}
+  class="list"
+  role="list"
+  onscroll={() => {
+    if (scroller && scroller.scrollHeight - scroller.scrollTop <= scroller.clientHeight + 1) {
+      scrolledToEnd = true;
+    }
+  }}
+>
   {#if v.threads.length === 0}
     <div class="empty"><span>Inbox zero</span><small>Nothing in this view.</small></div>
   {:else}
@@ -158,6 +189,11 @@
         </button>
       {/if}
     {/each}
+    {#if v.threads.length >= v.limit || scrolledToEnd || noOlder}
+      <button class="load-older" type="button" disabled={loadingOlder} onclick={loadMore}>
+        {loadingOlder ? "Loading…" : noOlder ? "No older mail" : "Load older…"}
+      </button>
+    {/if}
   {/if}
 </div>
 
@@ -182,4 +218,6 @@
   .unread-text { color: var(--text); font-weight: 600; }
   .date { min-width: 64px; flex-shrink: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
   .unread-date { color: var(--accent); font-weight: 600; }
+  .load-older { display: block; width: 100%; height: 44px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+  .load-older:hover:not(:disabled) { background: var(--hover); }
 </style>

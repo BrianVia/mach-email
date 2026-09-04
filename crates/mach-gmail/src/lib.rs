@@ -21,5 +21,6 @@ pub use config::OAuthConfig;
 pub use credentials::{CredsError, StoredCredentials};
 pub use outbox::{DrainStats, OutboxWorker};
 pub use sync::{
-    bootstrap, incremental_sync, sync_account_tick, BootstrapStats, IncrementalStats, TickReport,
+    bootstrap, incremental_sync, load_older, sync_account_tick, BootstrapStats, IncrementalStats,
+    LoadOlderStats, TickReport,
 };

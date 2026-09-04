@@ -103,6 +103,11 @@ export type SyncNowReport = {
   last_error: string | null;
 };
 
+export type LoadOlderStats = {
+  fetched: number;
+  oldest_ms: number | null;
+};
+
 export type KeymapSources = {
   defaults: string;
   user: string | null;
@@ -135,6 +140,11 @@ export async function listThreads(
   });
   if (!r) return [];
   return unwrap(r);
+}
+
+export async function loadOlder(label: string, beforeMs: number): Promise<LoadOlderStats> {
+  const result = await invoke<Out<LoadOlderStats>>("load_older", { label, beforeMs });
+  return unwrap(result);
 }
 
 export async function openThread(

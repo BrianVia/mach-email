@@ -276,9 +276,18 @@ impl SearchView {
 }
 
 async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> Result<InboxView> {
+    load_inbox_limit(store, scope, label, 200).await
+}
+
+async fn load_inbox_limit(
+    store: &SqliteStore,
+    scope: &AccountScope,
+    label: &str,
+    limit: u32,
+) -> Result<InboxView> {
     let lid = LabelId::new(label);
     let threads = store
-        .list_threads_in_label(scope, &lid, 200)
+        .list_threads_in_label(scope, &lid, limit)
         .await
         .context("listing inbox threads")?;
     Ok(InboxView {
@@ -504,6 +513,18 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
         format!("{} {}", app.chord_buffer, chord_atom)
     };
 
+    if app
+        .keymap
+        .bindings_for(app.current_mode())
+        .iter()
+        .any(|(chord, action)| chord == &new_chord && action == "load_older")
+    {
+        app.chord_buffer.clear();
+        app.last_chord_continuations.clear();
+        load_older_mail(app).await;
+        return;
+    }
+
     let ctx = app.key_context();
     match app.keymap.resolve(app.current_mode(), &new_chord, &ctx) {
         Resolution::Action(action) => {
@@ -533,6 +554,36 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
                 }
             }
         }
+    }
+}
+
+async fn load_older_mail(app: &mut App) {
+    let View::Inbox(inbox) = &app.view else {
+        return;
+    };
+    let Some(last) = inbox.threads.last() else {
+        return;
+    };
+    let label = inbox.label.clone();
+    let before_ms = last.last_message_at.timestamp_millis();
+    let limit = inbox.threads.len().saturating_add(200) as u32;
+    let selected = inbox.selected;
+    match app
+        .body_fetchers
+        .load_older(&app.scope, &label, before_ms)
+        .await
+    {
+        Ok(stats) => {
+            match load_inbox_limit(&app.store, &app.scope, label.as_str(), limit).await {
+                Ok(mut inbox) => {
+                    inbox.selected = selected.min(inbox.threads.len().saturating_sub(1));
+                    app.view = View::Inbox(inbox);
+                }
+                Err(error) => warn!(%error, "refreshing after load older failed"),
+            }
+            app.status.hint = format!("loaded {} older", stats.fetched);
+        }
+        Err(error) => warn!(%error, "load older failed"),
     }
 }
 

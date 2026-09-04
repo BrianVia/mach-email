@@ -216,6 +216,22 @@ pub async fn list_threads(
 }
 
 #[tauri::command]
+pub async fn load_older(
+    state: State<'_, AppState>,
+    label: String,
+    before_ms: i64,
+) -> Result<Out<mach_gmail::LoadOlderStats>, String> {
+    match state
+        .body_fetchers
+        .load_older(&state.scope, &LabelId::new(label), before_ms)
+        .await
+    {
+        Ok(stats) => Ok(Out::ok(stats)),
+        Err(error) => Ok(Out::err(error)),
+    }
+}
+
+#[tauri::command]
 pub async fn open_thread(
     state: State<'_, AppState>,
     thread_id: String,
