@@ -647,7 +647,10 @@ mod tests {
         let account = AccountId::new("test@example.com");
         let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account.clone()));
 
-        let composed = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let composed = dispatcher
+            .execute(Action::ComposeNew { account: None })
+            .await
+            .unwrap();
         let draft: Draft =
             serde_json::from_value(composed.data.unwrap().get("draft").unwrap().clone()).unwrap();
         assert_eq!(draft.account_id, account);
@@ -687,16 +690,19 @@ mod tests {
     async fn compose_new_uses_configured_default_for_all_accounts_scope() {
         let store = Arc::new(InMemoryStore::new());
         let missing_default = Dispatcher::new(store.clone())
-            .execute(Action::ComposeNew)
+            .execute(Action::ComposeNew { account: None })
             .await
             .unwrap_err();
         assert!(missing_default
             .to_string()
-            .contains("no default account is configured"));
+            .contains("compose needs an account"));
 
         let account = AccountId::new("default@example.com");
         let dispatcher = Dispatcher::new(store).with_default_account(account.clone());
-        let outcome = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let outcome = dispatcher
+            .execute(Action::ComposeNew { account: None })
+            .await
+            .unwrap();
         let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
         assert_eq!(draft.account_id, account);
     }
@@ -712,7 +718,10 @@ mod tests {
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(account)).with_user_config(config);
 
-        let outcome = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let outcome = dispatcher
+            .execute(Action::ComposeNew { account: None })
+            .await
+            .unwrap();
         let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
         assert_eq!(draft.body_md, "\n\nTest Person");
     }
@@ -772,7 +781,10 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(AccountId::new("test@example.com")));
-        let composed = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let composed = dispatcher
+            .execute(Action::ComposeNew { account: None })
+            .await
+            .unwrap();
         let draft: Draft =
             serde_json::from_value(composed.data.unwrap().get("draft").unwrap().clone()).unwrap();
 
@@ -976,7 +988,10 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let account = AccountId::new("test@example.com");
         let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account));
-        let composed = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let composed = dispatcher
+            .execute(Action::ComposeNew { account: None })
+            .await
+            .unwrap();
         let draft: Draft = serde_json::from_value(composed.data.unwrap()["draft"].clone()).unwrap();
         dispatcher
             .execute(Action::SaveDraft {

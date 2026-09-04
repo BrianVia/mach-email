@@ -50,7 +50,7 @@ impl OutboxWorker {
             .store
             .drain_pending_outbox(&self.account, max)
             .await
-            .context("draining pending outbox")?;
+            .with_context(|| format!("[{}] draining pending outbox", self.account))?;
         if pending.is_empty() {
             return Ok(DrainStats::default());
         }
@@ -72,10 +72,10 @@ impl OutboxWorker {
                     stats.failed += 1;
                     // `{e:#}` keeps the whole context chain — the root cause
                     // (e.g. the HTTP status + body) lives at the bottom.
-                    let chain = format!("{e:#}");
-                    warn!(op_id = %op.op_id, error = %chain, "outbox op failed");
+                    let chain = format!("[{}] {e:#}", self.account);
+                    warn!(account = %self.account, op_id = %op.op_id, error = %chain, "outbox op failed");
                     if let Err(e2) = self.store.mark_outbox_failed(op.id, &chain).await {
-                        warn!(error = %e2, "marking op failed also failed");
+                        warn!(account = %self.account, error = %e2, "marking op failed also failed");
                     }
                 }
             }

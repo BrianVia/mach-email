@@ -22,6 +22,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// List configured accounts and their local sync status.
+    Accounts,
     /// Dispatch a single Action as JSON; emit the outcome as JSON. Designed
     /// for shell scripts and LLM agents calling out via tool use.
     Do {
@@ -107,9 +109,11 @@ async fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     init_tracing(cli.command.is_none());
-    let account = cli.account.as_deref();
+    let account = runtime::selected_account(cli.account.as_deref())?;
+    let account = account.as_ref().map(|account| account.as_str());
     match cli.command {
         None => commands::tui::run(account).await,
+        Some(Command::Accounts) => commands::accounts::run(account).await,
         Some(Command::Do { action }) => commands::do_cmd::run(&action, account).await,
         Some(Command::Mcp) => commands::mcp::run(account).await,
         Some(Command::Auth(AuthCommand::Login)) => commands::auth::login().await,

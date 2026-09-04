@@ -67,11 +67,19 @@ one time-sorted inbox and shows the owning address and date on each row:
 Configure signatures in the platform config directory's `config.toml` under
 `[signatures]`; use `default = "Your name"` as a fallback and
 `"me@work.com" = "Work signature"` for an account-specific signature.
-Configure account nicknames in the same file under `[accounts]` as `"me@work.com" = "Work"`.
+Configure account nicknames and the compose default in the same file:
+
+```toml
+[accounts]
+default = "me@work.com"
+"me@work.com" = "Work"
+```
 
 ```sh
 mach                         # unified inbox
-mach --account me@work.com   # one account
+mach accounts                # account, unread, auth, sync, and watch status
+mach --account Work          # one account by nickname
+mach --account me@work.com   # or by email
 mach sync                    # sync every account
 mach sync --account me@work.com
 mach sync --bootstrap        # explicitly rebuild every account

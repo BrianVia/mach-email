@@ -380,7 +380,10 @@ impl GmailAccountPool {
             }
             match result {
                 Some(Ok(())) => report.succeeded += 1,
-                Some(Err(error)) => report.failures.push((account, format!("{error:#}"))),
+                Some(Err(error)) => {
+                    let message = format!("[{account}] {error:#}");
+                    report.failures.push((account, message));
+                }
                 None => {}
             }
         }
@@ -425,7 +428,10 @@ impl GmailAccountPool {
         while let Some((account, result)) = searches.next().await {
             match result {
                 Ok(results) => report.results.extend(results),
-                Err(error) => report.failures.push((account, format!("{error:#}"))),
+                Err(error) => {
+                    let message = format!("[{account}] {error:#}");
+                    report.failures.push((account, message));
+                }
             }
         }
         report.results.sort_by(|left, right| {

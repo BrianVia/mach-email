@@ -30,8 +30,14 @@ pub async fn run(action_json: &str, account: Option<&str>) -> Result<()> {
 
     let store = runtime::open_store().await?;
     let scope = runtime::account_scope(account);
+    let user_config = runtime::user_config()?;
+    let default_account = user_config.default_account(&runtime::known_accounts()?);
     let dispatcher = mach_core::Dispatcher::with_scope(store.clone(), scope.clone())
-        .with_user_config(runtime::user_config()?);
+        .with_user_config(user_config);
+    let dispatcher = match default_account {
+        Some(account) => dispatcher.with_default_account(account),
+        None => dispatcher,
+    };
 
     // If this is an `open_thread`, do a body backfill first (silent no-op
     // when bodies are already cached). We only spin up a Gmail client if

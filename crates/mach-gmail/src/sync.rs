@@ -681,7 +681,7 @@ pub async fn incremental_sync(
             Ok(Some(thread)) => threads.push(thread),
             Ok(None) => store.delete_thread(&account, id).await?,
             Err(error) => {
-                warn!(thread_id = id, error = %error, "thread refetch failed during incremental");
+                warn!(%account, thread_id = id, error = %error, "thread refetch failed during incremental");
                 failures.push((id, error.to_string()));
             }
         }
@@ -718,8 +718,8 @@ pub async fn incremental_sync(
 
     if !failures.is_empty() {
         anyhow::bail!(
-            "incremental sync left {} thread(s) unresolved; cursor was not advanced",
-            failures.len()
+            "[{account}] incremental sync left {} thread(s) unresolved; cursor was not advanced",
+            failures.len(),
         );
     }
 

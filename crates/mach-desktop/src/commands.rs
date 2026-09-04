@@ -220,7 +220,7 @@ pub(crate) async fn sync_account(
             Ok(true)
         }
         Err(error) => {
-            let message = format!("{error:#}");
+            let message = format!("[{account}] {error:#}");
             warn!(account = %account, error = %message, "account sync tick failed");
             emit_sync_event(
                 app,
@@ -277,7 +277,7 @@ pub(crate) async fn drain_outbox(
             }
             Err(error) => {
                 failed += 1;
-                last_error = Some(error.to_string());
+                last_error = Some(format!("[{account}] {error:#}"));
             }
         }
     }
@@ -314,7 +314,7 @@ pub async fn unsubscribe_mailto(
     let dispatcher =
         Dispatcher::with_scope(state.store.clone(), AccountScope::One(account.clone()));
     let composed = dispatcher
-        .execute(Action::ComposeNew)
+        .execute(Action::ComposeNew { account: None })
         .await
         .map_err(|error| error.to_string())?;
     let draft: Draft = serde_json::from_value(

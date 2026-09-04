@@ -214,7 +214,7 @@ impl Dispatcher {
                 message_id,
                 response,
             } => self.respond_to_invite(&message_id, response).await,
-            Action::ComposeNew => self.compose_new().await,
+            Action::ComposeNew { account } => self.compose_new(account).await,
             Action::Reply { message_id, all } => self.reply(&message_id, all).await,
             Action::Forward { message_id } => self.forward(&message_id).await,
             Action::SaveDraft { draft_id, patch } => self.save_draft(&draft_id, patch).await,
@@ -246,20 +246,21 @@ impl Dispatcher {
         outcome
     }
 
-    fn draft_account(&self) -> CoreResult<AccountId> {
-        self.scope
+    fn draft_account(&self, requested: Option<AccountId>) -> CoreResult<AccountId> {
+        requested
+            .or_else(|| self.scope
             .account()
-            .cloned()
+            .cloned())
             .or_else(|| self.default_account.clone())
             .ok_or_else(|| {
                 CoreError::InvalidAction(
-                    "no default account is configured for compose actions".into(),
+                    "compose needs an account: pass account, use --account, or set [accounts] default in config.toml".into(),
                 )
             })
     }
 
-    async fn compose_new(&self) -> CoreResult<ActionOutcome> {
-        let account_id = self.draft_account()?;
+    async fn compose_new(&self, requested: Option<AccountId>) -> CoreResult<ActionOutcome> {
+        let account_id = self.draft_account(requested)?;
         let draft = Draft {
             body_md: self.body_with_signature(&account_id, ""),
             calendar_reply_ics: None,

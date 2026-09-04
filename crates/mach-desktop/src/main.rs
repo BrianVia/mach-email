@@ -102,8 +102,16 @@ async fn main() -> Result<()> {
         .transpose()
         .context("loading user config")?
         .unwrap_or_default();
+    let known_accounts = accounts
+        .iter()
+        .map(|credentials| AccountId::new(credentials.email.clone()))
+        .collect::<Vec<_>>();
     let dispatcher =
         Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config.clone());
+    let dispatcher = match user_config.default_account(&known_accounts) {
+        Some(account) => dispatcher.with_default_account(account),
+        None => dispatcher,
+    };
 
     let body_fetchers = match GmailAccountPool::from_stored_credentials(store.clone()) {
         Ok(pool) => {

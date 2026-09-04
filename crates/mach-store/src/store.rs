@@ -11,6 +11,7 @@ use mach_core::{
     },
 };
 use rusqlite::{params, params_from_iter, types::Value, OptionalExtension, Row};
+use serde::Serialize;
 use tokio::task::spawn_blocking;
 
 use crate::DbPool;
@@ -450,7 +451,52 @@ pub struct OutboxEntry {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AccountOverview {
+    pub account_id: AccountId,
+    pub unread: u32,
+    pub last_incremental_at: Option<DateTime<Utc>>,
+    pub watch_expiration: Option<i64>,
+}
+
 impl SqliteStore {
+    pub async fn account_overview(
+        &self,
+        account: &AccountId,
+    ) -> mach_core::CoreResult<AccountOverview> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        spawn_blocking(move || -> mach_core::CoreResult<AccountOverview> {
+            let conn = pool.get().map_err(map_err)?;
+            let (unread, last_incremental_at, watch_expiration): (
+                i64,
+                Option<i64>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT
+                       (SELECT COUNT(*) FROM threads t
+                        WHERE t.account_id = ?1 AND t.unread = 1
+                          AND EXISTS (SELECT 1 FROM json_each(t.label_ids_json)
+                                      WHERE value = 'INBOX')),
+                       (SELECT last_incremental_at FROM sync_state WHERE account_id = ?1),
+                       (SELECT value FROM meta WHERE key = 'watch_expiration:' || ?1)",
+                    params![account.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(map_err)?;
+            Ok(AccountOverview {
+                account_id: account,
+                unread: unread as u32,
+                last_incremental_at: last_incremental_at
+                    .and_then(|value| Utc.timestamp_millis_opt(value).single()),
+                watch_expiration: watch_expiration.and_then(|value| value.parse().ok()),
+            })
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     pub async fn list_outbox(
         &self,
         scope: &AccountScope,

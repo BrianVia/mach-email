@@ -28,6 +28,7 @@ pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
     "snooze",
     "unsubscribe",
     "respond_to_invite",
+    "compose_new",
     "search",
     "undo",
     "undo_activity",
@@ -120,7 +121,10 @@ pub enum Action {
     },
 
     // --- Compose ---
-    ComposeNew,
+    ComposeNew {
+        #[serde(default)]
+        account: Option<crate::ids::AccountId>,
+    },
     Reply {
         message_id: MessageId,
         all: bool,
@@ -182,7 +186,7 @@ impl Action {
             Action::Snooze { .. } => "snooze",
             Action::Unsubscribe { .. } => "unsubscribe",
             Action::RespondToInvite { .. } => "respond_to_invite",
-            Action::ComposeNew => "compose_new",
+            Action::ComposeNew { .. } => "compose_new",
             Action::Reply { .. } => "reply",
             Action::Forward { .. } => "forward",
             Action::SaveDraft { .. } => "save_draft",

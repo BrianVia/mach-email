@@ -181,8 +181,17 @@ impl App {
     ) -> Result<Self> {
         let keymap = load_keymap()?;
         let snippets = user_config.snippets.clone();
+        let credentials = mach_gmail::credentials::load_all()?;
+        let known_accounts = credentials
+            .iter()
+            .map(|credentials| AccountId::new(credentials.email.clone()))
+            .collect::<Vec<_>>();
         let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone())
             .with_user_config(user_config.clone());
+        let dispatcher = match user_config.default_account(&known_accounts) {
+            Some(account) => dispatcher.with_default_account(account),
+            None => dispatcher,
+        };
 
         // Try to construct a body fetcher; if OAuth creds aren't set up,
         // boot offline. The user can still browse cached mail.
@@ -198,7 +207,7 @@ impl App {
         let inbox = load_inbox(&store, &scope, "INBOX").await?;
         let view = View::Inbox(inbox);
         let hyperlinks = Arc::new(HyperlinkRegistry::default());
-        let needs_reauth = mach_gmail::credentials::load_all()?
+        let needs_reauth = credentials
             .into_iter()
             .filter(|credentials| {
                 credentials.needs_reauth()
@@ -1258,7 +1267,7 @@ async fn execute_action(app: &mut App, action: Action) {
             advance_selection(app, -1);
             return;
         }
-        Action::ComposeNew | Action::Reply { .. } | Action::Forward { .. } => {
+        Action::ComposeNew { .. } | Action::Reply { .. } | Action::Forward { .. } => {
             open_composer(app, action.clone()).await;
             return;
         }
@@ -1449,7 +1458,11 @@ async fn perform_unsubscribe(app: &mut App, pending: PendingUnsubscribe) -> Resu
                 app.store.clone(),
                 AccountScope::One(pending.account_id.clone()),
             );
-            let draft = draft_from_outcome(dispatcher.execute(Action::ComposeNew).await?)?;
+            let draft = draft_from_outcome(
+                dispatcher
+                    .execute(Action::ComposeNew { account: None })
+                    .await?,
+            )?;
             dispatcher
                 .execute(Action::SaveDraft {
                     draft_id: draft.id.clone(),

@@ -4,6 +4,8 @@ use std::path::Path;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::ids::AccountId;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UserConfig {
     #[serde(default)]
@@ -78,6 +80,27 @@ impl UserConfig {
     pub fn account_label<'a>(&'a self, email: &'a str) -> &'a str {
         self.accounts.get(email).map_or(email, String::as_str)
     }
+
+    pub fn resolve_account(&self, input: &str, known: &[AccountId]) -> Option<AccountId> {
+        known
+            .iter()
+            .find(|account| account.as_str() == input)
+            .or_else(|| {
+                known.iter().find(|account| {
+                    self.accounts
+                        .get(account.as_str())
+                        .is_some_and(|nickname| nickname.eq_ignore_ascii_case(input))
+                })
+            })
+            .cloned()
+    }
+
+    pub fn default_account(&self, known: &[AccountId]) -> Option<AccountId> {
+        self.accounts
+            .get("default")
+            .and_then(|account| self.resolve_account(account, known))
+            .or_else(|| (known.len() == 1).then(|| known[0].clone()))
+    }
 }
 
 #[cfg(test)]
@@ -126,5 +149,35 @@ mod tests {
             ))
         );
         assert_eq!(expand_snippet(";missing", 8, &snippets), None);
+    }
+
+    #[test]
+    fn resolves_account_email_nickname_and_default() {
+        let config: UserConfig =
+            toml::from_str("[accounts]\ndefault = \"me@work.com\"\n\"me@work.com\" = \"Work\"\n")
+                .unwrap();
+        let known = [
+            AccountId::new("me@work.com"),
+            AccountId::new("home@example.com"),
+        ];
+
+        assert_eq!(
+            config.resolve_account("Work", &known),
+            Some(known[0].clone())
+        );
+        assert_eq!(
+            config.resolve_account("work", &known),
+            Some(known[0].clone())
+        );
+        assert_eq!(
+            config.resolve_account("home@example.com", &known),
+            Some(known[1].clone())
+        );
+        assert_eq!(config.resolve_account("missing", &known), None);
+        assert_eq!(config.default_account(&known), Some(known[0].clone()));
+        assert_eq!(
+            UserConfig::default().default_account(&known[..1]),
+            Some(known[0].clone())
+        );
     }
 }

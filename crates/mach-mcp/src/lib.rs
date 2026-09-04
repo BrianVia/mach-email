@@ -35,6 +35,10 @@ pub struct Server {
     store: Arc<SqliteStore>,
     dispatcher: Dispatcher,
     body_fetchers: Arc<GmailAccountPool>,
+    scope: AccountScope,
+    user_config: UserConfig,
+    known_accounts: Vec<AccountId>,
+    needs_reauth: BTreeMap<String, bool>,
 }
 
 impl Server {
@@ -43,16 +47,56 @@ impl Server {
         body_fetchers: Arc<GmailAccountPool>,
         scope: AccountScope,
     ) -> Self {
+        let known_accounts = body_fetchers.accounts().collect();
         Self {
-            dispatcher: Dispatcher::with_scope(store.clone(), scope),
+            dispatcher: Dispatcher::with_scope(store.clone(), scope.clone()),
             store,
             body_fetchers,
+            scope,
+            user_config: UserConfig::default(),
+            known_accounts,
+            needs_reauth: BTreeMap::new(),
         }
     }
 
     pub fn with_user_config(mut self, user_config: UserConfig) -> Self {
-        self.dispatcher = self.dispatcher.with_user_config(user_config);
+        self.user_config = user_config;
+        self.rebuild_dispatcher();
         self
+    }
+
+    pub fn with_accounts(
+        mut self,
+        accounts: Vec<mach_gmail::credentials::StoredCredentials>,
+    ) -> Self {
+        self.needs_reauth = accounts
+            .iter()
+            .map(|credentials| (credentials.email.clone(), credentials.needs_reauth()))
+            .collect();
+        self.known_accounts = accounts
+            .into_iter()
+            .map(|credentials| AccountId::new(credentials.email))
+            .collect();
+        self.rebuild_dispatcher();
+        self
+    }
+
+    fn rebuild_dispatcher(&mut self) {
+        let dispatcher = Dispatcher::with_scope(self.store.clone(), self.scope.clone())
+            .with_user_config(self.user_config.clone());
+        self.dispatcher = match self.user_config.default_account(&self.known_accounts) {
+            Some(account) => dispatcher.with_default_account(account),
+            None => dispatcher,
+        };
+    }
+
+    fn scoped_dispatcher(&self, scope: AccountScope) -> Dispatcher {
+        let dispatcher = Dispatcher::with_scope(self.store.clone(), scope)
+            .with_user_config(self.user_config.clone());
+        match self.user_config.default_account(&self.known_accounts) {
+            Some(account) => dispatcher.with_default_account(account),
+            None => dispatcher,
+        }
     }
 
     /// Run the server to completion. Returns when stdin closes (client
@@ -143,22 +187,29 @@ impl Server {
         let action_schema = schema_for!(Action);
         let mut schema_value = serde_json::to_value(&action_schema).unwrap_or(json!({}));
         retain_dispatcher_actions(&mut schema_value);
+        add_account_argument(&mut schema_value);
         json!({
             "tools": [
                 {
                     "name": "mach",
                     "description": "Dispatch a mach Action against the local cache + outbox. \
                         Mutations apply optimistically and round-trip to Gmail on the next \
-                        `mach sync`. Search uses FTS5 \
-                        over the cached body index.",
+                        `mach sync`. Search uses FTS5 over the cached body index. Reads may span \
+                        all accounts; mutations and compose must resolve to exactly one account. \
+                        Pass account (email or nickname) when the server runs unified.",
                     "inputSchema": schema_value,
+                },
+                {
+                    "name": "list_accounts",
+                    "description": "List configured accounts with nickname, unread count, authentication state, last incremental sync, and Gmail watch status.",
+                    "inputSchema": object_schema(json!({}), &[]),
                 },
                 {
                     "name": "inbox_overview",
                     "description": "List the newest inbox threads and total unread count from the local cache, optionally restricted to one account; use this to scan mail before opening a thread.",
                     "inputSchema": object_schema(
                         json!({
-                            "account": { "type": "string", "description": "Account email address." },
+                            "account": account_schema(),
                             "limit": { "type": "integer", "minimum": 0, "maximum": 4294967295u64, "default": 50 }
                         }),
                         &[],
@@ -169,6 +220,7 @@ impl Server {
                     "description": "Open one cached thread and return its messages with plain-text bodies, fetching missing bodies from Gmail when that account is online and truncating each body for a bounded model context.",
                     "inputSchema": object_schema(
                         json!({
+                            "account": account_schema(),
                             "id": { "type": "string", "description": "Thread ID." },
                             "max_chars": { "type": "integer", "minimum": 0, "maximum": 4294967295u64, "default": 8000 }
                         }),
@@ -180,6 +232,7 @@ impl Server {
                     "description": "Search cached mail with mach's Gmail-style operators and, when needed and online, extend the search through Gmail before returning account-qualified thread summaries.",
                     "inputSchema": object_schema(
                         json!({
+                            "account": account_schema(),
                             "query": { "type": "string", "description": "Text and operators such as from:, label:, is:unread, newer_than:, and has:attachment." },
                             "limit": { "type": "integer", "minimum": 0, "maximum": 4294967295u64, "default": 50 }
                         }),
@@ -191,6 +244,7 @@ impl Server {
                     "description": "Create a reply or reply-all draft from a message, place the supplied Markdown above the generated quote, and optionally queue and immediately attempt delivery through that account's Gmail outbox.",
                     "inputSchema": object_schema(
                         json!({
+                            "account": account_schema(),
                             "message_id": { "type": "string", "description": "Message ID to reply to." },
                             "body": { "type": "string", "description": "New reply text in Markdown." },
                             "all": { "type": "boolean", "default": false },
@@ -204,6 +258,7 @@ impl Server {
                     "description": "Summarize recent inbox activity by Gmail category, show the ten newest unread threads, and identify unread or starred conversations whose latest message came from someone else.",
                     "inputSchema": object_schema(
                         json!({
+                            "account": account_schema(),
                             "since_hours": { "type": "integer", "minimum": 0, "maximum": 4294967295u64, "default": 24 }
                         }),
                         &[],
@@ -224,6 +279,7 @@ impl Server {
             .context("missing tool arguments")?;
         let value = match name {
             "mach" => return self.call_mach(args).await,
+            "list_accounts" => self.list_accounts().await?,
             "inbox_overview" => self.inbox_overview(&args).await?,
             "read_thread" => self.read_thread(&args).await?,
             "find_threads" => self.find_threads(&args).await?,
@@ -231,12 +287,20 @@ impl Server {
             "daily_digest" => self.daily_digest(&args).await?,
             _ => anyhow::bail!("unknown tool: {name}"),
         };
-        tool_content(&value)
+        self.tool_content(&value)
     }
 
-    async fn call_mach(&self, args: Value) -> Result<Value> {
-        let action: Action =
+    async fn call_mach(&self, mut args: Value) -> Result<Value> {
+        let requested = optional_str(&args, "account")?.map(str::to_owned);
+        if let Some(object) = args.as_object_mut() {
+            object.remove("account");
+        }
+        let scope = self.requested_scope(requested.as_deref())?;
+        let mut action: Action =
             serde_json::from_value(args).context("arguments did not match an Action variant")?;
+        if let Action::ComposeNew { account } = &mut action {
+            *account = scope.account().cloned();
+        }
         if !action.is_dispatcher_supported() {
             anyhow::bail!(
                 "{} is reserved for an interactive surface and is not implemented by MCP",
@@ -246,11 +310,7 @@ impl Server {
 
         // Same backfill semantics as the CLI's `mach do open_thread`.
         if let Action::OpenThread { id } = &action {
-            let summary = self
-                .dispatcher
-                .store()
-                .get_thread(self.dispatcher_scope(), id)
-                .await?;
+            let summary = self.dispatcher.store().get_thread(&scope, id).await?;
             if let Some(fetcher) = summary
                 .as_ref()
                 .and_then(|thread| self.body_fetchers.get(&thread.account_id))
@@ -259,8 +319,30 @@ impl Server {
             }
         }
 
-        let outcome = self.dispatcher.execute(action).await?;
-        tool_content(&outcome)
+        let outcome = if scope == self.scope {
+            self.dispatcher.execute(action).await?
+        } else {
+            self.scoped_dispatcher(scope).execute(action).await?
+        };
+        self.tool_content(&outcome)
+    }
+
+    async fn list_accounts(&self) -> Result<Value> {
+        let mut accounts = Vec::with_capacity(self.known_accounts.len());
+        let push = mach_gmail::config::pubsub_topic().is_some();
+        for account in &self.known_accounts {
+            let overview = self.store.account_overview(account).await?;
+            accounts.push(json!({
+                "email": account,
+                "account_id": overview.account_id,
+                "nickname": self.user_config.account_label(account.as_str()),
+                "unread": overview.unread,
+                "needs_reauth": self.needs_reauth.get(account.as_str()).copied().unwrap_or(false),
+                "last_incremental_at": overview.last_incremental_at,
+                "watch_status": push.then(|| watch_status(overview.watch_expiration)),
+            }));
+        }
+        Ok(Value::Array(accounts))
     }
 
     async fn inbox_overview(&self, args: &Value) -> Result<Value> {
@@ -274,17 +356,24 @@ impl Server {
     }
 
     async fn read_thread(&self, args: &Value) -> Result<Value> {
+        let scope = self.requested_scope(optional_str(args, "account")?)?;
         let id = ThreadId::new(required_str(args, "id")?);
         let max_chars = optional_u32(args, "max_chars", 8_000)? as usize;
         let summary = self
             .store
-            .get_thread(self.dispatcher_scope(), &id)
+            .get_thread(&scope, &id)
             .await?
             .with_context(|| format!("thread {id} not found"))?;
         if let Some(fetcher) = self.body_fetchers.get(&summary.account_id) {
             let _ = fetcher.fetch_if_needed(&id).await;
         }
-        let mut outcome = self.dispatcher.execute(Action::OpenThread { id }).await?;
+        let mut outcome = if scope == self.scope {
+            self.dispatcher.execute(Action::OpenThread { id }).await?
+        } else {
+            self.scoped_dispatcher(scope)
+                .execute(Action::OpenThread { id })
+                .await?
+        };
         if let Some(messages) = outcome
             .data
             .as_mut()
@@ -312,17 +401,12 @@ impl Server {
     }
 
     async fn find_threads(&self, args: &Value) -> Result<Value> {
+        let scope = self.requested_scope(optional_str(args, "account")?)?;
         let query = required_str(args, "query")?;
         let limit = optional_u32(args, "limit", 50)?;
-        let mut threads = self
-            .store
-            .search_threads(self.dispatcher_scope(), query, limit)
-            .await?;
+        let mut threads = self.store.search_threads(&scope, query, limit).await?;
         if threads.len() < limit as usize && !self.body_fetchers.is_empty() {
-            let report = self
-                .body_fetchers
-                .search_remote(self.dispatcher_scope(), query, limit)
-                .await;
+            let report = self.body_fetchers.search_remote(&scope, query, limit).await;
             threads.extend(report.results);
             threads.sort_by(|left, right| right.last_message_at.cmp(&left.last_message_at));
             threads
@@ -332,12 +416,21 @@ impl Server {
     }
 
     async fn draft_reply(&self, args: &Value) -> Result<Value> {
+        let scope = self.requested_scope(optional_str(args, "account")?)?;
         let message_id = MessageId::new(required_str(args, "message_id")?);
         let body = required_str(args, "body")?;
         let all = optional_bool(args, "all", false)?;
         let send = optional_bool(args, "send", false)?;
-        let reply = self
-            .dispatcher
+        let scoped_dispatcher;
+        let dispatcher = if scope == self.scope {
+            &self.dispatcher
+        } else {
+            // ponytail: per-call dispatcher loses in-memory undo history; cache one per account
+            // if MCP clients begin relying on account-scoped `undo`.
+            scoped_dispatcher = self.scoped_dispatcher(scope);
+            &scoped_dispatcher
+        };
+        let reply = dispatcher
             .execute(Action::Reply { message_id, all })
             .await?;
         let draft = reply
@@ -358,7 +451,7 @@ impl Server {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let draft_id = mach_core::DraftId::new(draft_id);
-        self.dispatcher
+        dispatcher
             .execute(Action::SaveDraft {
                 draft_id: draft_id.clone(),
                 patch: DraftPatch {
@@ -368,7 +461,7 @@ impl Server {
             })
             .await?;
         if send {
-            self.dispatcher
+            dispatcher
                 .execute(Action::SendDraft {
                     draft_id: draft_id.clone(),
                 })
@@ -378,17 +471,22 @@ impl Server {
                 .body_fetchers
                 .get(&account)
                 .with_context(|| format!("no Gmail client for {account}"))?;
-            let stats = OutboxWorker::new(account, fetcher.client().clone(), self.store.clone())
-                .drain_once(200)
-                .await?;
+            let stats = OutboxWorker::new(
+                account.clone(),
+                fetcher.client().clone(),
+                self.store.clone(),
+            )
+            .drain_once(200)
+            .await?;
             if stats.failed != 0 {
-                anyhow::bail!("{} outbox operation(s) failed", stats.failed);
+                anyhow::bail!("{} outbox operation(s) failed for {account}", stats.failed);
             }
         }
         Ok(json!({ "draft_id": draft_id, "sent": send }))
     }
 
     async fn daily_digest(&self, args: &Value) -> Result<Value> {
+        let scope = self.requested_scope(optional_str(args, "account")?)?;
         let since_hours = optional_u32(args, "since_hours", 24)?;
         let cutoff = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -397,7 +495,7 @@ impl Server {
             - i64::from(since_hours) * 3_600_000;
         let threads = self
             .store
-            .list_threads_in_label(self.dispatcher_scope(), &LabelId::new("INBOX"), u32::MAX)
+            .list_threads_in_label(&scope, &LabelId::new("INBOX"), u32::MAX)
             .await?
             .into_iter()
             .filter(|thread| thread.last_message_at.timestamp_millis() >= cutoff)
@@ -422,7 +520,7 @@ impl Server {
         for thread in &threads {
             let messages = self
                 .store
-                .list_messages_in_thread(self.dispatcher_scope(), &thread.id)
+                .list_messages_in_thread(&scope, &thread.id)
                 .await?;
             if mach_core::is_awaiting_reply(thread, messages.last()) {
                 awaiting_reply.push(thread.clone());
@@ -436,18 +534,27 @@ impl Server {
     }
 
     fn requested_scope(&self, account: Option<&str>) -> Result<AccountScope> {
-        match (self.dispatcher_scope(), account) {
-            (AccountScope::One(current), Some(requested)) if current.as_str() != requested => {
+        let requested = account
+            .map(|account| {
+                self.user_config
+                    .resolve_account(account, &self.known_accounts)
+                    .with_context(|| format!("unknown account {account}"))
+            })
+            .transpose()?;
+        match (&self.scope, requested) {
+            (AccountScope::One(current), Some(requested)) if current != &requested => {
                 anyhow::bail!("account {requested} is outside this server's scope")
             }
             (AccountScope::One(current), _) => Ok(AccountScope::One(current.clone())),
-            (AccountScope::All, Some(account)) => Ok(AccountScope::One(AccountId::new(account))),
+            (AccountScope::All, Some(account)) => Ok(AccountScope::One(account)),
             (AccountScope::All, None) => Ok(AccountScope::All),
         }
     }
 
-    fn dispatcher_scope(&self) -> &AccountScope {
-        self.dispatcher.scope()
+    fn tool_content(&self, value: &impl serde::Serialize) -> Result<Value> {
+        let mut value = serde_json::to_value(value)?;
+        decorate_account_labels(&mut value, &self.user_config);
+        tool_content(&value)
     }
 }
 
@@ -458,6 +565,10 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
         "required": required,
         "additionalProperties": false,
     })
+}
+
+fn account_schema() -> Value {
+    json!({ "type": "string", "description": "Account email address or nickname." })
 }
 
 fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
@@ -540,6 +651,55 @@ fn tool_content(value: &impl serde::Serialize) -> Result<Value> {
     }))
 }
 
+fn decorate_account_labels(value: &mut Value, config: &UserConfig) {
+    match value {
+        Value::Object(object) => {
+            if let Some(account) = object
+                .get("account_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                object.insert(
+                    "account_label".into(),
+                    Value::String(config.account_label(&account).to_string()),
+                );
+            }
+            for child in object.values_mut() {
+                decorate_account_labels(child, config);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                decorate_account_labels(child, config);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn add_account_argument(schema: &mut Value) {
+    let Some(branches) = schema.get_mut("oneOf").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for branch in branches {
+        if let Some(properties) = branch.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.insert("account".into(), account_schema());
+        }
+    }
+}
+
+fn watch_status(expiration: Option<i64>) -> &'static str {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    match expiration {
+        None => "not registered",
+        Some(value) if mach_gmail::should_renew(Some(value), now) => "renewal due",
+        Some(_) => "active",
+    }
+}
+
 fn retain_dispatcher_actions(schema: &mut Value) {
     let Some(branches) = schema.get_mut("oneOf").and_then(Value::as_array_mut) else {
         return;
@@ -617,6 +777,7 @@ mod tests {
             names,
             [
                 "mach",
+                "list_accounts",
                 "inbox_overview",
                 "read_thread",
                 "find_threads",
@@ -678,5 +839,88 @@ mod tests {
         assert_eq!(payload["unread_count"], 1);
         assert_eq!(payload["threads"][0]["id"], "thread-1");
         assert_eq!(payload["threads"][0]["from"], "Sender <sender@example.com>");
+    }
+
+    #[tokio::test]
+    async fn raw_mach_account_nickname_scopes_one_call() {
+        let mut server = server();
+        let work = AccountId::new("work@example.com");
+        let home = AccountId::new("home@example.com");
+        server.known_accounts = vec![work.clone(), home.clone()];
+        server
+            .user_config
+            .accounts
+            .insert(work.to_string(), "Work".into());
+        server.rebuild_dispatcher();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        for (account, id) in [(&work, "work-thread"), (&home, "home-thread")] {
+            server
+                .store
+                .upsert_threads(
+                    account,
+                    vec![ThreadUpsert {
+                        id: id.into(),
+                        history_id: 1,
+                        subject: "Needle".into(),
+                        snippet: String::new(),
+                        participants: vec![],
+                        last_message_at_ms: now,
+                        label_ids: vec!["INBOX".into()],
+                        messages: vec![MessageUpsert {
+                            id: format!("{id}-message"),
+                            thread_id: id.into(),
+                            history_id: 1,
+                            internal_date_ms: now,
+                            from: "sender@example.com".into(),
+                            to: vec![account.to_string()],
+                            cc: vec![],
+                            subject: "Needle".into(),
+                            snippet: String::new(),
+                            label_ids: vec!["INBOX".into()],
+                            body_plain: Some("Needle".into()),
+                            headers_json: None,
+                        }],
+                    }],
+                )
+                .await
+                .unwrap();
+        }
+
+        let result = server
+            .call_mach(json!({
+                "kind": "search",
+                "query": "Needle",
+                "limit": 10,
+                "account": "work"
+            }))
+            .await
+            .unwrap();
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        let data = payload["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["account_id"], "work@example.com");
+        assert_eq!(data[0]["account_label"], "Work");
+    }
+
+    #[tokio::test]
+    async fn compose_new_in_unified_scope_has_helpful_error() {
+        let mut server = server();
+        server.known_accounts = vec![
+            AccountId::new("work@example.com"),
+            AccountId::new("home@example.com"),
+        ];
+        server.rebuild_dispatcher();
+
+        let error = server
+            .call_mach(json!({ "kind": "compose_new" }))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(
+            "compose needs an account: pass account, use --account, or set [accounts] default in config.toml"
+        ));
     }
 }

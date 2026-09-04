@@ -6,6 +6,7 @@ use crate::runtime;
 
 pub async fn run(account: Option<&str>) -> Result<()> {
     let store = runtime::open_store().await?;
+    let accounts = mach_gmail::credentials::load_all()?;
     // Try to spin up a Gmail client; if env creds aren't set the MCP
     // server still serves cached reads + queues mutations to the outbox
     // for the next sync.
@@ -19,6 +20,7 @@ pub async fn run(account: Option<&str>) -> Result<()> {
     let scope = runtime::account_scope(account);
     Server::new(store, body_fetchers, scope)
         .with_user_config(runtime::user_config()?)
+        .with_accounts(accounts)
         .run()
         .await
 }
