@@ -421,6 +421,8 @@ fn remote_message_to_upsert(m: &RemoteMessage) -> MessageUpsert {
         in_reply_to: m.header("In-Reply-To").map(str::to_string),
         references: m.header("References").map(str::to_string),
         reply_to: m.header("Reply-To").map(str::to_string),
+        list_unsubscribe: m.header("List-Unsubscribe").map(str::to_string),
+        list_unsubscribe_post: m.header("List-Unsubscribe-Post").map(str::to_string),
     };
 
     MessageUpsert {
@@ -456,6 +458,7 @@ pub struct IncrementalStats {
     pub echoes_suppressed: u32,
     /// Distinct threads we re-fetched as a result of history events.
     pub threads_refetched: u32,
+    pub muted_archived: u32,
     /// `true` if the server replied 404 (gap) and we triggered a
     /// re-bootstrap on the last 7 days.
     pub gap_recovered: bool,
@@ -496,6 +499,11 @@ fn is_echo(record: &HistoryRecord, expected: &HashSet<(String, String, bool)>) -
         .collect();
 
     !net.is_empty() && net.is_subset(expected)
+}
+
+fn should_auto_archive(label_ids: &[String], muted_label_id: &str) -> bool {
+    label_ids.iter().any(|label| label == muted_label_id)
+        && label_ids.iter().any(|label| label == "INBOX")
 }
 
 /// Incremental sync. Reads the stored cursor, asks Gmail for everything
@@ -639,6 +647,29 @@ pub async fn incremental_sync(
     if !threads.is_empty() {
         let upserts: Vec<ThreadUpsert> = threads.iter().map(remote_thread_to_upsert).collect();
         store.upsert_threads(&account, upserts).await?;
+
+        let scope = AccountScope::One(account.clone());
+        if let Some(muted_label_id) = store
+            .list_labels(&scope)
+            .await?
+            .into_iter()
+            .find(|label| label.name == "MACH/Muted")
+            .map(|label| label.id)
+        {
+            let dispatcher = Dispatcher::with_scope(store.clone(), scope);
+            for thread in &threads {
+                let labels = remote_thread_to_upsert(thread).label_ids;
+                if should_auto_archive(&labels, muted_label_id.as_str()) {
+                    dispatcher
+                        .execute(Action::Archive {
+                            thread_ids: vec![ThreadId::new(thread.id.clone())],
+                        })
+                        .await
+                        .context("auto-archiving muted thread")?;
+                    stats.muted_archived += 1;
+                }
+            }
+        }
     }
 
     if !failures.is_empty() {
@@ -707,6 +738,7 @@ async fn gap_recover(
         events: 0,
         echoes_suppressed: 0,
         threads_refetched: refetched,
+        muted_archived: 0,
         gap_recovered: true,
         new_cursor,
     })
@@ -766,6 +798,16 @@ mod tests {
     }
 
     #[test]
+    fn muted_inbox_threads_are_auto_archived() {
+        assert!(should_auto_archive(
+            &["INBOX".into(), "Label_42".into()],
+            "Label_42"
+        ));
+        assert!(!should_auto_archive(&["Label_42".into()], "Label_42"));
+        assert!(!should_auto_archive(&["INBOX".into()], "Label_42"));
+    }
+
+    #[test]
     fn older_query_maps_labels_and_date_window() {
         let user_id = LabelId::new("Label_42");
         let labels = vec![Label {
@@ -803,7 +845,9 @@ mod tests {
             "payload": {
                 "headers": [
                     {"name": "Message-ID", "value": "<message@example.com>"},
-                    {"name": "Reply-To", "value": "reply@example.com"}
+                    {"name": "Reply-To", "value": "reply@example.com"},
+                    {"name": "List-Unsubscribe", "value": "<https://example.com/u>"},
+                    {"name": "List-Unsubscribe-Post", "value": "List-Unsubscribe=One-Click"}
                 ]
             }
         }))
@@ -814,6 +858,11 @@ mod tests {
             serde_json::from_str(upsert.headers_json.as_deref().unwrap()).unwrap();
         assert_eq!(headers["message_id"], "<message@example.com>");
         assert_eq!(headers["reply_to"], "reply@example.com");
+        assert_eq!(headers["list_unsubscribe"], "<https://example.com/u>");
+        assert_eq!(
+            headers["list_unsubscribe_post"],
+            "List-Unsubscribe=One-Click"
+        );
         assert!(headers.get("in_reply_to").is_none());
         assert!(headers.get("references").is_none());
     }

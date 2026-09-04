@@ -16,6 +16,7 @@ pub mod mock;
 pub mod search_query;
 pub mod state;
 pub mod store;
+pub mod unsubscribe;
 pub mod user_config;
 
 pub use action::{Action, ActionOutcome, DraftPatch, OpId};
@@ -30,4 +31,5 @@ pub use state::AppState;
 pub use store::{
     InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
 };
+pub use unsubscribe::{unsubscribe_targets, UnsubscribeTarget};
 pub use user_config::UserConfig;

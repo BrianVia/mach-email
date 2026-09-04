@@ -7,7 +7,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -16,11 +16,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use mach_core::ids::{AccountScope, DraftId, LabelId, ThreadId};
+use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
-    split_of, Action, ActionOutcome, Dispatcher, DraftPatch, Split, UserConfig,
+    split_of, Action, ActionOutcome, Dispatcher, DraftPatch, Split, UnsubscribeTarget, UserConfig,
 };
 use mach_store::SqliteStore;
 use ratatui::Terminal;
@@ -53,8 +53,16 @@ pub struct App {
     pub chord_buffer: String,
     pub last_chord_continuations: Vec<String>,
     pub inbox_split: Split,
+    pending_unsubscribe: Option<PendingUnsubscribe>,
 
     pub running: bool,
+}
+
+struct PendingUnsubscribe {
+    message_id: MessageId,
+    account_id: AccountId,
+    target: UnsubscribeTarget,
+    expires_at: Instant,
 }
 
 /// The active screen. Plus per-screen state.
@@ -211,6 +219,7 @@ impl App {
             chord_buffer: String::new(),
             last_chord_continuations: Vec::new(),
             inbox_split: Split::Important,
+            pending_unsubscribe: None,
             running: true,
         })
     }
@@ -904,6 +913,10 @@ async fn execute_action(app: &mut App, action: Action) {
             send_composer(app).await;
             return;
         }
+        Action::Unsubscribe { message_id } => {
+            handle_unsubscribe(app, message_id.clone()).await;
+            return;
+        }
         Action::OpenThread { id } => {
             open_thread(app, id.clone()).await;
             return;
@@ -939,7 +952,10 @@ async fn execute_action(app: &mut App, action: Action) {
     }
 
     // All other actions go through the dispatcher (mutations, etc.).
-    let is_archive_or_trash = matches!(&action, Action::Archive { .. } | Action::Trash { .. });
+    let is_archive_or_trash = matches!(
+        &action,
+        Action::Archive { .. } | Action::Mute { .. } | Action::Trash { .. }
+    );
     let is_in_reading_mode = matches!(&app.view, View::Thread(_));
 
     match app.dispatcher.execute(action.clone()).await {
@@ -982,6 +998,110 @@ async fn execute_action(app: &mut App, action: Action) {
         }
         Err(e) => warn!(error = %e, "dispatch failed"),
     }
+}
+
+async fn handle_unsubscribe(app: &mut App, message_id: MessageId) {
+    if let Some(pending) = app.pending_unsubscribe.take() {
+        if pending.message_id == message_id && Instant::now() <= pending.expires_at {
+            if let Err(error) = perform_unsubscribe(app, pending).await {
+                warn!(%error, "unsubscribe failed");
+                app.status.hint = format!("Unsubscribe failed: {error}");
+            } else {
+                app.status.hint = "Unsubscribed".into();
+            }
+            return;
+        }
+    }
+
+    let account_id = match app
+        .store
+        .get_message(&app.scope, &message_id)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(message) => message.account_id,
+        None => return,
+    };
+    match app
+        .dispatcher
+        .execute(Action::Unsubscribe {
+            message_id: message_id.clone(),
+        })
+        .await
+    {
+        Ok(outcome) => {
+            let target = outcome
+                .data
+                .and_then(|data| data.get("targets").cloned())
+                .and_then(|targets| serde_json::from_value::<Vec<UnsubscribeTarget>>(targets).ok())
+                .and_then(|targets| targets.into_iter().next());
+            let Some(target) = target else {
+                app.status.hint = "No unsubscribe method advertised".into();
+                return;
+            };
+            let display = match &target {
+                UnsubscribeTarget::Https { url, .. } => url.clone(),
+                UnsubscribeTarget::Mailto { to, .. } => format!("mailto:{to}"),
+            };
+            app.status.hint = format!("{display} — ctrl+u again within 5s to confirm");
+            app.pending_unsubscribe = Some(PendingUnsubscribe {
+                message_id,
+                account_id,
+                target,
+                expires_at: Instant::now() + Duration::from_secs(5),
+            });
+        }
+        Err(error) => warn!(%error, "unsubscribe discovery failed"),
+    }
+}
+
+async fn perform_unsubscribe(app: &mut App, pending: PendingUnsubscribe) -> Result<()> {
+    match pending.target {
+        UnsubscribeTarget::Https { url, one_click } => {
+            if one_click {
+                mach_gmail::one_click_unsubscribe(&url).await?;
+            } else {
+                webbrowser::open(&url).context("opening unsubscribe URL")?;
+            }
+        }
+        UnsubscribeTarget::Mailto { to, subject } => {
+            let dispatcher = Dispatcher::with_scope(
+                app.store.clone(),
+                AccountScope::One(pending.account_id.clone()),
+            );
+            let draft = draft_from_outcome(dispatcher.execute(Action::ComposeNew).await?)?;
+            dispatcher
+                .execute(Action::SaveDraft {
+                    draft_id: draft.id.clone(),
+                    patch: DraftPatch {
+                        to: Some(vec![to]),
+                        subject: Some(subject),
+                        body_md: Some("Unsubscribe".into()),
+                        ..DraftPatch::default()
+                    },
+                })
+                .await?;
+            dispatcher
+                .execute(Action::SendDraft { draft_id: draft.id })
+                .await?;
+            let fetcher = app
+                .body_fetchers
+                .get(&pending.account_id)
+                .context("account is offline")?;
+            let report = mach_gmail::OutboxWorker::new(
+                pending.account_id,
+                fetcher.client().clone(),
+                app.store.clone(),
+            )
+            .drain_once(200)
+            .await?;
+            if report.failed > 0 {
+                anyhow::bail!("{} outbox operation(s) failed", report.failed);
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn open_composer(app: &mut App, action: Action) {

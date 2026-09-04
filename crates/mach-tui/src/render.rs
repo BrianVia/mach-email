@@ -510,6 +510,7 @@ fn label_display(id: &str) -> String {
         "SPAM" => "Spam".into(),
         "DONE" => "Done".into(),
         "SNOOZED" => "Snoozed".into(),
+        "MUTED" => "Muted".into(),
         "ALL" => "All Mail".into(),
         other => other.into(),
     }

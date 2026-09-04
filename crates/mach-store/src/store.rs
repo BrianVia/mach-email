@@ -857,9 +857,9 @@ impl MailStore for SqliteStore {
         let account = scope.account().map(|value| value.as_str().to_string());
         spawn_blocking(move || -> CoreResult<Vec<ThreadSummary>> {
             let conn = pool.get().map_err(map_err)?;
-            // DONE, SNOOZED, and ALL are virtual labels derived from Gmail's
+            // DONE, SNOOZED, MUTED, and ALL are virtual labels derived from Gmail's
             // stored label IDs.
-            if matches!(label.as_str(), "DONE" | "SNOOZED" | "ALL") {
+            if matches!(label.as_str(), "DONE" | "SNOOZED" | "MUTED" | "ALL") {
                 let mut stmt = conn
                     .prepare_cached(
                         "SELECT account_id, id, subject, snippet, participants_json, last_message_at,
@@ -880,6 +880,14 @@ impl MailStore for SqliteStore {
                                  SELECT 1 FROM json_each(label_ids_json) j
                                  JOIN labels l ON l.account_id = threads.account_id AND l.id = j.value
                                  WHERE l.name LIKE 'MACH/Snoozed/%'
+                               )
+                           ))
+                           OR (?1 = 'MUTED' AND (
+                               label_ids_json LIKE '%\"MACH/Muted\"%'
+                               OR EXISTS (
+                                 SELECT 1 FROM json_each(label_ids_json) j
+                                 JOIN labels l ON l.account_id = threads.account_id AND l.id = j.value
+                                 WHERE l.name = 'MACH/Muted'
                                )
                            )))
                            AND (?2 IS NULL OR account_id = ?2)
@@ -2219,6 +2227,7 @@ mod tests {
             in_reply_to: Some("<parent@example.com>".into()),
             references: Some("<root@example.com>".into()),
             reply_to: Some("reply@example.com".into()),
+            ..MessageHeaders::default()
         };
         pool.get()
             .unwrap()
@@ -2355,6 +2364,31 @@ mod tests {
         assert!(snoozed
             .iter()
             .any(|thread| thread.id.as_str() == "gmail-id"));
+    }
+
+    #[tokio::test]
+    async fn list_threads_in_muted_returns_only_muted_threads() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "inbox", "inbox", "inbox", &["INBOX"]);
+        seed(&pool, "muted", "muted", "muted", &["MACH/Muted"]);
+        seed(&pool, "gmail-id", "gmail-id", "gmail-id", &["Label_1"]);
+        pool.get()
+            .unwrap()
+            .execute(
+                "INSERT INTO labels (account_id, id, name, type)
+                 VALUES (?1, 'Label_1', 'MACH/Muted', 'user')",
+                params![account().as_str()],
+            )
+            .unwrap();
+
+        let store = SqliteStore::new(pool);
+        let muted = store
+            .list_threads_in_label(&scope(), &LabelId::new("MUTED"), 10)
+            .await
+            .unwrap();
+        assert_eq!(muted.len(), 2);
+        assert!(muted.iter().any(|thread| thread.id.as_str() == "muted"));
+        assert!(muted.iter().any(|thread| thread.id.as_str() == "gmail-id"));
     }
 
     #[tokio::test]

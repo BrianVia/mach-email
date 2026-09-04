@@ -173,6 +173,8 @@ async fn main() -> Result<()> {
             commands::settings,
             commands::account_status,
             commands::flush_outbox,
+            commands::unsubscribe_post,
+            commands::unsubscribe_mailto,
             commands::outbox_summary,
             commands::retry_outbox,
             commands::sync_now,

@@ -331,7 +331,9 @@ impl GmailClient {
              &metadataHeaders=Message-Id\
              &metadataHeaders=In-Reply-To\
              &metadataHeaders=References\
-             &metadataHeaders=Reply-To"
+             &metadataHeaders=Reply-To\
+             &metadataHeaders=List-Unsubscribe\
+             &metadataHeaders=List-Unsubscribe-Post"
         );
         self.get_json(&url).await
     }
@@ -350,7 +352,9 @@ impl GmailClient {
              &metadataHeaders=Message-Id\
              &metadataHeaders=In-Reply-To\
              &metadataHeaders=References\
-             &metadataHeaders=Reply-To"
+             &metadataHeaders=Reply-To\
+             &metadataHeaders=List-Unsubscribe\
+             &metadataHeaders=List-Unsubscribe-Post"
         );
         self.get_json_optional(&url).await
     }
