@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use mach_core::{
-    ids::{AccountId, AccountScope, ThreadId},
+    ids::{AccountId, AccountScope, LabelId, ThreadId},
     store::{MailStore, ThreadSummary},
 };
 use mach_store::{MessageBodyUpdate, SqliteStore};
@@ -252,6 +252,50 @@ impl GmailAccountPool {
             .dedup_by(|left, right| left.account_id == right.account_id && left.id == right.id);
         report.results.truncate(limit as usize);
         report
+    }
+
+    pub async fn load_older(
+        &self,
+        scope: &AccountScope,
+        label: &LabelId,
+        before_ms: i64,
+    ) -> Result<crate::sync::LoadOlderStats> {
+        let selected: Vec<_> = self
+            .fetchers
+            .iter()
+            .filter(|(account, _)| scope.account().map_or(true, |wanted| wanted == *account))
+            .map(|(account, fetcher)| (account.clone(), fetcher.clone()))
+            .collect();
+        let results = stream::iter(selected)
+            .map(|(account, fetcher)| {
+                let label = label.clone();
+                async move {
+                    crate::sync::load_older(
+                        &account,
+                        fetcher.client.clone(),
+                        fetcher.store.clone(),
+                        &label,
+                        before_ms,
+                        30,
+                    )
+                    .await
+                    .with_context(|| format!("loading older mail for {account}"))
+                }
+            })
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut total = crate::sync::LoadOlderStats::default();
+        for result in results {
+            let stats = result?;
+            total.fetched += stats.fetched;
+            total.oldest_ms = match (total.oldest_ms, stats.oldest_ms) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (None, value) | (value, None) => value,
+            };
+        }
+        Ok(total)
     }
 }
 

@@ -165,6 +165,7 @@ async fn main() -> Result<()> {
             commands::dispatch_action,
             commands::list_threads,
             commands::list_labels,
+            commands::load_older,
             commands::open_thread,
             commands::refetch_thread,
             commands::search,

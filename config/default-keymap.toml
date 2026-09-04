@@ -26,6 +26,7 @@
 "k"        = "select_prev"
 "down"     = "select_next"
 "up"       = "select_prev"
+"shift+l"  = "load_older"
 
 # Open thread
 "enter"    = { kind = "open_thread", id = "$current_thread" }
