@@ -2,11 +2,12 @@
 //!
 //! The dispatcher writes optimistic local mutations + an outbox entry. This
 //! worker reads pending entries in FIFO order and rams them through the
-//! corresponding Gmail endpoint, marking each `done` on success or
-//! `failed` with the error string on persistent failure.
+//! corresponding Gmail endpoint, marking each `done` on success. The store
+//! owns retries for every operation kind: failures back off for 1m, 5m, 30m,
+//! and 2h, then dead-letter on the fifth failed attempt.
 //!
-//! Retry policy is lazy: we don't loop with backoff inside the worker.
-//! `drain_once` makes a single pass; currently `mach sync` is the caller.
+//! `drain_once` makes one pass over operations currently due; later sync ticks
+//! retry them after the store's durable `next_attempt_at` deadline.
 //!
 //! ECHO SUPPRESSION (planned, not yet implemented): when the sync engine
 //! receives `historyAdded`/`labelRemoved` events whose net effect matches

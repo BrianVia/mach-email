@@ -6,7 +6,8 @@ use mach_core::{
     ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId},
     search_query::SearchQuery,
     store::{
-        Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind, ThreadSummary,
+        Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
+        ThreadSummary,
     },
 };
 use rusqlite::{params, params_from_iter, types::Value, OptionalExtension, Row};
@@ -334,7 +335,52 @@ pub struct DeadLetter {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxEntry {
+    pub account_id: AccountId,
+    pub id: i64,
+    pub kind: String,
+    pub attempts: u32,
+    pub state: String,
+    pub last_error: Option<String>,
+}
+
 impl SqliteStore {
+    pub async fn list_outbox(
+        &self,
+        scope: &AccountScope,
+    ) -> mach_core::CoreResult<Vec<OutboxEntry>> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> mach_core::CoreResult<Vec<OutboxEntry>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT account_id, id, op_kind, attempts, state, last_error
+                     FROM outbox WHERE ?1 IS NULL OR account_id = ?1
+                     ORDER BY account_id, id",
+                )
+                .map_err(map_err)?;
+            let rows = stmt
+                .query_map(params![account], |row| {
+                    Ok(OutboxEntry {
+                        account_id: AccountId::new(row.get::<_, String>(0)?),
+                        id: row.get(1)?,
+                        kind: row.get(2)?,
+                        attempts: row.get::<_, i64>(3)? as u32,
+                        state: row.get(4)?,
+                        last_error: row.get(5)?,
+                    })
+                })
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(rows)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     pub async fn draft_state_counts(
         &self,
         account: &AccountId,
@@ -1367,14 +1413,15 @@ impl MailStore for SqliteStore {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT id FROM outbox
-                     WHERE account_id = ?1 AND state = 'pending'
-                     ORDER BY id LIMIT ?2",
+                     WHERE account_id = ?1 AND state = 'pending' AND next_attempt_at <= ?2
+                     ORDER BY id LIMIT ?3",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![account.as_str(), max as i64], |r| {
-                    r.get::<_, i64>("id")
-                })
+                .query_map(
+                    params![account.as_str(), Utc::now().timestamp_millis(), max as i64],
+                    |r| r.get::<_, i64>("id"),
+                )
                 .map_err(map_err)?;
             // We can't easily return CoreResult from query_map's closure, so
             // collect rowids first, then re-fetch with our deserializing helper.
@@ -1450,9 +1497,17 @@ impl MailStore for SqliteStore {
             };
             let attempts = attempts + 1;
             let state = if attempts >= 5 { "failed" } else { "pending" };
+            const BACKOFF_MS: [i64; 5] = [60_000, 300_000, 1_800_000, 7_200_000, 43_200_000];
+            let next_attempt_at = if attempts < 5 {
+                Utc::now().timestamp_millis() + BACKOFF_MS[attempts as usize - 1]
+            } else {
+                0
+            };
             tx.execute(
-                "UPDATE outbox SET attempts = ?1, last_error = ?2, state = ?3 WHERE id = ?4",
-                params![attempts, error, state, id],
+                "UPDATE outbox
+                 SET attempts = ?1, last_error = ?2, state = ?3, next_attempt_at = ?4
+                 WHERE id = ?5",
+                params![attempts, error, state, next_attempt_at, id],
             )
             .map_err(map_err)?;
             if attempts >= 5 && op_kind == "send_draft" {
@@ -1469,6 +1524,53 @@ impl MailStore for SqliteStore {
             }
             tx.commit().map_err(map_err)?;
             Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn outbox_summary(&self, scope: &AccountScope) -> CoreResult<OutboxSummary> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<OutboxSummary> {
+            let conn = pool.get().map_err(map_err)?;
+            conn.query_row(
+                "SELECT
+                    SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END),
+                    (SELECT last_error FROM outbox
+                     WHERE (?1 IS NULL OR account_id = ?1)
+                       AND state IN ('pending', 'failed') AND last_error IS NOT NULL
+                     ORDER BY id DESC LIMIT 1)
+                 FROM outbox WHERE ?1 IS NULL OR account_id = ?1",
+                params![account],
+                |row| {
+                    Ok(OutboxSummary {
+                        pending: row.get::<_, Option<i64>>(0)?.unwrap_or(0) as u32,
+                        failed: row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u32,
+                        last_error: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(map_err)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        spawn_blocking(move || -> CoreResult<u32> {
+            let conn = pool.get().map_err(map_err)?;
+            conn.execute(
+                "UPDATE outbox
+                 SET state = 'pending', attempts = 0, next_attempt_at = 0
+                 WHERE account_id = ?1 AND state = 'failed'",
+                params![account.as_str()],
+            )
+            .map(|count| count as u32)
+            .map_err(map_err)
         })
         .await
         .map_err(map_err)?
@@ -1792,6 +1894,61 @@ mod tests {
         store.mark_outbox_done(id).await.unwrap();
         let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn outbox_failures_back_off_surface_and_can_be_retried() {
+        let pool = open_in_memory().unwrap();
+        let store = SqliteStore::new(pool.clone());
+        let id = store
+            .enqueue_outbox(
+                &account(),
+                &OpId::new(),
+                &OutboxOpKind::Trash {
+                    thread_ids: vec![ThreadId::new("t1")],
+                },
+            )
+            .await
+            .unwrap();
+
+        store.mark_outbox_failed(id, "temporary").await.unwrap();
+        assert!(store
+            .drain_pending_outbox(&account(), 10)
+            .await
+            .unwrap()
+            .is_empty());
+        let (attempts, state, next_attempt_at): (i64, String, i64) = pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT attempts, state, next_attempt_at FROM outbox WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((attempts, state.as_str()), (1, "pending"));
+        assert!(next_attempt_at > Utc::now().timestamp_millis());
+
+        let summary = store.outbox_summary(&AccountScope::All).await.unwrap();
+        assert_eq!((summary.pending, summary.failed), (1, 0));
+        assert_eq!(summary.last_error.as_deref(), Some("temporary"));
+
+        for _ in 1..5 {
+            store.mark_outbox_failed(id, "permanent").await.unwrap();
+        }
+        let summary = store.outbox_summary(&scope()).await.unwrap();
+        assert_eq!((summary.pending, summary.failed), (0, 1));
+        assert_eq!(store.retry_failed_outbox(&account()).await.unwrap(), 1);
+        let summary = store.outbox_summary(&scope()).await.unwrap();
+        assert_eq!((summary.pending, summary.failed), (1, 0));
+        assert_eq!(
+            store
+                .drain_pending_outbox(&account(), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

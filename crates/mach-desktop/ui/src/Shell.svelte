@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import type { OutboxSummary } from "./lib/ipc";
   import SidebarItem from "./aurora/SidebarItem.svelte";
 
   type Continuation = { next: string; action_name: string };
@@ -9,6 +10,7 @@
     subtitle,
     accountEmail,
     online,
+    outbox,
     activeLabel,
     chordBuf,
     chordConts,
@@ -19,6 +21,7 @@
     subtitle: string;
     accountEmail?: string;
     online: boolean;
+    outbox: OutboxSummary;
     activeLabel?: string;
     chordBuf: string;
     chordConts: Continuation[];
@@ -48,6 +51,11 @@
       <span class:online class="status-pill">
         <i></i>{online ? "Live" : "Offline"}
       </span>
+      {#if outbox.failed > 0}
+        <span class="status-pill failed" title={outbox.last_error ?? undefined}>{outbox.failed} failed</span>
+      {:else if outbox.pending > 0}
+        <span class="status-pill unsynced">{outbox.pending} unsynced</span>
+      {/if}
     </div>
   </header>
 
@@ -96,6 +104,8 @@
   .status-pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
   .status-pill.online { color: var(--success); background: color-mix(in oklab, var(--success) 14%, transparent); }
   .status-pill.online i { background: var(--success); box-shadow: 0 0 6px color-mix(in oklab, var(--success) 60%, transparent); }
+  .status-pill.unsynced { color: #d99500; background: color-mix(in oklab, #d99500 14%, transparent); }
+  .status-pill.failed { color: var(--danger); background: color-mix(in oklab, var(--danger) 14%, transparent); }
   .body { display: grid; min-height: 0; grid-template-columns: 210px 1fr; }
   aside { padding: 14px; border-right: 1px solid var(--border); background: var(--sidebar); }
   .brand { padding: 8px 9px 18px; font-weight: 750; }
