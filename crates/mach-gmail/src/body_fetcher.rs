@@ -129,7 +129,11 @@ impl GmailAccountPool {
                     fetchers.insert(account, Arc::new(fetcher));
                 }
                 Err(e) => {
-                    warn!(account = account.as_str(), error = format!("{e:#}"), "skipping account: client setup failed");
+                    warn!(
+                        account = account.as_str(),
+                        error = format!("{e:#}"),
+                        "skipping account: client setup failed"
+                    );
                 }
             }
         }

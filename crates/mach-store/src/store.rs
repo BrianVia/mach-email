@@ -4,11 +4,12 @@ use mach_core::{
     action::OpId,
     error::{CoreError, CoreResult},
     ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId},
+    search_query::SearchQuery,
     store::{
         Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind, ThreadSummary,
     },
 };
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, types::Value, OptionalExtension, Row};
 use tokio::task::spawn_blocking;
 
 use crate::DbPool;
@@ -869,30 +870,72 @@ impl MailStore for SqliteStore {
         limit: u32,
     ) -> CoreResult<Vec<ThreadSummary>> {
         let pool = self.pool.clone();
-        let account = scope.account().map(|value| value.as_str().to_string());
-        // FTS5 treats `-`, `:`, `"`, `*` and `()` as operators. For now we
-        // treat the user's input as literal text by wrapping in a phrase
-        // (doubled-quote escaping). When we add a real advanced-search
-        // surface, we'll bypass this and pass FTS5 syntax through unchanged.
-        let query = format!("\"{}\"", query.replace('"', "\"\""));
+        let account = scope.account().map(|value| value.as_str().to_owned());
+        let query = SearchQuery::parse(query);
         spawn_blocking(move || -> CoreResult<Vec<ThreadSummary>> {
             let conn = pool.get().map_err(map_err)?;
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT t.account_id, t.id, t.subject, t.snippet, t.participants_json, t.last_message_at,
-                            t.message_count, t.unread, t.starred, t.label_ids_json
-                     FROM messages_fts f
+            let mut sql = String::from(
+                "SELECT t.account_id, t.id, t.subject, t.snippet, t.participants_json, t.last_message_at,
+                        t.message_count, t.unread, t.starred, t.label_ids_json ",
+            );
+            let mut values = Vec::new();
+            if let Some(fts) = query.to_fts5() {
+                sql.push_str(
+                    "FROM messages_fts f
                      JOIN messages m ON m.rowid = f.rowid
                      JOIN threads t ON t.account_id = m.account_id AND t.id = m.thread_id
-                     WHERE messages_fts MATCH ?1
-                       AND (?2 IS NULL OR t.account_id = ?2)
-                     GROUP BY t.account_id, t.id
-                     ORDER BY MAX(t.last_message_at) DESC
-                     LIMIT ?3",
-                )
-                .map_err(map_err)?;
+                     WHERE messages_fts MATCH ? ",
+                );
+                values.push(Value::Text(fts));
+            } else {
+                sql.push_str("FROM threads t WHERE 1 = 1 ");
+            }
+            if let Some(account) = account {
+                sql.push_str("AND t.account_id = ? ");
+                values.push(Value::Text(account));
+            }
+            if let Some(unread) = query.is_unread {
+                sql.push_str("AND t.unread = ? ");
+                values.push(Value::Integer(unread.into()));
+            }
+            if let Some(starred) = query.is_starred {
+                sql.push_str("AND t.starred = ? ");
+                values.push(Value::Integer(starred.into()));
+            }
+            for label in query.labels {
+                sql.push_str(
+                    "AND EXISTS (
+                       SELECT 1 FROM json_each(t.label_ids_json) j
+                       LEFT JOIN labels l ON l.account_id = t.account_id AND l.id = j.value
+                       WHERE j.value = ? OR l.name = ? COLLATE NOCASE
+                     ) ",
+                );
+                values.push(Value::Text(label.clone()));
+                values.push(Value::Text(label));
+            }
+            let now = Utc::now().timestamp_millis();
+            if let Some(days) = query.newer_than_days {
+                sql.push_str("AND t.last_message_at >= ? ");
+                values.push(Value::Integer(now - i64::from(days) * 86_400_000));
+            }
+            if let Some(days) = query.older_than_days {
+                sql.push_str("AND t.last_message_at <= ? ");
+                values.push(Value::Integer(now - i64::from(days) * 86_400_000));
+            }
+            if query.has_attachment {
+                sql.push_str(
+                    "AND EXISTS (
+                       SELECT 1 FROM attachments a
+                       JOIN messages m2 ON m2.account_id = a.account_id AND m2.id = a.message_id
+                       WHERE m2.account_id = t.account_id AND m2.thread_id = t.id
+                     ) ",
+                );
+            }
+            sql.push_str("GROUP BY t.account_id, t.id ORDER BY t.last_message_at DESC LIMIT ?");
+            values.push(Value::Integer(limit.into()));
+            let mut stmt = conn.prepare_cached(&sql).map_err(map_err)?;
             let rows = stmt
-                .query_map(params![&query, account, limit as i64], row_to_thread)
+                .query_map(params_from_iter(values), row_to_thread)
                 .map_err(map_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_err)?;
@@ -1693,6 +1736,34 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id.as_str(), "t1");
+    }
+
+    #[tokio::test]
+    async fn search_operators_filter_threads() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "unread", "Update", "Status", &["INBOX", "UNREAD"]);
+        seed(&pool, "starred", "Invoice", "Paid", &["INBOX", "STARRED"]);
+        let store = SqliteStore::new(pool);
+
+        let unread = store
+            .search_threads(&scope(), "is:unread", 10)
+            .await
+            .unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].id.as_str(), "unread");
+
+        let from = store
+            .search_threads(&scope(), "from:alice", 10)
+            .await
+            .unwrap();
+        assert_eq!(from.len(), 2);
+
+        let starred = store
+            .search_threads(&scope(), "is:starred", 10)
+            .await
+            .unwrap();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].id.as_str(), "starred");
     }
 
     #[tokio::test]
