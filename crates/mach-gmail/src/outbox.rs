@@ -8,10 +8,8 @@
 //! Retry policy is lazy: we don't loop with backoff inside the worker.
 //! `drain_once` makes a single pass; currently `mach sync` is the caller.
 //!
-//! ECHO SUPPRESSION (planned, not yet implemented): when the sync engine
-//! receives `historyAdded`/`labelRemoved` events whose net effect matches
-//! one of our recent (<60s) own `op_id`s, drop the event to prevent a
-//! UI flicker. That logic lives in the incremental sync path, not here.
+//! Echoes of recently completed label mutations are suppressed by
+//! [`crate::sync::incremental_sync`] to avoid redundant refetches and UI flicker.
 
 use std::sync::Arc;
 

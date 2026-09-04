@@ -448,6 +448,8 @@ pub struct HistoryRecord {
 #[derive(Debug, Deserialize)]
 pub struct HistoryMessageRef {
     pub message: HistoryMessageStub,
+    #[serde(default, rename = "labelIds")]
+    pub label_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
