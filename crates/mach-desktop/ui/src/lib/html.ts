@@ -1,6 +1,5 @@
-// Sanitize HTML email bodies for safe rendering. Plus rewrite `cid:`
-// references on `<img>` tags to point at our `mach://attachment/...`
-// scheme so the WebView can fetch them through our Rust handler.
+// Sanitize HTML email bodies for safe rendering, block remote images by
+// default, and rewrite `cid:` references for the WebView's Rust handler.
 
 import DOMPurify from "dompurify";
 import type { Message } from "./ipc";
@@ -14,7 +13,11 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 
 export type RenderableHtml = {
   html: string;
+  blockedRemoteCount: number;
 };
+
+const TRANSPARENT_GIF =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 /**
  * Sanitize a message's HTML body and resolve `cid:` references against
@@ -27,18 +30,15 @@ export type RenderableHtml = {
  * - `<img src="cid:foo">` is rewritten to
  *   `mach://attachment/<account>/<msg_id>/<att_id>` so the Tauri protocol handler
  *   fetches the bytes and serves them with the right Content-Type.
- * - Remote `<img src="https://...">` is left alone (auto-load, per
- *   project policy — privacy tradeoff the user accepted).
+ * - Remote images and remote CSS `url()` references are blocked unless
+ *   `showRemote` is true.
  */
-export function renderEmailHtml(m: Message): RenderableHtml {
+export function renderEmailHtml(
+  m: Message,
+  { showRemote }: { showRemote: boolean } = { showRemote: false },
+): RenderableHtml {
   const raw = m.body_html ?? "";
-  if (!raw) return { html: "" };
-
-  // Build a cid → attachment_id lookup.
-  const cidMap = new Map<string, string>();
-  for (const img of m.inline_images ?? []) {
-    cidMap.set(img.content_id.toLowerCase(), img.attachment_id);
-  }
+  if (!raw) return { html: "", blockedRemoteCount: 0 };
 
   const sanitized = DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
@@ -47,13 +47,37 @@ export function renderEmailHtml(m: Message): RenderableHtml {
     ALLOW_DATA_ATTR: false,
   });
 
-  if (cidMap.size === 0) return { html: sanitized };
-
-  // Parse + rewrite cid: img sources.
+  // Parse + rewrite image sources.
   const doc = new DOMParser().parseFromString(sanitized, "text/html");
-  for (const img of Array.from(doc.querySelectorAll("img[src^='cid:']"))) {
+  const blockedRemoteCount = rewriteEmailDocument(doc, m, showRemote);
+  return { html: doc.body.innerHTML, blockedRemoteCount };
+}
+
+/** @internal Exported so the browser-independent Bun tests can exercise it. */
+export function rewriteEmailDocument(
+  doc: Document,
+  m: Message,
+  showRemote = false,
+): number {
+  const cidMap = new Map<string, string>();
+  for (const img of m.inline_images ?? []) {
+    cidMap.set(img.content_id.toLowerCase(), img.attachment_id);
+  }
+
+  let blockedRemoteCount = 0;
+  for (const img of Array.from(doc.querySelectorAll("img[src]"))) {
     const src = img.getAttribute("src") ?? "";
-    const cid = src.slice(4).toLowerCase().trim().replace(/^<|>$/g, "");
+    const normalizedSrc = src.trim();
+    if (/^(https?:)?\/\//i.test(normalizedSrc) && !showRemote) {
+      img.removeAttribute("srcset");
+      img.setAttribute("data-mach-remote-src", src);
+      img.setAttribute("src", TRANSPARENT_GIF);
+      blockedRemoteCount += 1;
+      continue;
+    }
+    if (!/^cid:/i.test(normalizedSrc)) continue;
+
+    const cid = normalizedSrc.slice(4).toLowerCase().trim().replace(/^<|>$/g, "");
     const attId = cidMap.get(cid);
     if (attId) {
       img.setAttribute(
@@ -67,5 +91,14 @@ export function renderEmailHtml(m: Message): RenderableHtml {
       img.setAttribute("title", `missing cid: ${cid}`);
     }
   }
-  return { html: doc.body.innerHTML };
+
+  if (!showRemote) {
+    for (const node of Array.from(doc.querySelectorAll("[style]"))) {
+      if (/url\s*\([^)]*https?:/i.test(node.getAttribute("style") ?? "")) {
+        node.removeAttribute("style");
+      }
+    }
+  }
+
+  return blockedRemoteCount;
 }

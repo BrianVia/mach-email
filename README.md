@@ -118,8 +118,8 @@ and preserve a copy of the local SQLite database.
 OAuth credentials are stored as one file per account under `accounts/` in the
 platform application-data directory with mode `0600` on Unix. A historical
 single `credentials.json` is migrated automatically. Email bodies and metadata
-are cached locally in SQLite. The desktop renderer sanitizes HTML, but currently
-loads remote images; opening a message can therefore notify tracking servers.
+are cached locally in SQLite. The desktop renderer sanitizes HTML and blocks
+remote images by default so opening a message does not notify tracking servers.
 
 ## License
 
