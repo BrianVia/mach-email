@@ -17,5 +17,8 @@ pub async fn run(account: Option<&str>) -> Result<()> {
         }
     };
     let scope = runtime::account_scope(account);
-    Server::new(store, body_fetchers, scope).run().await
+    Server::new(store, body_fetchers, scope)
+        .with_user_config(runtime::user_config()?)
+        .run()
+        .await
 }

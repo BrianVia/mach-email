@@ -3,21 +3,24 @@
   import Icon from "../lib/Icon.svelte";
   import type { Draft } from "../lib/ipc";
 
-  export type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
+  export type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
 
   let {
     draft,
+    title,
     onFieldsChange,
     onSend,
     onClose,
   }: {
     draft: Draft;
+    title: string;
     onFieldsChange: (fields: ComposerFields) => void;
     onSend: () => void;
     onClose: () => void;
   } = $props();
   let to = $state(untrack(() => draft.to.join(", ")));
   let cc = $state(untrack(() => draft.cc.join(", ")));
+  let bcc = $state(untrack(() => draft.bcc.join(", ")));
   let subject = $state(untrack(() => draft.subject));
   let body = $state(untrack(() => draft.body_md));
   let firstInput: HTMLInputElement;
@@ -25,19 +28,20 @@
   onMount(() => firstInput?.focus());
 
   function fieldsChanged() {
-    onFieldsChange({ to, cc, subject, body_md: body });
+    onFieldsChange({ to, cc, bcc, subject, body_md: body });
   }
 </script>
 
 <div class="backdrop" role="presentation" onclick={(event) => event.currentTarget === event.target && onClose()}>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="composer-title">
     <header>
-      <h2 id="composer-title">New message</h2>
+      <h2 id="composer-title">{title}</h2>
       <button class="escape" onclick={onClose}>esc</button>
     </header>
     <div class="fields">
       <label><span>To</span><input bind:this={firstInput} bind:value={to} oninput={fieldsChanged} /></label>
       <label><span>Cc</span><input bind:value={cc} oninput={fieldsChanged} /></label>
+      <label><span>Bcc</span><input bind:value={bcc} oninput={fieldsChanged} /></label>
       <label><span>Subject</span><input bind:value={subject} oninput={fieldsChanged} /></label>
     </div>
     <textarea bind:value={body} oninput={fieldsChanged} placeholder="Write your message…"></textarea>

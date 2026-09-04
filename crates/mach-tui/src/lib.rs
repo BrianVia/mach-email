@@ -11,4 +11,4 @@ mod email_body;
 mod keys;
 mod render;
 
-pub use app::run;
+pub use app::{run, run_with_user_config};

@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use mach_core::ids::AccountScope;
 use mach_core::Dispatcher;
+use mach_core::UserConfig;
 use mach_gmail::GmailAccountPool;
 use mach_store::SqliteStore;
 use tracing::{info, warn};
@@ -94,7 +95,13 @@ async fn main() -> Result<()> {
             .await?;
     }
     let scope = AccountScope::All;
-    let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone());
+    let user_config = config_dir()
+        .map(|dir| UserConfig::load(&dir.join("config.toml")))
+        .transpose()
+        .context("loading user config")?
+        .unwrap_or_default();
+    let dispatcher =
+        Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
 
     let body_fetchers = match GmailAccountPool::from_stored_credentials(store.clone()) {
         Ok(pool) => {
