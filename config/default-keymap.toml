@@ -61,6 +61,7 @@
 "g i"      = { kind = "open_label", label_id = "INBOX"   }
 "g s"      = { kind = "open_label", label_id = "STARRED" }
 "g d"      = { kind = "open_label", label_id = "DRAFT"   }
+"g l"      = { kind = "open_label", label_id = "SCHEDULED" }
 "g t"      = { kind = "open_label", label_id = "SENT"    }
 "g e"      = { kind = "open_label", label_id = "DONE"    }   # Superhuman "Done" = archived
 "g z"      = { kind = "open_label", label_id = "SNOOZED" }
@@ -68,6 +69,7 @@
 "g j"      = { kind = "open_label", label_id = "SPAM"    }
 "g k"      = { kind = "open_label", label_id = "TRASH"   }
 "g a"      = { kind = "open_label", label_id = "ALL"     }
+"g v"      = "show_activity"
 
 # Meta
 "z"        = "undo"

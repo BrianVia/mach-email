@@ -120,6 +120,16 @@ pub struct Draft {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledSend {
+    pub send_later_id: String,
+    pub draft_id: DraftId,
+    pub send_at: DateTime<Utc>,
+    pub subject: String,
+    pub to: Vec<String>,
+    pub account_id: AccountId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutboxOpKind {
     ModifyLabels {
@@ -150,6 +160,76 @@ pub struct OutboxOp {
     pub created_at: DateTime<Utc>,
     pub attempts: u32,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityEntry {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub at: DateTime<Utc>,
+    pub kind: String,
+    pub thread_ids: Vec<ThreadId>,
+    pub summary: String,
+    pub state: String,
+    pub undone: bool,
+}
+
+impl ActivityEntry {
+    pub fn from_outbox(op: &OutboxOp, state: String, undone: bool) -> Self {
+        let (kind, thread_ids, summary) = match &op.kind {
+            OutboxOpKind::ModifyLabels {
+                thread_ids,
+                add,
+                remove,
+            } => {
+                let has = |labels: &[LabelId], value: &str| {
+                    labels.iter().any(|label| label.as_str() == value)
+                };
+                let summary = if has(remove, "INBOX") && add.is_empty() {
+                    count_summary("Archived", thread_ids.len())
+                } else if has(add, "STARRED") {
+                    count_summary("Starred", thread_ids.len())
+                } else if has(remove, "STARRED") {
+                    count_summary("Unstarred", thread_ids.len())
+                } else if has(remove, "UNREAD") {
+                    count_summary("Marked read", thread_ids.len())
+                } else if has(add, "UNREAD") {
+                    count_summary("Marked unread", thread_ids.len())
+                } else {
+                    count_summary("Updated labels on", thread_ids.len())
+                };
+                ("modify_labels", thread_ids.clone(), summary)
+            }
+            OutboxOpKind::Trash { thread_ids } => (
+                "trash",
+                thread_ids.clone(),
+                count_summary("Trashed", thread_ids.len()),
+            ),
+            OutboxOpKind::SendDraft { .. } => ("send_draft", Vec::new(), "Sent draft".into()),
+            OutboxOpKind::SaveDraft { .. } => ("save_draft", Vec::new(), "Saved draft".into()),
+            OutboxOpKind::DeleteDraft { .. } => {
+                ("delete_draft", Vec::new(), "Deleted draft".into())
+            }
+        };
+        Self {
+            id: op.id,
+            account_id: op.account_id.clone(),
+            at: op.created_at,
+            kind: kind.into(),
+            thread_ids,
+            summary,
+            state,
+            undone,
+        }
+    }
+}
+
+fn count_summary(verb: &str, count: usize) -> String {
+    if count == 1 {
+        verb.to_string()
+    } else {
+        format!("{verb} {count} threads")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +302,8 @@ pub trait MailStore: Send + Sync {
         draft_id: &DraftId,
         send_at: DateTime<Utc>,
     ) -> CoreResult<()>;
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>>;
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()>;
     async fn complete_send(
         &self,
         outbox_row_id: i64,
@@ -244,6 +326,14 @@ pub trait MailStore: Send + Sync {
     async fn mark_outbox_failed(&self, id: i64, error: &str) -> CoreResult<()>;
     async fn outbox_summary(&self, scope: &AccountScope) -> CoreResult<OutboxSummary>;
     async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32>;
+    async fn list_activity(
+        &self,
+        scope: &AccountScope,
+        since_ms: i64,
+        limit: u32,
+    ) -> CoreResult<Vec<ActivityEntry>>;
+    async fn get_outbox_op(&self, scope: &AccountScope, id: i64) -> CoreResult<Option<OutboxOp>>;
+    async fn mark_outbox_undone(&self, id: i64, undone_by: i64) -> CoreResult<()>;
 
     /// Currently-stored sync cursor for the active account, if any.
     async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>>;

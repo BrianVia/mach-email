@@ -107,6 +107,15 @@ export type Draft = {
   updated_at: string;
 };
 
+export type ScheduledSend = {
+  send_later_id: string;
+  draft_id: string;
+  send_at: string;
+  subject: string;
+  to: string[];
+  account_id: string;
+};
+
 export type ActionOutcome = {
   action_name: string;
   op_id: string | null;
@@ -143,6 +152,17 @@ export type OutboxSummary = {
   pending: number;
   failed: number;
   last_error: string | null;
+};
+
+export type ActivityEntry = {
+  id: number;
+  account_id: string;
+  at: string;
+  kind: string;
+  thread_ids: string[];
+  summary: string;
+  state: string;
+  undone: boolean;
 };
 
 export type LoadOlderStats = {
@@ -188,6 +208,19 @@ export async function listLabels(): Promise<Label[]> {
   const r = await invoke<Out<Label[]> | null>("list_labels");
   if (!r) return [];
   return unwrap(r);
+}
+
+export async function listScheduled(): Promise<ScheduledSend[]> {
+  const result = await invoke<Out<ScheduledSend[]> | null>("list_scheduled");
+  return result ? unwrap(result) : [];
+}
+
+export async function openDraft(draftId: string): Promise<Draft> {
+  return unwrap(await invoke<Out<Draft>>("open_draft", { draftId }));
+}
+
+export async function fetchSendLaterPresets(): Promise<[string, string][]> {
+  return invoke<[string, string][]>("send_later_presets");
 }
 
 export async function loadOlder(label: string, beforeMs: number): Promise<LoadOlderStats> {
@@ -237,6 +270,10 @@ export async function fetchSettings(): Promise<Settings> {
   return invoke<Settings>("settings");
 }
 
+export async function fetchSnippets(): Promise<Record<string, string>> {
+  return invoke<Record<string, string>>("snippets");
+}
+
 export async function fetchAccountStatus(): Promise<AccountStatus> {
   return invoke<AccountStatus>("account_status");
 }
@@ -264,6 +301,10 @@ export async function unsubscribeMailto(accountId: string, to: string, subject: 
 
 export async function fetchOutboxSummary(): Promise<OutboxSummary> {
   return unwrap(await invoke<Out<OutboxSummary>>("outbox_summary"));
+}
+
+export async function listActivity(sinceMs = 0, limit = 50): Promise<ActivityEntry[]> {
+  return unwrap(await invoke<Out<ActivityEntry[]>>("list_activity", { sinceMs, limit }));
 }
 
 export async function retryOutbox(): Promise<number> {

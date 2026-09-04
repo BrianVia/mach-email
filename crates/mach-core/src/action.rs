@@ -29,8 +29,10 @@ pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
     "respond_to_invite",
     "search",
     "undo",
+    "undo_activity",
     "redo",
     "refresh",
+    "cancel_send_later",
 ];
 
 /// Deterministic identifier for a single mutation. Stamped on every outbox op
@@ -136,6 +138,9 @@ pub enum Action {
         draft_id: DraftId,
         at: DateTime<Utc>,
     },
+    CancelSendLater {
+        send_later_id: String,
+    },
 
     // --- Discovery ---
     Search {
@@ -145,9 +150,13 @@ pub enum Action {
     OpenLabel {
         label_id: LabelId,
     },
+    ShowActivity,
 
     // --- Meta ---
     Undo,
+    UndoActivity {
+        outbox_id: i64,
+    },
     Redo,
     Refresh,
     Quit,
@@ -178,9 +187,12 @@ impl Action {
             Action::SaveDraft { .. } => "save_draft",
             Action::SendDraft { .. } => "send_draft",
             Action::SendLater { .. } => "send_later",
+            Action::CancelSendLater { .. } => "cancel_send_later",
             Action::Search { .. } => "search",
             Action::OpenLabel { .. } => "open_label",
+            Action::ShowActivity => "show_activity",
             Action::Undo => "undo",
+            Action::UndoActivity { .. } => "undo_activity",
             Action::Redo => "redo",
             Action::Refresh => "refresh",
             Action::Quit => "quit",
@@ -203,6 +215,8 @@ impl Action {
                 | Action::SaveDraft { .. }
                 | Action::SendDraft { .. }
                 | Action::SendLater { .. }
+                | Action::UndoActivity { .. }
+                | Action::CancelSendLater { .. }
         )
     }
 
