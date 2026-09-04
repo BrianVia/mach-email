@@ -5,7 +5,10 @@
   import { renderEmailHtml } from "../lib/html";
   import { avatarColor, initialsFor } from "../lib/avatar";
 
-  let { v }: { v: { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number } } = $props();
+  let { v, onUnsubscribe }: {
+    v: { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number };
+    onUnsubscribe: (messageId: string) => void;
+  } = $props();
   let overrides = $state<Record<string, boolean>>({});
   let shownRemoteImages = $state<Record<string, boolean>>({});
   let remoteImageAllow = $state(loadRemoteImageAllow());
@@ -91,7 +94,20 @@
           >
             <span class="avatar" style:background={avatarColor(message.from)} aria-hidden="true">{initialsFor(message.from)}</span>
             <div class="message-meta">
-              <div class="sender"><span>{senderName(message.from)}</span>{#if senderEmail(message.from)}<small>{senderEmail(message.from)}</small>{/if}</div>
+              <div class="sender">
+                <span>{senderName(message.from)}</span>
+                {#if senderEmail(message.from)}<small>{senderEmail(message.from)}</small>{/if}
+                {#if selected && message.headers?.list_unsubscribe}
+                  <button
+                    class="unsubscribe"
+                    type="button"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      onUnsubscribe(message.id);
+                    }}
+                  >Unsubscribe</button>
+                {/if}
+              </div>
               <p>to {message.to.join(", ") || "—"}</p>
               {#if !expanded}<div class="preview">{(message.body_plain ?? message.snippet ?? "").slice(0, 200)}</div>{/if}
             </div>
@@ -142,6 +158,7 @@
   .sender { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
   .sender span { overflow: hidden; color: var(--text); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
   .sender small { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .unsubscribe { padding: 0; border: 0; background: none; color: var(--accent); font-size: 11px; cursor: pointer; }
   .message-meta p { margin: 2px 0 0; color: var(--muted); font-size: 11.5px; }
   time { flex-shrink: 0; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
   .preview { display: -webkit-box; overflow: hidden; margin-top: 8px; color: var(--muted); font-size: 13px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }

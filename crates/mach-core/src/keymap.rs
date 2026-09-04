@@ -96,6 +96,8 @@ pub struct KeyContext {
 #[derive(Debug, Clone)]
 pub enum Resolution {
     Action(Action),
+    /// Presentation-only command interpreted by the TUI/desktop adapter.
+    AdapterAction(String),
     Prefix(Vec<ChordContinuation>),
     Unbound,
 }
@@ -289,6 +291,13 @@ impl Keymap {
         };
 
         if let Some(tpl) = bindings.bindings.get(chord_so_far) {
+            let name = template_action_name(tpl);
+            if matches!(
+                name.as_str(),
+                "inbox_split_important" | "inbox_split_other" | "inbox_split_newsletters"
+            ) {
+                return Resolution::AdapterAction(name);
+            }
             return match tpl.resolve(ctx) {
                 Ok(a) => Resolution::Action(a),
                 Err(e) => {
@@ -554,6 +563,21 @@ mod tests {
         };
         let r = km.resolve(Mode::Normal, "e", &ctx);
         assert!(matches!(r, Resolution::Action(Action::Archive { .. })));
+    }
+
+    #[test]
+    fn resolves_inbox_split_as_adapter_action() {
+        let km = Keymap::from_toml(
+            r#"
+            [normal]
+            "1" = "inbox_split_important"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            km.resolve(Mode::Normal, "1", &KeyContext::default()),
+            Resolution::AdapterAction(name) if name == "inbox_split_important"
+        ));
     }
 
     #[test]

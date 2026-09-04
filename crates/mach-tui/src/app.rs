@@ -7,7 +7,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -16,11 +16,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use mach_core::ids::{AccountScope, DraftId, LabelId, ThreadId};
+use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
-    Action, ActionOutcome, Dispatcher, DraftPatch, UserConfig,
+    split_of, Action, ActionOutcome, Dispatcher, DraftPatch, Split, UnsubscribeTarget, UserConfig,
 };
 use mach_store::SqliteStore;
 use ratatui::Terminal;
@@ -52,8 +52,17 @@ pub struct App {
     pub status: StatusLine,
     pub chord_buffer: String,
     pub last_chord_continuations: Vec<String>,
+    pub inbox_split: Split,
+    pending_unsubscribe: Option<PendingUnsubscribe>,
 
     pub running: bool,
+}
+
+struct PendingUnsubscribe {
+    message_id: MessageId,
+    account_id: AccountId,
+    target: UnsubscribeTarget,
+    expires_at: Instant,
 }
 
 /// The active screen. Plus per-screen state.
@@ -209,6 +218,8 @@ impl App {
             status,
             chord_buffer: String::new(),
             last_chord_continuations: Vec::new(),
+            inbox_split: Split::Important,
+            pending_unsubscribe: None,
             running: true,
         })
     }
@@ -218,10 +229,12 @@ impl App {
         match &self.view {
             View::Inbox(v) => KeyContext {
                 selection: v
-                    .current_thread_id()
+                    .current_thread_id(self.inbox_split)
                     .map(|t| vec![t.as_str().to_string()])
                     .unwrap_or_default(),
-                current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
+                current_thread: v
+                    .current_thread_id(self.inbox_split)
+                    .map(|t| t.as_str().to_string()),
                 current_message: None,
                 current_draft: None,
             },
@@ -259,11 +272,22 @@ impl App {
 }
 
 impl InboxView {
-    pub fn current_thread(&self) -> Option<&ThreadSummary> {
-        self.threads.get(self.selected)
+    pub fn visible_threads(&self, split: Split) -> Vec<&ThreadSummary> {
+        if self.label.as_str() == "INBOX" {
+            self.threads
+                .iter()
+                .filter(|thread| split_of(&thread.label_ids) == split)
+                .collect()
+        } else {
+            self.threads.iter().collect()
+        }
     }
-    pub fn current_thread_id(&self) -> Option<&ThreadId> {
-        self.current_thread().map(|t| &t.id)
+
+    pub fn current_thread(&self, split: Split) -> Option<&ThreadSummary> {
+        self.visible_threads(split).get(self.selected).copied()
+    }
+    pub fn current_thread_id(&self, split: Split) -> Option<&ThreadId> {
+        self.current_thread(split).map(|t| &t.id)
     }
 }
 
@@ -286,9 +310,18 @@ impl SearchView {
 }
 
 async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> Result<InboxView> {
+    load_inbox_limit(store, scope, label, 200).await
+}
+
+async fn load_inbox_limit(
+    store: &SqliteStore,
+    scope: &AccountScope,
+    label: &str,
+    limit: u32,
+) -> Result<InboxView> {
     let lid = LabelId::new(label);
     let threads = store
-        .list_threads_in_label(scope, &lid, 200)
+        .list_threads_in_label(scope, &lid, limit)
         .await
         .context("listing inbox threads")?;
     Ok(InboxView {
@@ -443,13 +476,13 @@ async fn refresh_visible_inbox(app: &mut App) {
     };
     let label = current.label.clone();
     let selected = current
-        .current_thread()
+        .current_thread(app.inbox_split)
         .map(|thread| (thread.account_id.clone(), thread.id.clone()));
     match load_inbox(&app.store, &app.scope, label.as_str()).await {
         Ok(mut inbox) => {
             if let Some((account, id)) = selected {
                 inbox.selected = inbox
-                    .threads
+                    .visible_threads(app.inbox_split)
                     .iter()
                     .position(|thread| thread.account_id == account && thread.id == id)
                     .unwrap_or(0);
@@ -526,12 +559,29 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
         format!("{} {}", app.chord_buffer, chord_atom)
     };
 
+    if app
+        .keymap
+        .bindings_for(app.current_mode())
+        .iter()
+        .any(|(chord, action)| chord == &new_chord && action == "load_older")
+    {
+        app.chord_buffer.clear();
+        app.last_chord_continuations.clear();
+        execute_adapter_action(app, "load_older").await;
+        return;
+    }
+
     let ctx = app.key_context();
     match app.keymap.resolve(app.current_mode(), &new_chord, &ctx) {
         Resolution::Action(action) => {
             app.chord_buffer.clear();
             app.last_chord_continuations.clear();
             execute_action(app, action).await;
+        }
+        Resolution::AdapterAction(action) => {
+            app.chord_buffer.clear();
+            app.last_chord_continuations.clear();
+            execute_adapter_action(app, &action).await;
         }
         Resolution::Prefix(conts) => {
             app.chord_buffer = new_chord;
@@ -548,13 +598,71 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
                 app.chord_buffer.clear();
                 app.last_chord_continuations.clear();
                 let chord = key_event_to_chord(&k).unwrap_or_default();
-                if let Resolution::Action(action) =
-                    app.keymap.resolve(app.current_mode(), &chord, &ctx)
-                {
-                    execute_action(app, action).await;
+                match app.keymap.resolve(app.current_mode(), &chord, &ctx) {
+                    Resolution::Action(action) => execute_action(app, action).await,
+                    Resolution::AdapterAction(action) => execute_adapter_action(app, &action).await,
+                    Resolution::Prefix(_) | Resolution::Unbound => {}
                 }
             }
         }
+    }
+}
+
+async fn execute_adapter_action(app: &mut App, action: &str) {
+    if action == "load_older" {
+        load_older_mail(app).await;
+        return;
+    }
+    let split = match action {
+        "inbox_split_important" => Split::Important,
+        "inbox_split_other" => Split::Other,
+        "inbox_split_newsletters" => Split::Newsletters,
+        _ => return,
+    };
+    let View::Inbox(inbox) = &mut app.view else {
+        return;
+    };
+    if inbox.label.as_str() == "INBOX" {
+        app.inbox_split = split;
+        inbox.selected = inbox
+            .selected
+            .min(inbox.visible_threads(split).len().saturating_sub(1));
+        inbox.viewport_top = inbox.viewport_top.min(inbox.selected);
+    }
+}
+
+async fn load_older_mail(app: &mut App) {
+    let View::Inbox(inbox) = &app.view else {
+        return;
+    };
+    let Some(last) = inbox.threads.last() else {
+        return;
+    };
+    let label = inbox.label.clone();
+    let before_ms = last.last_message_at.timestamp_millis();
+    let limit = inbox.threads.len().saturating_add(200) as u32;
+    let selected = inbox.selected;
+    match app
+        .body_fetchers
+        .load_older(&app.scope, &label, before_ms)
+        .await
+    {
+        Ok(stats) => {
+            match load_inbox_limit(&app.store, &app.scope, label.as_str(), limit).await {
+                Ok(mut inbox) => {
+                    inbox.selected = selected.min(
+                        inbox
+                            .visible_threads(app.inbox_split)
+                            .len()
+                            .saturating_sub(1),
+                    );
+                    app.view = View::Inbox(inbox);
+                }
+                Err(error) => warn!(%error, "refreshing after load older failed"),
+            }
+            app.status.hint = format!("loaded {} older", stats.fetched);
+        }
+        Err(error) => warn!(%error, "load older failed"),
     }
 }
 
@@ -805,6 +913,10 @@ async fn execute_action(app: &mut App, action: Action) {
             send_composer(app).await;
             return;
         }
+        Action::Unsubscribe { message_id } => {
+            handle_unsubscribe(app, message_id.clone()).await;
+            return;
+        }
         Action::OpenThread { id } => {
             open_thread(app, id.clone()).await;
             return;
@@ -840,7 +952,10 @@ async fn execute_action(app: &mut App, action: Action) {
     }
 
     // All other actions go through the dispatcher (mutations, etc.).
-    let is_archive_or_trash = matches!(&action, Action::Archive { .. } | Action::Trash { .. });
+    let is_archive_or_trash = matches!(
+        &action,
+        Action::Archive { .. } | Action::Mute { .. } | Action::Trash { .. }
+    );
     let is_in_reading_mode = matches!(&app.view, View::Thread(_));
 
     match app.dispatcher.execute(action.clone()).await {
@@ -853,9 +968,9 @@ async fn execute_action(app: &mut App, action: Action) {
                 if let View::Inbox(v) = &mut app.view {
                     v.threads
                         .retain(|t| !outcome.changed_threads.iter().any(|c| c == &t.id));
-                    if v.selected >= v.threads.len() && !v.threads.is_empty() {
-                        v.selected = v.threads.len() - 1;
-                    }
+                    v.selected = v
+                        .selected
+                        .min(v.visible_threads(app.inbox_split).len().saturating_sub(1));
                 }
             }
 
@@ -883,6 +998,110 @@ async fn execute_action(app: &mut App, action: Action) {
         }
         Err(e) => warn!(error = %e, "dispatch failed"),
     }
+}
+
+async fn handle_unsubscribe(app: &mut App, message_id: MessageId) {
+    if let Some(pending) = app.pending_unsubscribe.take() {
+        if pending.message_id == message_id && Instant::now() <= pending.expires_at {
+            if let Err(error) = perform_unsubscribe(app, pending).await {
+                warn!(%error, "unsubscribe failed");
+                app.status.hint = format!("Unsubscribe failed: {error}");
+            } else {
+                app.status.hint = "Unsubscribed".into();
+            }
+            return;
+        }
+    }
+
+    let account_id = match app
+        .store
+        .get_message(&app.scope, &message_id)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(message) => message.account_id,
+        None => return,
+    };
+    match app
+        .dispatcher
+        .execute(Action::Unsubscribe {
+            message_id: message_id.clone(),
+        })
+        .await
+    {
+        Ok(outcome) => {
+            let target = outcome
+                .data
+                .and_then(|data| data.get("targets").cloned())
+                .and_then(|targets| serde_json::from_value::<Vec<UnsubscribeTarget>>(targets).ok())
+                .and_then(|targets| targets.into_iter().next());
+            let Some(target) = target else {
+                app.status.hint = "No unsubscribe method advertised".into();
+                return;
+            };
+            let display = match &target {
+                UnsubscribeTarget::Https { url, .. } => url.clone(),
+                UnsubscribeTarget::Mailto { to, .. } => format!("mailto:{to}"),
+            };
+            app.status.hint = format!("{display} — ctrl+u again within 5s to confirm");
+            app.pending_unsubscribe = Some(PendingUnsubscribe {
+                message_id,
+                account_id,
+                target,
+                expires_at: Instant::now() + Duration::from_secs(5),
+            });
+        }
+        Err(error) => warn!(%error, "unsubscribe discovery failed"),
+    }
+}
+
+async fn perform_unsubscribe(app: &mut App, pending: PendingUnsubscribe) -> Result<()> {
+    match pending.target {
+        UnsubscribeTarget::Https { url, one_click } => {
+            if one_click {
+                mach_gmail::one_click_unsubscribe(&url).await?;
+            } else {
+                webbrowser::open(&url).context("opening unsubscribe URL")?;
+            }
+        }
+        UnsubscribeTarget::Mailto { to, subject } => {
+            let dispatcher = Dispatcher::with_scope(
+                app.store.clone(),
+                AccountScope::One(pending.account_id.clone()),
+            );
+            let draft = draft_from_outcome(dispatcher.execute(Action::ComposeNew).await?)?;
+            dispatcher
+                .execute(Action::SaveDraft {
+                    draft_id: draft.id.clone(),
+                    patch: DraftPatch {
+                        to: Some(vec![to]),
+                        subject: Some(subject),
+                        body_md: Some("Unsubscribe".into()),
+                        ..DraftPatch::default()
+                    },
+                })
+                .await?;
+            dispatcher
+                .execute(Action::SendDraft { draft_id: draft.id })
+                .await?;
+            let fetcher = app
+                .body_fetchers
+                .get(&pending.account_id)
+                .context("account is offline")?;
+            let report = mach_gmail::OutboxWorker::new(
+                pending.account_id,
+                fetcher.client().clone(),
+                app.store.clone(),
+            )
+            .drain_once(200)
+            .await?;
+            if report.failed > 0 {
+                anyhow::bail!("{} outbox operation(s) failed", report.failed);
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn open_composer(app: &mut App, action: Action) {
@@ -1026,10 +1245,11 @@ async fn open_thread(app: &mut App, id: ThreadId) {
 fn advance_selection(app: &mut App, delta: i32) {
     match &mut app.view {
         View::Inbox(v) => {
-            if v.threads.is_empty() {
+            let len = v.visible_threads(app.inbox_split).len();
+            if len == 0 {
                 return;
             }
-            let next = (v.selected as i32 + delta).clamp(0, v.threads.len() as i32 - 1) as usize;
+            let next = (v.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
             v.selected = next;
         }
         View::Thread(v) => {

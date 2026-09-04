@@ -12,6 +12,7 @@ pub mod oauth;
 pub mod outbox;
 mod search;
 pub mod sync;
+mod unsubscribe;
 
 pub use body_fetcher::{
     BodyFetcher, FetchOutcome, GmailAccountPool, PullReport, RemoteSearchReport,
@@ -21,5 +22,7 @@ pub use config::OAuthConfig;
 pub use credentials::{CredsError, StoredCredentials};
 pub use outbox::{DrainStats, OutboxWorker};
 pub use sync::{
-    bootstrap, incremental_sync, sync_account_tick, BootstrapStats, IncrementalStats, TickReport,
+    bootstrap, incremental_sync, load_older, sync_account_tick, BootstrapStats, IncrementalStats,
+    LoadOlderStats, TickReport,
 };
+pub use unsubscribe::one_click_unsubscribe;

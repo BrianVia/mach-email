@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keymap";
   import { threadToMarkdown } from "./lib/markdown";
+  import { splitOf, type Split } from "./lib/split";
   import {
     dispatchAction,
     fetchAccountStatus,
@@ -11,12 +13,15 @@
     fetchSettings,
     flushOutbox,
     listLabels,
+    loadOlder,
     listThreads,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
     retryOutbox,
     searchThreads,
     syncNow,
+    unsubscribePost,
+    unsubscribeMailto,
     type AccountStatus,
     type ActionOutcome,
     type Draft,
@@ -27,6 +32,7 @@
     type Settings,
     type SyncStatusPayload,
     type ThreadSummary,
+    type UnsubscribeTarget,
   } from "./lib/ipc";
   import Shell from "./Shell.svelte";
   import Inbox from "./views/Inbox.svelte";
@@ -36,9 +42,9 @@
   import Palette from "./views/Palette.svelte";
   import ChordOverlay from "./views/ChordOverlay.svelte";
 
-  const INBOX_LIMIT = 1000;
+  const INITIAL_LIST_LIMIT = 1000;
 
-  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
+  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
   type ThreadOrigin = { threads: ThreadSummary[]; index: number };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
   type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
@@ -49,11 +55,13 @@
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
-  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0 });
+  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0, limit: INITIAL_LIST_LIMIT });
+  let inboxSplit = $state<Split>("important");
   let keymap = $state<Keymap | null>(null);
   let bootError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  let unsubscribeConfirm = $state<{ sender: string; accountId: string; target: UnsubscribeTarget } | null>(null);
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
   let status = $state<AccountStatus | null>(null);
@@ -79,7 +87,7 @@
   });
 
   let subtitle = $derived.by(() => {
-    if (view.kind === "inbox") return `${view.threads.length.toLocaleString()} threads`;
+    if (view.kind === "inbox") return `${visibleInboxThreads(view).length.toLocaleString()} threads`;
     if (view.kind === "thread") {
       return `${view.thread.participants.slice(0, 2).join(", ")}${view.thread.participants.length > 2 ? ` +${view.thread.participants.length - 2}` : ""}`;
     }
@@ -101,6 +109,20 @@
     actionErrorTimer = window.setTimeout(() => (actionError = null), 4_000);
   }
 
+  function visibleInboxThreads(inbox: InboxView): ThreadSummary[] {
+    return inbox.label === "INBOX"
+      ? inbox.threads.filter((thread) => splitOf(thread.label_ids) === inboxSplit)
+      : inbox.threads;
+  }
+
+  function selectInboxSplit(split: Split) {
+    inboxSplit = split;
+    localStorage.setItem("mach.inboxSplit", split);
+    if (view.kind === "inbox" && view.label === "INBOX") {
+      view = { ...view, selected: clamp(view.selected, 0, visibleInboxThreads(view).length - 1) };
+    }
+  }
+
   function showNotice(message: string | null) {
     notice = message;
     if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
@@ -115,6 +137,10 @@
 
   async function boot() {
     try {
+      const savedSplit = localStorage.getItem("mach.inboxSplit");
+      if (savedSplit === "important" || savedSplit === "other" || savedSplit === "newsletters") {
+        inboxSplit = savedSplit;
+      }
       try {
         settings = await fetchSettings();
       } catch (error) {
@@ -131,9 +157,9 @@
         console.error("[mach] keymap parse failed:", error);
         bootError = `keymap parse: ${(error as Error).message ?? error}`;
       }
-      const threads = await listThreads("INBOX", INBOX_LIMIT);
+      const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
       console.log(`[mach] loaded ${threads.length} threads`);
-      view = { kind: "inbox", label: "INBOX", threads, selected: 0 };
+      view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT };
     } catch (error) {
       console.error("[mach]", error);
       bootError = `boot failed: ${(error as Error).message ?? error}`;
@@ -159,18 +185,19 @@
   async function refreshInboxPreservingSelection() {
     const currentView = view;
     if (currentView.kind !== "inbox") return;
-    const selectedId = currentView.threads[currentView.selected]?.id;
-    const threads = await listThreads(currentView.label, INBOX_LIMIT);
+    const selectedId = visibleInboxThreads(currentView)[currentView.selected]?.id;
+    const threads = await listThreads(currentView.label, currentView.limit);
     if (view.kind !== "inbox" || view.label !== currentView.label) return;
+    const visible = visibleInboxThreads({ ...currentView, threads });
     const preserved = selectedId
-      ? threads.findIndex((thread) => thread.id === selectedId)
+      ? visible.findIndex((thread) => thread.id === selectedId)
       : -1;
     view = {
       ...view,
       threads,
       selected: preserved >= 0
         ? preserved
-        : clamp(view.selected, 0, threads.length - 1),
+        : clamp(view.selected, 0, visible.length - 1),
     };
   }
 
@@ -263,7 +290,7 @@
 
   function currentContext(currentView: AppView): KeyContext {
     if (currentView.kind === "inbox") {
-      const thread = currentView.threads[currentView.selected];
+      const thread = visibleInboxThreads(currentView)[currentView.selected];
       return { selection: thread ? [thread.id] : [], current_thread: thread?.id };
     }
     if (currentView.kind === "thread") {
@@ -304,6 +331,8 @@
       undo: "Undo",
       redo: "Redo",
       refresh: "Refresh",
+      mute: "Mute thread",
+      unsubscribe: "Unsubscribe",
     };
     const byLabel = new Map<string, PaletteCommand>();
 
@@ -400,19 +429,20 @@
             closeComposer();
             return;
           }
-          const threads = await listThreads("INBOX", INBOX_LIMIT);
+          const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
           let selected = 0;
           if (currentView.kind === "thread" && currentView.origin) {
             const { origin } = currentView;
             const selectedId = origin.threads[origin.index]?.id;
+            const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT });
             const preserved = selectedId
-              ? threads.findIndex((thread) => thread.id === selectedId)
+              ? visible.findIndex((thread) => thread.id === selectedId)
               : -1;
             selected = preserved >= 0
               ? preserved
-              : clamp(origin.index, 0, threads.length - 1);
+              : clamp(origin.index, 0, visible.length - 1);
           }
-          view = { kind: "inbox", label: "INBOX", threads, selected };
+          view = { kind: "inbox", label: "INBOX", threads, selected, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "select_next":
@@ -420,6 +450,13 @@
           return;
         case "select_prev":
           moveSelection(-1);
+          return;
+        case "inbox_split_important":
+        case "inbox_split_other":
+        case "inbox_split_newsletters":
+          if (currentView.kind === "inbox" && currentView.label === "INBOX") {
+            selectInboxSplit(kind.slice("inbox_split_".length) as Split);
+          }
           return;
         case "compose_new":
         case "reply":
@@ -454,27 +491,31 @@
           }
           return;
         }
+        case "unsubscribe": {
+          await beginUnsubscribe(action.message_id as string);
+          return;
+        }
         case "open_thread": {
           const id = (action.id as string) ?? "";
           const thread = currentView.kind === "inbox"
-            ? currentView.threads.find((candidate) => candidate.id === id)
+            ? visibleInboxThreads(currentView).find((candidate) => candidate.id === id)
             : currentView.kind === "search"
               ? currentView.results.find((candidate) => candidate.id === id)
               : undefined;
           if (!thread) throw new Error("thread not found");
           const at = currentView.kind === "inbox"
-            ? currentView.threads.findIndex((candidate) => candidate.id === id)
+            ? visibleInboxThreads(currentView).findIndex((candidate) => candidate.id === id)
             : -1;
           await openThreadView(
             thread,
-            currentView.kind === "inbox" ? { threads: currentView.threads, index: at } : undefined,
+            currentView.kind === "inbox" ? { threads: visibleInboxThreads(currentView), index: at } : undefined,
           );
           return;
         }
         case "open_label": {
           const label = action.label_id as string;
-          const threads = await listThreads(label, INBOX_LIMIT);
-          view = { kind: "inbox", label, threads, selected: 0 };
+          const threads = await listThreads(label, INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label, threads, selected: 0, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "search":
@@ -492,7 +533,7 @@
         }
       }
 
-      const isArchiveOrTrash = kind === "archive" || kind === "trash";
+      const isArchiveOrTrash = kind === "archive" || kind === "mute" || kind === "trash";
       if (
         isArchiveOrTrash
         && currentView.kind === "thread"
@@ -508,8 +549,8 @@
         if (next) {
           await openThreadView(next, { threads: remaining, index: nextIndex });
         } else {
-          const fresh = await listThreads("INBOX", INBOX_LIMIT);
-          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0 };
+          const fresh = await listThreads("INBOX", INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0, limit: INITIAL_LIST_LIMIT };
         }
         return;
       }
@@ -521,7 +562,8 @@
         if (removed.size) {
           void dispatchAction(action).catch(showActionError);
           const threads = currentView.threads.filter((thread) => !removed.has(thread.id));
-          view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, threads.length - 1)) };
+          const visible = visibleInboxThreads({ ...currentView, threads });
+          view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, visible.length - 1)) };
           return;
         }
       }
@@ -531,31 +573,34 @@
 
       if (isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
         const threads = currentView.threads.filter((thread) => !removedSet.has(thread.id));
-        view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, threads.length - 1)) };
+        const visible = visibleInboxThreads({ ...currentView, threads });
+        view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, visible.length - 1)) };
       }
 
       if (isArchiveOrTrash && currentView.kind === "thread") {
-        const threads = await listThreads("INBOX", INBOX_LIMIT);
-        const at = threads.findIndex((thread) => thread.id === currentView.thread.id);
+        const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
+        const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT });
+        const at = visible.findIndex((thread) => thread.id === currentView.thread.id);
         // The archived thread is usually gone from the refreshed list; the
         // thread now occupying its date-sorted position is the "next" one.
-        const successor = threads.findIndex(
+        const successor = visible.findIndex(
           (thread) => thread.last_message_at <= currentView.thread.last_message_at,
         );
         const fallback = at >= 0
-          ? Math.min(at, threads.length - 1)
-          : successor >= 0 ? successor : Math.max(0, threads.length - 1);
-        view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
+          ? Math.min(at, visible.length - 1)
+          : successor >= 0 ? successor : Math.max(0, visible.length - 1);
+        view = { kind: "inbox", label: "INBOX", threads, selected: fallback, limit: INITIAL_LIST_LIMIT };
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
-        const selectedId = currentView.threads[currentView.selected]?.id;
-        const threads = await listThreads(currentView.label, INBOX_LIMIT);
-        const preserved = selectedId ? threads.findIndex((thread) => thread.id === selectedId) : -1;
+        const selectedId = visibleInboxThreads(currentView)[currentView.selected]?.id;
+        const threads = await listThreads(currentView.label, currentView.limit);
+        const visible = visibleInboxThreads({ ...currentView, threads });
+        const preserved = selectedId ? visible.findIndex((thread) => thread.id === selectedId) : -1;
         view = {
           ...currentView,
           threads,
-          selected: preserved >= 0 ? preserved : clamp(currentView.selected, 0, threads.length - 1),
+          selected: preserved >= 0 ? preserved : clamp(currentView.selected, 0, visible.length - 1),
         };
       }
     } catch (error) {
@@ -584,6 +629,35 @@
         showActionError(error);
       });
     }
+  }
+
+  async function beginUnsubscribe(messageId: string) {
+    const currentView = view;
+    const message = currentView.kind === "thread"
+      ? currentView.messages.find((candidate) => candidate.id === messageId)
+      : undefined;
+    const outcome = await dispatchAction({ kind: "unsubscribe", message_id: messageId });
+    const targets = (outcome.data as { targets?: UnsubscribeTarget[] } | null)?.targets ?? [];
+    if (!targets[0]) {
+      showNotice("No unsubscribe method advertised");
+      return;
+    }
+    if (!message) throw new Error("unsubscribe message not found");
+    unsubscribeConfirm = { sender: message.from, accountId: message.account_id, target: targets[0] };
+  }
+
+  async function confirmUnsubscribe() {
+    const confirmation = unsubscribeConfirm;
+    unsubscribeConfirm = null;
+    if (!confirmation) return;
+    const target = confirmation.target;
+    if (target.kind === "https") {
+      if (target.one_click) await unsubscribePost(target.url);
+      else await openUrl(target.url);
+    } else {
+      await unsubscribeMailto(confirmation.accountId, target.to, target.subject);
+    }
+    showNotice("Unsubscribed");
   }
 
   function prefetchThread(threadId: string | undefined) {
@@ -642,7 +716,7 @@
   function moveSelection(delta: number) {
     const currentView = view;
     if (currentView.kind === "inbox") {
-      view = { ...currentView, selected: clamp(currentView.selected + delta, 0, currentView.threads.length - 1) };
+      view = { ...currentView, selected: clamp(currentView.selected + delta, 0, visibleInboxThreads(currentView).length - 1) };
     } else if (currentView.kind === "thread") {
       view = { ...currentView, selectedMsg: clamp(currentView.selectedMsg + delta, 0, currentView.messages.length - 1) };
     } else if (currentView.kind === "search") {
@@ -692,7 +766,7 @@
 
   async function openInboxRow(index: number) {
     if (view.kind !== "inbox") return;
-    const threads = view.threads;
+    const threads = visibleInboxThreads(view);
     const thread = threads[index];
     if (!thread) return;
     try {
@@ -700,6 +774,25 @@
     } catch (error) {
       console.warn("open thread failed", error);
       showActionError(error);
+    }
+  }
+
+  async function loadOlderMail(): Promise<number | null> {
+    const currentView = view;
+    if (currentView.kind !== "inbox") return null;
+    const beforeMs = Date.parse(currentView.threads.at(-1)?.last_message_at ?? "");
+    if (!Number.isFinite(beforeMs)) return 0;
+    try {
+      const stats = await loadOlder(currentView.label, beforeMs);
+      const limit = currentView.limit + 200;
+      const threads = await listThreads(currentView.label, limit);
+      if (view.kind === "inbox" && view.label === currentView.label) {
+        view = { ...view, threads, limit };
+      }
+      return stats.fetched;
+    } catch (error) {
+      showActionError(error);
+      return null;
     }
   }
 
@@ -750,7 +843,7 @@
 
   function labelDisplay(id: string) {
     const names: Record<string, string> = {
-      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", DONE: "Done", SNOOZED: "Snoozed", ALL: "All Mail",
+      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", DONE: "Done", SNOOZED: "Snoozed", MUTED: "Muted", ALL: "All Mail",
     };
     return names[id] ?? userLabels.find((label) => label.id === id)?.name ?? id;
   }
@@ -771,13 +864,16 @@
   {#if view.kind === "inbox"}
     <Inbox
       v={view}
+      split={inboxSplit}
+      onSplit={selectInboxSplit}
       onSelect={(selected) => {
         if (view.kind === "inbox") view = { ...view, selected };
       }}
       onOpen={(index) => void openInboxRow(index)}
+      onLoadOlder={loadOlderMail}
     />
   {:else if view.kind === "thread"}
-    <ThreadReader v={view} />
+    <ThreadReader v={view} onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)} />
   {:else if view.kind === "composer"}
     <Composer
       draft={view.draft}
@@ -813,7 +909,7 @@
     />
   {/if}
 
-  {#if bootError || actionError || notice || status?.needs_reauth.length}
+  {#if bootError || actionError || notice || unsubscribeConfirm || status?.needs_reauth.length}
     <div class="errors">
       {#each status?.needs_reauth ?? [] as email}
         <div class="notice reauth">Sign-in expired for {email}. Run mach auth login in a terminal.</div>
@@ -821,6 +917,13 @@
       {#if bootError}<div class="error">⚠ {bootError}</div>{/if}
       {#if actionError}<button class="error" onclick={() => (actionError = null)}>⚠ {actionError}</button>{/if}
       {#if notice}<button class="notice" onclick={() => showNotice(null)}>{notice}</button>{/if}
+      {#if unsubscribeConfirm}
+        <div class="notice confirm">
+          <span>Unsubscribe from {unsubscribeConfirm.sender}?</span>
+          <button onclick={() => void confirmUnsubscribe().catch(showActionError)}>Unsubscribe</button>
+          <button onclick={() => (unsubscribeConfirm = null)}>Cancel</button>
+        </div>
+      {/if}
     </div>
   {/if}
   <ChordOverlay show={chordBuf.length > 0} buf={chordBuf} conts={chordConts} />
@@ -839,4 +942,6 @@
   button.error { cursor: pointer; }
   .notice { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); background: color-mix(in oklab, var(--accent) 18%, var(--surface)); color: var(--accent); font-size: 14px; text-align: left; cursor: pointer; }
   .reauth { cursor: default; }
+  .confirm { display: flex; align-items: center; gap: 12px; cursor: default; }
+  .confirm button { padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: inherit; cursor: pointer; }
 </style>

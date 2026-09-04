@@ -1,12 +1,17 @@
 use anyhow::{Context, Result};
-use mach_core::ids::AccountId;
+use mach_core::ids::{AccountId, LabelId};
 use mach_core::MailStore;
 use mach_gmail::{config::OAuthConfig, GmailClient};
 use tracing::warn;
 
 use crate::runtime;
 
-pub async fn run(bootstrap: bool, selected_account: Option<&str>) -> Result<()> {
+pub async fn run(
+    bootstrap: bool,
+    older: Option<&str>,
+    days: u32,
+    selected_account: Option<&str>,
+) -> Result<()> {
     let config = OAuthConfig::load().context("OAuth client credentials not configured")?;
     let store = runtime::open_store().await?;
     let accounts: Vec<_> = mach_gmail::credentials::load_all()?
@@ -26,7 +31,16 @@ pub async fn run(bootstrap: bool, selected_account: Option<&str>) -> Result<()> 
             continue;
         }
         let email = credentials.email;
-        if let Err(error) = sync_account(bootstrap, &email, config.clone(), store.clone()).await {
+        if let Err(error) = sync_account(
+            bootstrap,
+            older,
+            days,
+            &email,
+            config.clone(),
+            store.clone(),
+        )
+        .await
+        {
             eprintln!("[{email}] sync failed: {error:#}");
             failures.push(email);
         }
@@ -39,12 +53,28 @@ pub async fn run(bootstrap: bool, selected_account: Option<&str>) -> Result<()> 
 
 async fn sync_account(
     bootstrap: bool,
+    older: Option<&str>,
+    days: u32,
     email: &str,
     config: OAuthConfig,
     store: std::sync::Arc<mach_store::SqliteStore>,
 ) -> Result<()> {
     let account = AccountId::new(email);
     let client = GmailClient::from_stored_credentials(config, email)?;
+
+    if let Some(label) = older {
+        let stats = mach_gmail::load_older(
+            &account,
+            client,
+            store,
+            &LabelId::new(label),
+            chrono::Utc::now().timestamp_millis(),
+            days,
+        )
+        .await?;
+        println!("[{email}] loaded {} older thread(s)", stats.fetched);
+        return Ok(());
+    }
 
     if bootstrap_account(bootstrap, email, client.clone(), store.clone()).await? {
         return Ok(());

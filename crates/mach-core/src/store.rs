@@ -72,6 +72,10 @@ pub struct MessageHeaders {
     pub references: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_unsubscribe: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_unsubscribe_post: Option<String>,
 }
 
 /// Mirrors `mach_gmail::body::InlineImageRef` but lives in `mach-core` so

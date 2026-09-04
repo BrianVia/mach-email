@@ -26,6 +26,12 @@
 "k"        = "select_prev"
 "down"     = "select_next"
 "up"       = "select_prev"
+"shift+l"  = "load_older"
+
+# Inbox categories (adapter-resolved; no dispatcher action)
+"1"        = "inbox_split_important"
+"2"        = "inbox_split_other"
+"3"        = "inbox_split_newsletters"
 
 # Open thread
 "enter"    = { kind = "open_thread", id = "$current_thread" }
@@ -39,6 +45,7 @@
 "shift+s"  = { kind = "star",      thread_ids = "$selection", starred = false }
 "u"        = { kind = "mark_read", thread_ids = "$selection", read = false }
 "shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
+"shift+m"  = { kind = "mute",      thread_ids = "$selection" }
 
 # Compose
 "c"        = "compose_new"
@@ -82,6 +89,8 @@
 "shift+s"  = { kind = "star",      thread_ids = "$selection", starred = false }
 "u"        = { kind = "mark_read", thread_ids = "$selection", read = false }
 "shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
+"shift+m"  = { kind = "mute",      thread_ids = "$selection" }
+"ctrl+u"   = { kind = "unsubscribe", message_id = "$current_message" }
 
 "r"        = { kind = "reply",   message_id = "$current_message", all = false }
 "shift+r"  = { kind = "reply",   message_id = "$current_message", all = true  }
