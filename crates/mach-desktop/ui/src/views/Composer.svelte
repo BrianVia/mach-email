@@ -10,12 +10,16 @@
     title,
     onFieldsChange,
     onSend,
+    presets,
+    onSchedule,
     onClose,
   }: {
     draft: Draft;
     title: string;
     onFieldsChange: (fields: ComposerFields) => void;
     onSend: () => void;
+    presets: [string, string][];
+    onSchedule: (at: string) => void;
     onClose: () => void;
   } = $props();
   let to = $state(untrack(() => draft.to.join(", ")));
@@ -29,6 +33,11 @@
 
   function fieldsChanged() {
     onFieldsChange({ to, cc, bcc, subject, body_md: body });
+  }
+
+  function pickTime(event: Event) {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    if (value) onSchedule(new Date(value).toISOString());
   }
 </script>
 
@@ -47,9 +56,18 @@
     <textarea bind:value={body} oninput={fieldsChanged} placeholder="Write your message…"></textarea>
     <footer>
       <div><kbd>⌘↵</kbd> send · <kbd>⌘S</kbd> save · <kbd>esc</kbd> close</div>
-      <button class="send" onclick={onSend}>
-        <Icon name="send" size={13} /> Send
-      </button>
+      <div class="actions">
+        <button class="send" onclick={onSend}><Icon name="send" size={13} /> Send</button>
+        <details>
+          <summary>Later ▾</summary>
+          <div class="later-menu">
+            {#each presets as [label, at]}
+              <button type="button" onclick={() => onSchedule(at)}>{label}</button>
+            {/each}
+            <label class="pick">Pick time<input type="datetime-local" onchange={pickTime} /></label>
+          </div>
+        </details>
+      </div>
     </footer>
   </div>
 </div>
@@ -71,4 +89,10 @@
   footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11.5px; }
   kbd { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
   .send { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 0; border-radius: 999px; background: color-mix(in oklab, var(--accent) 15%, transparent); color: var(--accent); font-size: 12.5px; font-weight: 500; }
+  .actions { position: relative; display: flex; align-items: center; gap: 8px; }
+  details summary { padding: 6px 10px; border-radius: 999px; color: var(--accent); cursor: pointer; list-style: none; }
+  .later-menu { position: absolute; right: 0; bottom: 34px; z-index: 2; width: 190px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 10px 30px color-mix(in oklab, black 25%, transparent); }
+  .later-menu button, .pick { display: block; box-sizing: border-box; width: 100%; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit; text-align: left; }
+  .later-menu button:hover, .pick:hover { background: var(--hover); }
+  .pick input { display: block; width: 100%; margin-top: 6px; color-scheme: dark; }
 </style>

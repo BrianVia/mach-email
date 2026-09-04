@@ -7,8 +7,8 @@
 //! store directly without going through the Action surface — those don't
 //! need optimistic-update semantics.
 
-use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::store::{Draft, Label, MailStore};
+use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, ThreadId};
+use mach_core::store::{Draft, Label, MailStore, ScheduledSend};
 use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
 use mach_gmail::{GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
@@ -325,6 +325,37 @@ pub async fn list_labels(state: State<'_, AppState>) -> Result<Out<Vec<Label>>, 
         Ok(labels) => Ok(Out::ok(labels)),
         Err(e) => Ok(Out::err(e)),
     }
+}
+
+#[tauri::command]
+pub async fn list_scheduled(state: State<'_, AppState>) -> Result<Out<Vec<ScheduledSend>>, String> {
+    Ok(match state.store.list_scheduled(&state.scope).await {
+        Ok(sends) => Out::ok(sends),
+        Err(error) => Out::err(error),
+    })
+}
+
+#[tauri::command]
+pub async fn open_draft(
+    state: State<'_, AppState>,
+    draft_id: String,
+) -> Result<Out<Draft>, String> {
+    Ok(
+        match state
+            .store
+            .find_draft(&state.scope, &DraftId::new(draft_id))
+            .await
+        {
+            Ok(Some(draft)) => Out::ok(draft),
+            Ok(None) => Out::err("draft not found"),
+            Err(error) => Out::err(error),
+        },
+    )
+}
+
+#[tauri::command]
+pub fn send_later_presets() -> Vec<(&'static str, chrono::DateTime<chrono::Utc>)> {
+    mach_core::send_later_presets(chrono::Local::now())
 }
 
 #[tauri::command]
