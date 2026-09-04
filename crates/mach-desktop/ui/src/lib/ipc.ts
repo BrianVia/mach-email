@@ -33,6 +33,15 @@ export type ThreadSummary = {
   label_ids: string[];
 };
 
+export type Label = {
+  account_id: string;
+  id: string;
+  name: string;
+  system: boolean;
+  color: string | null;
+  unread_count: number | null;
+};
+
 export type InlineImageRef = {
   content_id: string;
   attachment_id: string;
@@ -139,6 +148,12 @@ export async function listThreads(
     labelId,
     limit,
   });
+  if (!r) return [];
+  return unwrap(r);
+}
+
+export async function listLabels(): Promise<Label[]> {
+  const r = await invoke<Out<Label[]> | null>("list_labels");
   if (!r) return [];
   return unwrap(r);
 }

@@ -820,18 +820,31 @@ impl MailStore for SqliteStore {
         let account = scope.account().map(|value| value.as_str().to_string());
         spawn_blocking(move || -> CoreResult<Vec<ThreadSummary>> {
             let conn = pool.get().map_err(map_err)?;
-            // DONE is virtual: Gmail represents archived mail by removing INBOX,
-            // rather than by adding an archive label.
-            if label.as_str() == "DONE" {
+            // DONE, SNOOZED, and ALL are virtual labels derived from Gmail's
+            // stored label IDs.
+            if matches!(label.as_str(), "DONE" | "SNOOZED" | "ALL") {
                 let mut stmt = conn
                     .prepare_cached(
                         "SELECT account_id, id, subject, snippet, participants_json, last_message_at,
                                 message_count, unread, starred, label_ids_json
                          FROM threads
-                         WHERE label_ids_json NOT LIKE '%\"INBOX\"%'
-                           AND label_ids_json NOT LIKE '%\"TRASH\"%'
-                           AND label_ids_json NOT LIKE '%\"SPAM\"%'
-                           AND label_ids_json NOT LIKE '%\"DRAFT\"%'
+                         WHERE (
+                           (?1 = 'DONE'
+                            AND label_ids_json NOT LIKE '%\"INBOX\"%'
+                            AND label_ids_json NOT LIKE '%\"TRASH\"%'
+                            AND label_ids_json NOT LIKE '%\"SPAM\"%'
+                            AND label_ids_json NOT LIKE '%\"DRAFT\"%')
+                           OR (?1 = 'ALL'
+                               AND label_ids_json NOT LIKE '%\"TRASH\"%'
+                               AND label_ids_json NOT LIKE '%\"SPAM\"%')
+                           OR (?1 = 'SNOOZED' AND (
+                               label_ids_json LIKE '%\"MACH/Snoozed/%'
+                               OR EXISTS (
+                                 SELECT 1 FROM json_each(label_ids_json) j
+                                 JOIN labels l ON l.account_id = threads.account_id AND l.id = j.value
+                                 WHERE l.name LIKE 'MACH/Snoozed/%'
+                               )
+                           )))
                            AND (?2 IS NULL OR account_id = ?2)
                          ORDER BY last_message_at DESC
                          LIMIT ?3",
@@ -2255,6 +2268,57 @@ mod tests {
             .unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].id.as_str(), "inbox");
+    }
+
+    #[tokio::test]
+    async fn list_threads_in_snoozed_returns_only_snoozed_threads() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "inbox", "inbox", "inbox", &["INBOX"]);
+        seed(
+            &pool,
+            "snoozed",
+            "snoozed",
+            "snoozed",
+            &["MACH/Snoozed/2030-01-01T00:00:00+00:00"],
+        );
+        seed(&pool, "gmail-id", "gmail-id", "gmail-id", &["Label_1"]);
+        pool.get()
+            .unwrap()
+            .execute(
+                "INSERT INTO labels (account_id, id, name, type)
+                 VALUES (?1, 'Label_1', 'MACH/Snoozed/2030-01-02T00:00:00+00:00', 'user')",
+                params![account().as_str()],
+            )
+            .unwrap();
+
+        let store = SqliteStore::new(pool);
+        let snoozed = store
+            .list_threads_in_label(&scope(), &LabelId::new("SNOOZED"), 10)
+            .await
+            .unwrap();
+        assert_eq!(snoozed.len(), 2);
+        assert!(snoozed.iter().any(|thread| thread.id.as_str() == "snoozed"));
+        assert!(snoozed
+            .iter()
+            .any(|thread| thread.id.as_str() == "gmail-id"));
+    }
+
+    #[tokio::test]
+    async fn list_threads_in_all_excludes_trash_and_spam() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "inbox", "inbox", "inbox", &["INBOX"]);
+        seed(&pool, "archived", "archived", "archived", &[]);
+        seed(&pool, "trash", "trash", "trash", &["TRASH"]);
+        seed(&pool, "spam", "spam", "spam", &["SPAM"]);
+
+        let store = SqliteStore::new(pool);
+        let all = store
+            .list_threads_in_label(&scope(), &LabelId::new("ALL"), 10)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|thread| thread.id.as_str() == "inbox"));
+        assert!(all.iter().any(|thread| thread.id.as_str() == "archived"));
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@
     fetchOutboxSummary,
     fetchSettings,
     flushOutbox,
+    listLabels,
     listThreads,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
@@ -19,6 +20,7 @@
     type AccountStatus,
     type ActionOutcome,
     type Draft,
+    type Label,
     type Message,
     type MailSyncedPayload,
     type OutboxSummary,
@@ -57,6 +59,7 @@
   let status = $state<AccountStatus | null>(null);
   let outbox = $state<OutboxSummary>({ pending: 0, failed: 0, last_error: null });
   let settings = $state<Settings>({});
+  let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
   let actionErrorTimer: number | undefined;
@@ -82,6 +85,9 @@
     (status?.accounts.length ?? 0) > 0
       && (status?.accounts.every((account) => syncOkByAccount[account] === true) ?? false),
   );
+  let userLabels = $derived.by(() => labels
+    .filter((label) => !label.system && !label.name.startsWith("MACH/"))
+    .sort((a, b) => a.name.localeCompare(b.name)));
 
   function showActionError(error: unknown) {
     actionError = String((error as Error).message ?? error);
@@ -109,6 +115,7 @@
         console.warn("[mach] settings load failed", error);
         settings = {};
       }
+      labels = await listLabels();
       const sources = await fetchKeymapSources();
       try {
         const resolved = Keymap.fromToml(sources.defaults);
@@ -162,6 +169,9 @@
   }
 
   function handleMailSynced(_payload: MailSyncedPayload) {
+    void listLabels().then((next) => (labels = next)).catch((error) => {
+      console.warn("[mach] refreshing labels after sync failed", error);
+    });
     if (view.kind === "inbox") {
       void refreshInboxPreservingSelection().catch((error) => {
         console.warn("[mach] refreshing inbox after sync failed", error);
@@ -732,9 +742,9 @@
 
   function labelDisplay(id: string) {
     const names: Record<string, string> = {
-      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", DONE: "Done",
+      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", DONE: "Done", SNOOZED: "Snoozed", ALL: "All Mail",
     };
-    return names[id] ?? id;
+    return names[id] ?? userLabels.find((label) => label.id === id)?.name ?? id;
   }
 </script>
 
@@ -747,6 +757,7 @@
   {activeLabel}
   {chordBuf}
   {chordConts}
+  {userLabels}
   onOpenLabel={(label) => void runAction({ kind: "open_label", label_id: label })}
 >
   {#if view.kind === "inbox"}

@@ -466,6 +466,8 @@ fn label_display(id: &str) -> String {
         "TRASH" => "Trash".into(),
         "SPAM" => "Spam".into(),
         "DONE" => "Done".into(),
+        "SNOOZED" => "Snoozed".into(),
+        "ALL" => "All Mail".into(),
         other => other.into(),
     }
 }
