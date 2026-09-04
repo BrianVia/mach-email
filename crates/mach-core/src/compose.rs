@@ -92,7 +92,7 @@ fn reply_all_recipients(source: &Message, self_email: &str) -> (Vec<String>, Vec
     (to, cc)
 }
 
-fn normalized_addr_spec(address: &str) -> String {
+pub(crate) fn normalized_addr_spec(address: &str) -> String {
     addr_spec(address).to_ascii_lowercase()
 }
 
