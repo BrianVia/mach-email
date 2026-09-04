@@ -27,6 +27,11 @@
 "down"     = "select_next"
 "up"       = "select_prev"
 
+# Inbox categories (adapter-resolved; no dispatcher action)
+"1"        = "inbox_split_important"
+"2"        = "inbox_split_other"
+"3"        = "inbox_split_newsletters"
+
 # Open thread
 "enter"    = { kind = "open_thread", id = "$current_thread" }
 "l"        = { kind = "open_thread", id = "$current_thread" }

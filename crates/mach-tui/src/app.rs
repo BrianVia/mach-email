@@ -20,7 +20,7 @@ use mach_core::ids::{AccountScope, DraftId, LabelId, ThreadId};
 use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
-    Action, ActionOutcome, Dispatcher, DraftPatch,
+    split_of, Action, ActionOutcome, Dispatcher, DraftPatch, Split,
 };
 use mach_store::SqliteStore;
 use ratatui::Terminal;
@@ -52,6 +52,7 @@ pub struct App {
     pub status: StatusLine,
     pub chord_buffer: String,
     pub last_chord_continuations: Vec<String>,
+    pub inbox_split: Split,
 
     pub running: bool,
 }
@@ -202,6 +203,7 @@ impl App {
             status,
             chord_buffer: String::new(),
             last_chord_continuations: Vec::new(),
+            inbox_split: Split::Important,
             running: true,
         })
     }
@@ -211,10 +213,12 @@ impl App {
         match &self.view {
             View::Inbox(v) => KeyContext {
                 selection: v
-                    .current_thread_id()
+                    .current_thread_id(self.inbox_split)
                     .map(|t| vec![t.as_str().to_string()])
                     .unwrap_or_default(),
-                current_thread: v.current_thread_id().map(|t| t.as_str().to_string()),
+                current_thread: v
+                    .current_thread_id(self.inbox_split)
+                    .map(|t| t.as_str().to_string()),
                 current_message: None,
                 current_draft: None,
             },
@@ -252,11 +256,22 @@ impl App {
 }
 
 impl InboxView {
-    pub fn current_thread(&self) -> Option<&ThreadSummary> {
-        self.threads.get(self.selected)
+    pub fn visible_threads(&self, split: Split) -> Vec<&ThreadSummary> {
+        if self.label.as_str() == "INBOX" {
+            self.threads
+                .iter()
+                .filter(|thread| split_of(&thread.label_ids) == split)
+                .collect()
+        } else {
+            self.threads.iter().collect()
+        }
     }
-    pub fn current_thread_id(&self) -> Option<&ThreadId> {
-        self.current_thread().map(|t| &t.id)
+
+    pub fn current_thread(&self, split: Split) -> Option<&ThreadSummary> {
+        self.visible_threads(split).get(self.selected).copied()
+    }
+    pub fn current_thread_id(&self, split: Split) -> Option<&ThreadId> {
+        self.current_thread(split).map(|t| &t.id)
     }
 }
 
@@ -428,13 +443,13 @@ async fn refresh_visible_inbox(app: &mut App) {
     };
     let label = current.label.clone();
     let selected = current
-        .current_thread()
+        .current_thread(app.inbox_split)
         .map(|thread| (thread.account_id.clone(), thread.id.clone()));
     match load_inbox(&app.store, &app.scope, label.as_str()).await {
         Ok(mut inbox) => {
             if let Some((account, id)) = selected {
                 inbox.selected = inbox
-                    .threads
+                    .visible_threads(app.inbox_split)
                     .iter()
                     .position(|thread| thread.account_id == account && thread.id == id)
                     .unwrap_or(0);
@@ -518,6 +533,11 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
             app.last_chord_continuations.clear();
             execute_action(app, action).await;
         }
+        Resolution::AdapterAction(action) => {
+            app.chord_buffer.clear();
+            app.last_chord_continuations.clear();
+            execute_adapter_action(app, &action);
+        }
         Resolution::Prefix(conts) => {
             app.chord_buffer = new_chord;
             app.last_chord_continuations = conts
@@ -533,13 +553,32 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
                 app.chord_buffer.clear();
                 app.last_chord_continuations.clear();
                 let chord = key_event_to_chord(&k).unwrap_or_default();
-                if let Resolution::Action(action) =
-                    app.keymap.resolve(app.current_mode(), &chord, &ctx)
-                {
-                    execute_action(app, action).await;
+                match app.keymap.resolve(app.current_mode(), &chord, &ctx) {
+                    Resolution::Action(action) => execute_action(app, action).await,
+                    Resolution::AdapterAction(action) => execute_adapter_action(app, &action),
+                    Resolution::Prefix(_) | Resolution::Unbound => {}
                 }
             }
         }
+    }
+}
+
+fn execute_adapter_action(app: &mut App, action: &str) {
+    let split = match action {
+        "inbox_split_important" => Split::Important,
+        "inbox_split_other" => Split::Other,
+        "inbox_split_newsletters" => Split::Newsletters,
+        _ => return,
+    };
+    let View::Inbox(inbox) = &mut app.view else {
+        return;
+    };
+    if inbox.label.as_str() == "INBOX" {
+        app.inbox_split = split;
+        inbox.selected = inbox
+            .selected
+            .min(inbox.visible_threads(split).len().saturating_sub(1));
+        inbox.viewport_top = inbox.viewport_top.min(inbox.selected);
     }
 }
 
@@ -834,9 +873,9 @@ async fn execute_action(app: &mut App, action: Action) {
                 if let View::Inbox(v) = &mut app.view {
                     v.threads
                         .retain(|t| !outcome.changed_threads.iter().any(|c| c == &t.id));
-                    if v.selected >= v.threads.len() && !v.threads.is_empty() {
-                        v.selected = v.threads.len() - 1;
-                    }
+                    v.selected = v
+                        .selected
+                        .min(v.visible_threads(app.inbox_split).len().saturating_sub(1));
                 }
             }
 
@@ -1005,10 +1044,11 @@ async fn open_thread(app: &mut App, id: ThreadId) {
 fn advance_selection(app: &mut App, delta: i32) {
     match &mut app.view {
         View::Inbox(v) => {
-            if v.threads.is_empty() {
+            let len = v.visible_threads(app.inbox_split).len();
+            if len == 0 {
                 return;
             }
-            let next = (v.selected as i32 + delta).clamp(0, v.threads.len() as i32 - 1) as usize;
+            let next = (v.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
             v.selected = next;
         }
         View::Thread(v) => {

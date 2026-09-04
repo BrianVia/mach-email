@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keymap";
   import { threadToMarkdown } from "./lib/markdown";
+  import { splitOf, type Split } from "./lib/split";
   import {
     dispatchAction,
     fetchAccountStatus,
@@ -50,6 +51,7 @@
   type Continuation = { next: string; action_name: string };
 
   let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0 });
+  let inboxSplit = $state<Split>("important");
   let keymap = $state<Keymap | null>(null);
   let bootError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
@@ -73,7 +75,7 @@
   });
 
   let subtitle = $derived.by(() => {
-    if (view.kind === "inbox") return `${view.threads.length.toLocaleString()} threads`;
+    if (view.kind === "inbox") return `${visibleInboxThreads(view).length.toLocaleString()} threads`;
     if (view.kind === "thread") {
       return `${view.thread.participants.slice(0, 2).join(", ")}${view.thread.participants.length > 2 ? ` +${view.thread.participants.length - 2}` : ""}`;
     }
@@ -95,6 +97,20 @@
     actionErrorTimer = window.setTimeout(() => (actionError = null), 4_000);
   }
 
+  function visibleInboxThreads(inbox: InboxView): ThreadSummary[] {
+    return inbox.label === "INBOX"
+      ? inbox.threads.filter((thread) => splitOf(thread.label_ids) === inboxSplit)
+      : inbox.threads;
+  }
+
+  function selectInboxSplit(split: Split) {
+    inboxSplit = split;
+    localStorage.setItem("mach.inboxSplit", split);
+    if (view.kind === "inbox" && view.label === "INBOX") {
+      view = { ...view, selected: clamp(view.selected, 0, visibleInboxThreads(view).length - 1) };
+    }
+  }
+
   function showNotice(message: string | null) {
     notice = message;
     if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
@@ -109,6 +125,10 @@
 
   async function boot() {
     try {
+      const savedSplit = localStorage.getItem("mach.inboxSplit");
+      if (savedSplit === "important" || savedSplit === "other" || savedSplit === "newsletters") {
+        inboxSplit = savedSplit;
+      }
       try {
         settings = await fetchSettings();
       } catch (error) {
@@ -153,18 +173,19 @@
   async function refreshInboxPreservingSelection() {
     const currentView = view;
     if (currentView.kind !== "inbox") return;
-    const selectedId = currentView.threads[currentView.selected]?.id;
+    const selectedId = visibleInboxThreads(currentView)[currentView.selected]?.id;
     const threads = await listThreads(currentView.label, INBOX_LIMIT);
     if (view.kind !== "inbox" || view.label !== currentView.label) return;
+    const visible = visibleInboxThreads({ ...currentView, threads });
     const preserved = selectedId
-      ? threads.findIndex((thread) => thread.id === selectedId)
+      ? visible.findIndex((thread) => thread.id === selectedId)
       : -1;
     view = {
       ...view,
       threads,
       selected: preserved >= 0
         ? preserved
-        : clamp(view.selected, 0, threads.length - 1),
+        : clamp(view.selected, 0, visible.length - 1),
     };
   }
 
@@ -257,7 +278,7 @@
 
   function currentContext(currentView: AppView): KeyContext {
     if (currentView.kind === "inbox") {
-      const thread = currentView.threads[currentView.selected];
+      const thread = visibleInboxThreads(currentView)[currentView.selected];
       return { selection: thread ? [thread.id] : [], current_thread: thread?.id };
     }
     if (currentView.kind === "thread") {
@@ -399,12 +420,13 @@
           if (currentView.kind === "thread" && currentView.origin) {
             const { origin } = currentView;
             const selectedId = origin.threads[origin.index]?.id;
+            const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0 });
             const preserved = selectedId
-              ? threads.findIndex((thread) => thread.id === selectedId)
+              ? visible.findIndex((thread) => thread.id === selectedId)
               : -1;
             selected = preserved >= 0
               ? preserved
-              : clamp(origin.index, 0, threads.length - 1);
+              : clamp(origin.index, 0, visible.length - 1);
           }
           view = { kind: "inbox", label: "INBOX", threads, selected };
           return;
@@ -414,6 +436,13 @@
           return;
         case "select_prev":
           moveSelection(-1);
+          return;
+        case "inbox_split_important":
+        case "inbox_split_other":
+        case "inbox_split_newsletters":
+          if (currentView.kind === "inbox" && currentView.label === "INBOX") {
+            selectInboxSplit(kind.slice("inbox_split_".length) as Split);
+          }
           return;
         case "compose_new":
         case "reply":
@@ -451,17 +480,17 @@
         case "open_thread": {
           const id = (action.id as string) ?? "";
           const thread = currentView.kind === "inbox"
-            ? currentView.threads.find((candidate) => candidate.id === id)
+            ? visibleInboxThreads(currentView).find((candidate) => candidate.id === id)
             : currentView.kind === "search"
               ? currentView.results.find((candidate) => candidate.id === id)
               : undefined;
           if (!thread) throw new Error("thread not found");
           const at = currentView.kind === "inbox"
-            ? currentView.threads.findIndex((candidate) => candidate.id === id)
+            ? visibleInboxThreads(currentView).findIndex((candidate) => candidate.id === id)
             : -1;
           await openThreadView(
             thread,
-            currentView.kind === "inbox" ? { threads: currentView.threads, index: at } : undefined,
+            currentView.kind === "inbox" ? { threads: visibleInboxThreads(currentView), index: at } : undefined,
           );
           return;
         }
@@ -515,7 +544,8 @@
         if (removed.size) {
           void dispatchAction(action).catch(showActionError);
           const threads = currentView.threads.filter((thread) => !removed.has(thread.id));
-          view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, threads.length - 1)) };
+          const visible = visibleInboxThreads({ ...currentView, threads });
+          view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, visible.length - 1)) };
           return;
         }
       }
@@ -525,31 +555,34 @@
 
       if (isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
         const threads = currentView.threads.filter((thread) => !removedSet.has(thread.id));
-        view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, threads.length - 1)) };
+        const visible = visibleInboxThreads({ ...currentView, threads });
+        view = { ...currentView, threads, selected: Math.min(currentView.selected, Math.max(0, visible.length - 1)) };
       }
 
       if (isArchiveOrTrash && currentView.kind === "thread") {
         const threads = await listThreads("INBOX", INBOX_LIMIT);
-        const at = threads.findIndex((thread) => thread.id === currentView.thread.id);
+        const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0 });
+        const at = visible.findIndex((thread) => thread.id === currentView.thread.id);
         // The archived thread is usually gone from the refreshed list; the
         // thread now occupying its date-sorted position is the "next" one.
-        const successor = threads.findIndex(
+        const successor = visible.findIndex(
           (thread) => thread.last_message_at <= currentView.thread.last_message_at,
         );
         const fallback = at >= 0
-          ? Math.min(at, threads.length - 1)
-          : successor >= 0 ? successor : Math.max(0, threads.length - 1);
+          ? Math.min(at, visible.length - 1)
+          : successor >= 0 ? successor : Math.max(0, visible.length - 1);
         view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
-        const selectedId = currentView.threads[currentView.selected]?.id;
+        const selectedId = visibleInboxThreads(currentView)[currentView.selected]?.id;
         const threads = await listThreads(currentView.label, INBOX_LIMIT);
-        const preserved = selectedId ? threads.findIndex((thread) => thread.id === selectedId) : -1;
+        const visible = visibleInboxThreads({ ...currentView, threads });
+        const preserved = selectedId ? visible.findIndex((thread) => thread.id === selectedId) : -1;
         view = {
           ...currentView,
           threads,
-          selected: preserved >= 0 ? preserved : clamp(currentView.selected, 0, threads.length - 1),
+          selected: preserved >= 0 ? preserved : clamp(currentView.selected, 0, visible.length - 1),
         };
       }
     } catch (error) {
@@ -634,7 +667,7 @@
   function moveSelection(delta: number) {
     const currentView = view;
     if (currentView.kind === "inbox") {
-      view = { ...currentView, selected: clamp(currentView.selected + delta, 0, currentView.threads.length - 1) };
+      view = { ...currentView, selected: clamp(currentView.selected + delta, 0, visibleInboxThreads(currentView).length - 1) };
     } else if (currentView.kind === "thread") {
       view = { ...currentView, selectedMsg: clamp(currentView.selectedMsg + delta, 0, currentView.messages.length - 1) };
     } else if (currentView.kind === "search") {
@@ -684,7 +717,7 @@
 
   async function openInboxRow(index: number) {
     if (view.kind !== "inbox") return;
-    const threads = view.threads;
+    const threads = visibleInboxThreads(view);
     const thread = threads[index];
     if (!thread) return;
     try {
@@ -763,6 +796,8 @@
   {#if view.kind === "inbox"}
     <Inbox
       v={view}
+      split={inboxSplit}
+      onSplit={selectInboxSplit}
       onSelect={(selected) => {
         if (view.kind === "inbox") view = { ...view, selected };
       }}

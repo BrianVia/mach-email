@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ThreadSummary } from "../lib/ipc";
+  import { splitOf, type Split } from "../lib/split";
   import { avatarColor } from "../lib/avatar";
   import Icon from "../lib/Icon.svelte";
 
@@ -15,24 +16,36 @@
     v,
     onSelect,
     onOpen,
+    split,
+    onSplit,
   }: {
     v: { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
     onSelect: (index: number) => void;
     onOpen: (index: number) => void;
+    split: Split;
+    onSplit: (split: Split) => void;
   } = $props();
 
   let highlight = $state<HTMLDivElement>();
   let scroller = $state<HTMLDivElement>();
 
+  // ponytail: client-side split is capped by INBOX_LIMIT; move it into the store if pagination needs category-complete results.
+  let threads = $derived(v.label === "INBOX" ? v.threads.filter((thread) => splitOf(thread.label_ids) === split) : v.threads);
+  let splits = $derived((["important", "other", "newsletters"] as const).map((candidate) => ({
+    value: candidate,
+    label: candidate[0].toUpperCase() + candidate.slice(1),
+    unread: v.threads.filter((thread) => splitOf(thread.label_ids) === candidate && thread.unread).length,
+  })));
+
   let inboxLayout = $derived.by(() => {
     const now = new Date();
     const renderRows: RenderRow[] = [];
     const rowTop: number[] = [];
-    const multipleAccounts = new Set(v.threads.map((thread) => thread.account_id)).size > 1;
+    const multipleAccounts = new Set(threads.map((thread) => thread.account_id)).size > 1;
     let offset = 0;
     let previousGroup: string | null = null;
 
-    for (const [index, thread] of v.threads.entries()) {
+    for (const [index, thread] of threads.entries()) {
       const date = new Date(thread.last_message_at);
       const group = dateGroup(date, now);
       if (group !== null && group !== previousGroup) {
@@ -112,8 +125,17 @@
   }
 </script>
 
-<div bind:this={scroller} class="list" role="list">
-  {#if v.threads.length === 0}
+{#if v.label === "INBOX"}
+  <div class="tabs" aria-label="Inbox category">
+    {#each splits as tab}
+      <button type="button" class:active={split === tab.value} onclick={() => onSplit(tab.value)}>
+        {tab.label} <span>{tab.unread}</span>
+      </button>
+    {/each}
+  </div>
+{/if}
+<div bind:this={scroller} class:list-with-tabs={v.label === "INBOX"} class="list" role="list">
+  {#if threads.length === 0}
     <div class="empty"><span>Inbox zero</span><small>Nothing in this view.</small></div>
   {:else}
     <div bind:this={highlight} class="highlight" style:height={`${ROW_H}px`}></div>
@@ -163,6 +185,11 @@
 
 <style>
   .list { position: relative; height: 100%; overflow-y: auto; }
+  .list-with-tabs { height: calc(100% - 36px); }
+  .tabs { box-sizing: border-box; display: flex; height: 36px; align-items: end; gap: 18px; padding: 0 16px 7px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .tabs button { padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+  .tabs button.active { color: var(--accent); font-weight: 600; }
+  .tabs span { margin-left: 3px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .empty { display: flex; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); user-select: none; }
   .empty span { font-size: 20px; }
   .empty small { font-size: 14px; }

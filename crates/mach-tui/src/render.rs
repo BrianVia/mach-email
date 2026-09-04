@@ -13,6 +13,7 @@
 
 use chrono::{DateTime, Local, Utc};
 use mach_core::store::ThreadSummary;
+use mach_core::{split_of, Split};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -20,6 +21,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Frame,
 };
+use std::borrow::Borrow;
 
 use crate::app::{
     App, ComposerField, ComposerView, InboxView, SearchView, SyncState, ThreadView, View,
@@ -52,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_top_bar(f, app, layout[0]);
     match &app.view {
-        View::Inbox(v) => draw_inbox(f, v, layout[1]),
+        View::Inbox(v) => draw_inbox(f, v, app.inbox_split, layout[1]),
         View::Thread(v) => draw_thread(f, v, layout[1]),
         View::Composer(v) => draw_composer(f, v, layout[1]),
         View::Search(v) => draw_search(f, v, layout[1]),
@@ -65,7 +67,7 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
         View::Inbox(v) => format!(
             "  {} ({} threads)",
             label_display(v.label.as_str()),
-            v.threads.len()
+            v.visible_threads(app.inbox_split).len()
         ),
         View::Thread(v) => format!("  ← Inbox  •  {}", trunc(&v.summary.subject, 60)),
         View::Composer(v) => format!("  Compose  •  draft {}", v.draft_id),
@@ -132,7 +134,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
+fn draw_inbox(f: &mut Frame, v: &InboxView, split: Split, area: Rect) {
     let inner = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(DIM))
@@ -145,13 +147,48 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, area: Rect) {
         area,
     );
 
-    if v.threads.is_empty() {
+    let threads = v.visible_threads(split);
+    let list_area = if v.label.as_str() == "INBOX" {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(inner);
+        let count = |candidate| {
+            v.threads
+                .iter()
+                .filter(|thread| split_of(&thread.label_ids) == candidate && thread.unread)
+                .count()
+        };
+        let tab = |label, candidate| {
+            Span::styled(
+                format!(" {label} {} ", count(candidate)),
+                if split == candidate {
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(DIM)
+                },
+            )
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                tab("1 Important", Split::Important),
+                tab("2 Other", Split::Other),
+                tab("3 Newsletters", Split::Newsletters),
+            ])),
+            chunks[0],
+        );
+        chunks[1]
+    } else {
+        inner
+    };
+
+    if threads.is_empty() {
         let msg = Paragraph::new("(empty)").style(Style::default().fg(DIM));
-        f.render_widget(msg, inner);
+        f.render_widget(msg, list_area);
         return;
     }
 
-    draw_mailbox_table(f, &v.threads, v.selected, v.viewport_top, inner);
+    draw_mailbox_table(f, &threads, v.selected, v.viewport_top, list_area);
 }
 
 fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
@@ -333,9 +370,9 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
 /// Render the inbox-shaped projection as an actual table. The table owns
 /// clipping and column sizing, so a narrow pane can never turn one message
 /// into multiple visual rows or displace the fixed header.
-fn draw_mailbox_table(
+fn draw_mailbox_table<T: Borrow<ThreadSummary>>(
     f: &mut Frame,
-    threads: &[ThreadSummary],
+    threads: &[T],
     selected: usize,
     viewport_top: usize,
     area: Rect,
@@ -356,6 +393,7 @@ fn draw_mailbox_table(
         .iter()
         .enumerate()
         .map(|(offset, thread)| {
+            let thread = thread.borrow();
             let is_selected = top + offset == selected;
             let marker = Line::from(vec![
                 if thread.unread {
