@@ -61,6 +61,43 @@ impl SqliteStore {
         .await
         .map_err(map_err)?
     }
+
+    pub async fn get_meta(&self, key: &str) -> CoreResult<Option<String>> {
+        let pool = self.pool.clone();
+        let key = key.to_string();
+        spawn_blocking(move || -> CoreResult<Option<String>> {
+            pool.get()
+                .map_err(map_err)?
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![key],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map(Option::flatten)
+                .map_err(map_err)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    pub async fn set_meta(&self, key: &str, value: &str) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let key = key.to_string();
+        let value = value.to_string();
+        spawn_blocking(move || -> CoreResult<()> {
+            pool.get()
+                .map_err(map_err)?
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)\n                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )
+                .map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
 }
 
 /// Inputs the sync engine writes during bootstrap / incremental updates.
@@ -820,9 +857,9 @@ impl MailStore for SqliteStore {
         let account = scope.account().map(|value| value.as_str().to_string());
         spawn_blocking(move || -> CoreResult<Vec<ThreadSummary>> {
             let conn = pool.get().map_err(map_err)?;
-            // DONE, SNOOZED, and ALL are virtual labels derived from Gmail's
+            // DONE, SNOOZED, MUTED, and ALL are virtual labels derived from Gmail's
             // stored label IDs.
-            if matches!(label.as_str(), "DONE" | "SNOOZED" | "ALL") {
+            if matches!(label.as_str(), "DONE" | "SNOOZED" | "MUTED" | "ALL") {
                 let mut stmt = conn
                     .prepare_cached(
                         "SELECT account_id, id, subject, snippet, participants_json, last_message_at,
@@ -843,6 +880,14 @@ impl MailStore for SqliteStore {
                                  SELECT 1 FROM json_each(label_ids_json) j
                                  JOIN labels l ON l.account_id = threads.account_id AND l.id = j.value
                                  WHERE l.name LIKE 'MACH/Snoozed/%'
+                               )
+                           ))
+                           OR (?1 = 'MUTED' AND (
+                               label_ids_json LIKE '%\"MACH/Muted\"%'
+                               OR EXISTS (
+                                 SELECT 1 FROM json_each(label_ids_json) j
+                                 JOIN labels l ON l.account_id = threads.account_id AND l.id = j.value
+                                 WHERE l.name = 'MACH/Muted'
                                )
                            )))
                            AND (?2 IS NULL OR account_id = ?2)
@@ -2279,6 +2324,7 @@ mod tests {
             in_reply_to: Some("<parent@example.com>".into()),
             references: Some("<root@example.com>".into()),
             reply_to: Some("reply@example.com".into()),
+            ..MessageHeaders::default()
         };
         pool.get()
             .unwrap()
@@ -2299,6 +2345,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(message.headers, Some(headers));
+    }
+
+    #[tokio::test]
+    async fn meta_round_trips() {
+        let store = SqliteStore::new(open_in_memory().unwrap());
+
+        assert_eq!(store.get_meta("cursor").await.unwrap(), None);
+        store.set_meta("cursor", "123").await.unwrap();
+        assert_eq!(
+            store.get_meta("cursor").await.unwrap().as_deref(),
+            Some("123")
+        );
+        store.set_meta("cursor", "456").await.unwrap();
+        assert_eq!(
+            store.get_meta("cursor").await.unwrap().as_deref(),
+            Some("456")
+        );
     }
 
     #[tokio::test]
@@ -2398,6 +2461,31 @@ mod tests {
         assert!(snoozed
             .iter()
             .any(|thread| thread.id.as_str() == "gmail-id"));
+    }
+
+    #[tokio::test]
+    async fn list_threads_in_muted_returns_only_muted_threads() {
+        let pool = open_in_memory().unwrap();
+        seed(&pool, "inbox", "inbox", "inbox", &["INBOX"]);
+        seed(&pool, "muted", "muted", "muted", &["MACH/Muted"]);
+        seed(&pool, "gmail-id", "gmail-id", "gmail-id", &["Label_1"]);
+        pool.get()
+            .unwrap()
+            .execute(
+                "INSERT INTO labels (account_id, id, name, type)
+                 VALUES (?1, 'Label_1', 'MACH/Muted', 'user')",
+                params![account().as_str()],
+            )
+            .unwrap();
+
+        let store = SqliteStore::new(pool);
+        let muted = store
+            .list_threads_in_label(&scope(), &LabelId::new("MUTED"), 10)
+            .await
+            .unwrap();
+        assert_eq!(muted.len(), 2);
+        assert!(muted.iter().any(|thread| thread.id.as_str() == "muted"));
+        assert!(muted.iter().any(|thread| thread.id.as_str() == "gmail-id"));
     }
 
     #[tokio::test]

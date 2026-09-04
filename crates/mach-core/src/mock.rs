@@ -1003,6 +1003,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mute_archives_and_undo_restores_changed_labels() {
+        let store = Arc::new(InMemoryStore::new());
+        seed_thread(&store, "t1", &["INBOX"]);
+        let dispatcher = Dispatcher::new(store.clone());
+
+        dispatcher
+            .execute(Action::Mute {
+                thread_ids: vec![ThreadId::new("t1")],
+            })
+            .await
+            .unwrap();
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "INBOX"));
+        assert!(thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "MACH/Muted"));
+        let outbox = store.outbox_snapshot();
+        assert!(matches!(
+            &outbox[0].kind,
+            OutboxOpKind::ModifyLabels { add, remove, .. }
+                if add == &[LabelId::new("MACH/Muted")] && remove == &[LabelId::new("INBOX")]
+        ));
+
+        dispatcher.execute(Action::Undo).await.unwrap();
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "INBOX"));
+        assert!(!thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "MACH/Muted"));
+    }
+
+    #[tokio::test]
     async fn undo_trash_on_already_trashed_thread_is_a_no_op() {
         let store = Arc::new(InMemoryStore::new());
         seed_thread(&store, "t1", &["TRASH"]);

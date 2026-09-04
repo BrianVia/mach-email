@@ -2659,6 +2659,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -2673,6 +2674,7 @@ dependencies = [
  "mach-core",
  "mach-gmail",
  "mach-store",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
@@ -2767,6 +2769,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+ "webbrowser",
 ]
 
 [[package]]
