@@ -7,9 +7,9 @@
 //! store directly without going through the Action surface — those don't
 //! need optimistic-update semantics.
 
-use mach_core::ids::{AccountScope, LabelId, ThreadId};
-use mach_core::store::MailStore;
-use mach_core::{Action, ActionOutcome};
+use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
+use mach_core::store::{Draft, MailStore};
+use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
 use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
 use serde::Serialize;
@@ -186,6 +186,64 @@ pub async fn flush_outbox(state: State<'_, AppState>) -> Result<Out<serde_json::
     Ok(Out::ok(
         drain_outbox(&state.store, &state.body_fetchers).await,
     ))
+}
+
+#[tauri::command]
+pub async fn unsubscribe_post(url: String) -> Result<(), String> {
+    mach_gmail::one_click_unsubscribe(&url)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn unsubscribe_mailto(
+    state: State<'_, AppState>,
+    account_id: String,
+    to: String,
+    subject: String,
+) -> Result<(), String> {
+    let account = AccountId::new(account_id);
+    let dispatcher =
+        Dispatcher::with_scope(state.store.clone(), AccountScope::One(account.clone()));
+    let composed = dispatcher
+        .execute(Action::ComposeNew)
+        .await
+        .map_err(|error| error.to_string())?;
+    let draft: Draft = serde_json::from_value(
+        composed
+            .data
+            .and_then(|data| data.get("draft").cloned())
+            .ok_or("compose_new returned no draft")?,
+    )
+    .map_err(|error| error.to_string())?;
+    dispatcher
+        .execute(Action::SaveDraft {
+            draft_id: draft.id.clone(),
+            patch: DraftPatch {
+                to: Some(vec![to]),
+                subject: Some(subject),
+                body_md: Some("Unsubscribe".into()),
+                ..DraftPatch::default()
+            },
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    dispatcher
+        .execute(Action::SendDraft { draft_id: draft.id })
+        .await
+        .map_err(|error| error.to_string())?;
+    let fetcher = state
+        .body_fetchers
+        .get(&account)
+        .ok_or("account is offline")?;
+    let report = OutboxWorker::new(account, fetcher.client().clone(), state.store.clone())
+        .drain_once(200)
+        .await
+        .map_err(|error| error.to_string())?;
+    if report.failed > 0 {
+        return Err(format!("{} outbox operation(s) failed", report.failed));
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -2012,6 +2012,7 @@ mod tests {
             in_reply_to: Some("<parent@example.com>".into()),
             references: Some("<root@example.com>".into()),
             reply_to: Some("reply@example.com".into()),
+            ..MessageHeaders::default()
         };
         pool.get()
             .unwrap()

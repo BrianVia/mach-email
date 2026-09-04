@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { Keymap, keyEventToChord, type KeyContext, type Mode } from "./lib/keymap";
   import { threadToMarkdown } from "./lib/markdown";
   import {
@@ -14,6 +15,8 @@
     refetchThread as refetchThreadIpc,
     searchThreads,
     syncNow,
+    unsubscribePost,
+    unsubscribeMailto,
     type AccountStatus,
     type ActionOutcome,
     type Draft,
@@ -22,6 +25,7 @@
     type Settings,
     type SyncStatusPayload,
     type ThreadSummary,
+    type UnsubscribeTarget,
   } from "./lib/ipc";
   import Shell from "./Shell.svelte";
   import Inbox from "./views/Inbox.svelte";
@@ -49,6 +53,7 @@
   let bootError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  let unsubscribeConfirm = $state<{ sender: string; accountId: string; target: UnsubscribeTarget } | null>(null);
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
   let status = $state<AccountStatus | null>(null);
@@ -275,6 +280,8 @@
       undo: "Undo",
       redo: "Redo",
       refresh: "Refresh",
+      mute: "Mute thread",
+      unsubscribe: "Unsubscribe",
     };
     const byLabel = new Map<string, PaletteCommand>();
 
@@ -408,6 +415,10 @@
           }
           return;
         }
+        case "unsubscribe": {
+          await beginUnsubscribe(action.message_id as string);
+          return;
+        }
         case "open_thread": {
           const id = (action.id as string) ?? "";
           const thread = currentView.kind === "inbox"
@@ -446,7 +457,7 @@
         }
       }
 
-      const isArchiveOrTrash = kind === "archive" || kind === "trash";
+      const isArchiveOrTrash = kind === "archive" || kind === "mute" || kind === "trash";
       if (
         isArchiveOrTrash
         && currentView.kind === "thread"
@@ -538,6 +549,35 @@
         showActionError(error);
       });
     }
+  }
+
+  async function beginUnsubscribe(messageId: string) {
+    const currentView = view;
+    const message = currentView.kind === "thread"
+      ? currentView.messages.find((candidate) => candidate.id === messageId)
+      : undefined;
+    const outcome = await dispatchAction({ kind: "unsubscribe", message_id: messageId });
+    const targets = (outcome.data as { targets?: UnsubscribeTarget[] } | null)?.targets ?? [];
+    if (!targets[0]) {
+      showNotice("No unsubscribe method advertised");
+      return;
+    }
+    if (!message) throw new Error("unsubscribe message not found");
+    unsubscribeConfirm = { sender: message.from, accountId: message.account_id, target: targets[0] };
+  }
+
+  async function confirmUnsubscribe() {
+    const confirmation = unsubscribeConfirm;
+    unsubscribeConfirm = null;
+    if (!confirmation) return;
+    const target = confirmation.target;
+    if (target.kind === "https") {
+      if (target.one_click) await unsubscribePost(target.url);
+      else await openUrl(target.url);
+    } else {
+      await unsubscribeMailto(confirmation.accountId, target.to, target.subject);
+    }
+    showNotice("Unsubscribed");
   }
 
   function prefetchThread(threadId: string | undefined) {
@@ -726,7 +766,7 @@
       onOpen={(index) => void openInboxRow(index)}
     />
   {:else if view.kind === "thread"}
-    <ThreadReader v={view} />
+    <ThreadReader v={view} onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)} />
   {:else if view.kind === "composer"}
     <Composer
       draft={view.draft}
@@ -761,7 +801,7 @@
     />
   {/if}
 
-  {#if bootError || actionError || notice || status?.needs_reauth.length}
+  {#if bootError || actionError || notice || unsubscribeConfirm || status?.needs_reauth.length}
     <div class="errors">
       {#each status?.needs_reauth ?? [] as email}
         <div class="notice reauth">Sign-in expired for {email}. Run mach auth login in a terminal.</div>
@@ -769,6 +809,13 @@
       {#if bootError}<div class="error">⚠ {bootError}</div>{/if}
       {#if actionError}<button class="error" onclick={() => (actionError = null)}>⚠ {actionError}</button>{/if}
       {#if notice}<button class="notice" onclick={() => showNotice(null)}>{notice}</button>{/if}
+      {#if unsubscribeConfirm}
+        <div class="notice confirm">
+          <span>Unsubscribe from {unsubscribeConfirm.sender}?</span>
+          <button onclick={() => void confirmUnsubscribe().catch(showActionError)}>Unsubscribe</button>
+          <button onclick={() => (unsubscribeConfirm = null)}>Cancel</button>
+        </div>
+      {/if}
     </div>
   {/if}
   <ChordOverlay show={chordBuf.length > 0} buf={chordBuf} conts={chordConts} />
@@ -787,4 +834,6 @@
   button.error { cursor: pointer; }
   .notice { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); background: color-mix(in oklab, var(--accent) 18%, var(--surface)); color: var(--accent); font-size: 14px; text-align: left; cursor: pointer; }
   .reauth { cursor: default; }
+  .confirm { display: flex; align-items: center; gap: 12px; cursor: default; }
+  .confirm button { padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: inherit; cursor: pointer; }
 </style>

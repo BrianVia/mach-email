@@ -25,3 +25,4 @@ futures.workspace = true
 html2text.workspace = true
 scraper.workspace = true
 ego-tree.workspace = true
+webbrowser.workspace = true

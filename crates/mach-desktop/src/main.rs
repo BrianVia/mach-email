@@ -164,6 +164,8 @@ async fn main() -> Result<()> {
             commands::settings,
             commands::account_status,
             commands::flush_outbox,
+            commands::unsubscribe_post,
+            commands::unsubscribe_mailto,
             commands::sync_now,
         ])
         .run(tauri::generate_context!())

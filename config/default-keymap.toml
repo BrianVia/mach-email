@@ -39,6 +39,7 @@
 "shift+s"  = { kind = "star",      thread_ids = "$selection", starred = false }
 "u"        = { kind = "mark_read", thread_ids = "$selection", read = false }
 "shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
+"shift+m"  = { kind = "mute",      thread_ids = "$selection" }
 
 # Compose
 "c"        = "compose_new"
@@ -81,6 +82,8 @@
 "shift+s"  = { kind = "star",      thread_ids = "$selection", starred = false }
 "u"        = { kind = "mark_read", thread_ids = "$selection", read = false }
 "shift+u"  = { kind = "mark_read", thread_ids = "$selection", read = true }
+"shift+m"  = { kind = "mute",      thread_ids = "$selection" }
+"ctrl+u"   = { kind = "unsubscribe", message_id = "$current_message" }
 
 "r"        = { kind = "reply",   message_id = "$current_message", all = false }
 "shift+r"  = { kind = "reply",   message_id = "$current_message", all = true  }

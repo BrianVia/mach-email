@@ -11,6 +11,7 @@ use crate::event::StateEvent;
 use crate::ids::{AccountId, AccountScope, DraftId, LabelId, ThreadId};
 use crate::state::{AppState, View};
 use crate::store::{Draft, MailStore, OutboxOpKind};
+use crate::unsubscribe::unsubscribe_targets;
 
 const UNDO_DEPTH: usize = 20;
 
@@ -146,6 +147,15 @@ impl Dispatcher {
                 self.modify_labels(&thread_ids, &[], &[LabelId::new("INBOX")], "archive")
                     .await
             }
+            Action::Mute { thread_ids } => {
+                self.modify_labels(
+                    &thread_ids,
+                    &[LabelId::new("MACH/Muted")],
+                    &[LabelId::new("INBOX")],
+                    "mute",
+                )
+                .await
+            }
             Action::Trash { thread_ids } => self.trash(&thread_ids).await,
             Action::MarkRead { thread_ids, read } => {
                 let unread = LabelId::new("UNREAD");
@@ -190,6 +200,7 @@ impl Dispatcher {
                 self.modify_labels(&thread_ids, &[snoozed], &[inbox], "snooze")
                     .await
             }
+            Action::Unsubscribe { message_id } => self.unsubscribe(&message_id).await,
             Action::ComposeNew => self.compose_new().await,
             Action::Reply { message_id, all } => self.reply(&message_id, all).await,
             Action::Forward { message_id } => self.forward(&message_id).await,
@@ -259,6 +270,23 @@ impl Dispatcher {
         let prefill = reply_prefill(&source, source.account_id.as_str(), all);
         self.create_prefilled_draft("reply", source.account_id, prefill)
             .await
+    }
+
+    async fn unsubscribe(&self, message_id: &crate::ids::MessageId) -> CoreResult<ActionOutcome> {
+        let message = self
+            .store
+            .get_message(&self.scope, message_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(format!("message {message_id}")))?;
+        let targets = message
+            .headers
+            .as_ref()
+            .map(unsubscribe_targets)
+            .unwrap_or_default();
+        let mut outcome = ActionOutcome::empty("unsubscribe");
+        outcome.data = Some(serde_json::json!({ "targets": targets }));
+        outcome.message = format!("{} unsubscribe target(s)", targets.len());
+        Ok(outcome)
     }
 
     async fn forward(&self, message_id: &crate::ids::MessageId) -> CoreResult<ActionOutcome> {
@@ -625,6 +653,27 @@ impl Dispatcher {
                 inverse.push(Action::RemoveLabel {
                     thread_ids: remove_snoozed,
                     label_id: snoozed,
+                });
+            }
+            return Ok((!inverse.is_empty()).then_some(inverse));
+        }
+
+        if let Action::Mute { thread_ids } = action {
+            let restore_inbox = self.with_label_state(thread_ids, "INBOX", true).await?;
+            let remove_muted = self
+                .with_label_state(thread_ids, "MACH/Muted", false)
+                .await?;
+            let mut inverse = Vec::new();
+            if !remove_muted.is_empty() {
+                inverse.push(Action::RemoveLabel {
+                    thread_ids: remove_muted,
+                    label_id: LabelId::new("MACH/Muted"),
+                });
+            }
+            if !restore_inbox.is_empty() {
+                inverse.push(Action::AddLabel {
+                    thread_ids: restore_inbox,
+                    label_id: LabelId::new("INBOX"),
                 });
             }
             return Ok((!inverse.is_empty()).then_some(inverse));

@@ -53,10 +53,22 @@ export type Message = {
   internal_date: string;
   body_plain: string | null;
   body_html: string | null;
+  headers: {
+    message_id?: string;
+    in_reply_to?: string;
+    references?: string;
+    reply_to?: string;
+    list_unsubscribe?: string;
+    list_unsubscribe_post?: string;
+  } | null;
   label_ids: string[];
   fetched_full: boolean;
   inline_images: InlineImageRef[];
 };
+
+export type UnsubscribeTarget =
+  | { kind: "https"; url: string; one_click: boolean }
+  | { kind: "mailto"; to: string; subject: string };
 
 export type Draft = {
   account_id: string;
@@ -194,6 +206,14 @@ export async function flushOutbox(): Promise<{
     last_error: string | null;
   }>>("flush_outbox");
   return unwrap(result);
+}
+
+export async function unsubscribePost(url: string): Promise<void> {
+  return invoke<void>("unsubscribe_post", { url });
+}
+
+export async function unsubscribeMailto(accountId: string, to: string, subject: string): Promise<void> {
+  return invoke<void>("unsubscribe_mailto", { accountId, to, subject });
 }
 
 export async function syncNow(): Promise<SyncNowReport> {

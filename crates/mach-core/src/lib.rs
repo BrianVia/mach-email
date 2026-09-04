@@ -15,6 +15,7 @@ pub mod mock;
 pub mod search_query;
 pub mod state;
 pub mod store;
+pub mod unsubscribe;
 
 pub use action::{Action, ActionOutcome, DraftPatch, OpId};
 pub use dispatcher::Dispatcher;
@@ -25,3 +26,4 @@ pub use keymap::{Chord, KeyContext, Keymap, KeymapError, Mode};
 pub use search_query::SearchQuery;
 pub use state::AppState;
 pub use store::{InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind};
+pub use unsubscribe::{unsubscribe_targets, UnsubscribeTarget};

@@ -10,12 +10,14 @@ pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
     "open_thread",
     "back_to_list",
     "archive",
+    "mute",
     "trash",
     "mark_read",
     "star",
     "add_label",
     "remove_label",
     "snooze",
+    "unsubscribe",
     "search",
     "undo",
     "redo",
@@ -67,6 +69,9 @@ pub enum Action {
     Archive {
         thread_ids: Vec<ThreadId>,
     },
+    Mute {
+        thread_ids: Vec<ThreadId>,
+    },
     Trash {
         thread_ids: Vec<ThreadId>,
     },
@@ -92,6 +97,10 @@ pub enum Action {
     Snooze {
         thread_ids: Vec<ThreadId>,
         until: DateTime<Utc>,
+    },
+
+    Unsubscribe {
+        message_id: MessageId,
     },
 
     // --- Compose ---
@@ -141,12 +150,14 @@ impl Action {
             Action::OpenThread { .. } => "open_thread",
             Action::BackToList => "back_to_list",
             Action::Archive { .. } => "archive",
+            Action::Mute { .. } => "mute",
             Action::Trash { .. } => "trash",
             Action::MarkRead { .. } => "mark_read",
             Action::Star { .. } => "star",
             Action::AddLabel { .. } => "add_label",
             Action::RemoveLabel { .. } => "remove_label",
             Action::Snooze { .. } => "snooze",
+            Action::Unsubscribe { .. } => "unsubscribe",
             Action::ComposeNew => "compose_new",
             Action::Reply { .. } => "reply",
             Action::Forward { .. } => "forward",
@@ -167,6 +178,7 @@ impl Action {
         matches!(
             self,
             Action::Archive { .. }
+                | Action::Mute { .. }
                 | Action::Trash { .. }
                 | Action::MarkRead { .. }
                 | Action::Star { .. }
