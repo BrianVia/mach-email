@@ -40,8 +40,12 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
         .filter(|credentials| selected_account.map_or(true, |email| credentials.email == email))
         .collect();
     for credentials in accounts {
+        let needs_reauth = credentials.needs_reauth();
         let account = AccountId::new(credentials.email);
         println!("\naccount:         {account}");
+        if needs_reauth {
+            println!("NEEDS RE-AUTH: {account} — run: mach auth login");
+        }
         let cursor = store.get_history_cursor(&account).await?;
         println!(
             "history cursor:  {}",
@@ -72,11 +76,14 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
                 dead_letter.last_error.as_deref().unwrap_or("(no error)")
             );
         }
-        if let Ok((config, _)) = &config {
-            let client = GmailClient::from_stored_credentials(config.clone(), account.as_str())?;
-            match client.get_profile().await {
-                Ok(profile) => println!("remote history:  {} (live)", profile.history_id),
-                Err(error) => println!("⚠ remote check failed: {error}"),
+        if !needs_reauth {
+            if let Ok((config, _)) = &config {
+                let client =
+                    GmailClient::from_stored_credentials(config.clone(), account.as_str())?;
+                match client.get_profile().await {
+                    Ok(profile) => println!("remote history:  {} (live)", profile.history_id),
+                    Err(error) => println!("⚠ remote check failed: {error}"),
+                }
             }
         }
         if simulate_gap {

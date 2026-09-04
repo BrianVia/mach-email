@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use mach_core::ids::AccountId;
 use mach_core::MailStore;
 use mach_gmail::{config::OAuthConfig, GmailClient};
+use tracing::warn;
 
 use crate::runtime;
 
@@ -17,6 +18,13 @@ pub async fn run(bootstrap: bool, selected_account: Option<&str>) -> Result<()> 
     }
     let mut failures = Vec::new();
     for credentials in accounts {
+        if credentials.needs_reauth() {
+            warn!(
+                account = credentials.email,
+                "skipping sync: re-authentication required"
+            );
+            continue;
+        }
         let email = credentials.email;
         if let Err(error) = sync_account(bootstrap, &email, config.clone(), store.clone()).await {
             eprintln!("[{email}] sync failed: {error:#}");

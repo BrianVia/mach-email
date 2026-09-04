@@ -102,11 +102,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!(" │ {}", app.status.hint)
     };
+    let reauth = app
+        .status
+        .needs_reauth
+        .first()
+        .map(|email| format!(" · re-auth needed: {email}"))
+        .unwrap_or_default();
 
     let line = Line::from(vec![
         Span::raw(" "),
         sync,
         Span::styled(chord_hint, Style::default().fg(DIM)),
+        Span::styled(reauth, Style::default().fg(Color::Red)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }

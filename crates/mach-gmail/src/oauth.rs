@@ -3,9 +3,10 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use oauth2::{
-    basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
-    ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse,
-    TokenUrl,
+    basic::{BasicClient, BasicErrorResponse, BasicErrorResponseType},
+    reqwest::async_http_client,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
+    RefreshToken, RequestTokenError, Scope, TokenResponse, TokenUrl,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -18,6 +19,14 @@ use crate::credentials::StoredCredentials;
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const PROFILE_URL: &str = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
+
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshError {
+    #[error("{0}")]
+    NeedsReauth(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// Scopes requested at consent time. Narrower than `gmail.full` to keep the
 /// app-verification bar low; broader than `gmail.readonly` so we can write.
@@ -165,12 +174,27 @@ pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
         }
     };
 
-    Ok(StoredCredentials {
+    Ok(login_credentials(
         email,
         refresh_token,
         access_token,
         expires_at,
-    })
+    ))
+}
+
+fn login_credentials(
+    email: String,
+    refresh_token: String,
+    access_token: String,
+    expires_at: DateTime<Utc>,
+) -> StoredCredentials {
+    StoredCredentials {
+        email,
+        refresh_token,
+        access_token,
+        expires_at,
+        needs_reauth: None,
+    }
 }
 
 /// Trade a refresh token for a fresh access token. Called from the Gmail HTTP
@@ -178,23 +202,41 @@ pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
 pub async fn refresh_access_token(
     config: &OAuthConfig,
     refresh_token: &str,
-) -> Result<(String, DateTime<Utc>)> {
+) -> std::result::Result<(String, DateTime<Utc>), RefreshError> {
     let client = BasicClient::new(
         ClientId::new(config.client_id.clone()),
         Some(ClientSecret::new(config.client_secret.clone())),
-        AuthUrl::new(AUTH_URL.into())?,
-        Some(TokenUrl::new(TOKEN_URL.into())?),
+        AuthUrl::new(AUTH_URL.into()).context("invalid OAuth authorization URL")?,
+        Some(TokenUrl::new(TOKEN_URL.into()).context("invalid OAuth token URL")?),
     );
 
     let token = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token.into()))
         .request_async(async_http_client)
         .await
-        .map_err(|e| anyhow!("refresh failed: {e}"))?;
+        .map_err(classify_refresh_error)?;
 
     let access_token = token.access_token().secret().clone();
     let expires_at = expires_at_from(token.expires_in());
     Ok((access_token, expires_at))
+}
+
+fn classify_refresh_error(
+    error: RequestTokenError<oauth2::reqwest::AsyncHttpClientError, BasicErrorResponse>,
+) -> RefreshError {
+    match &error {
+        RequestTokenError::ServerResponse(response)
+            if matches!(
+                response.error(),
+                BasicErrorResponseType::InvalidGrant
+                    | BasicErrorResponseType::InvalidClient
+                    | BasicErrorResponseType::UnauthorizedClient
+            ) =>
+        {
+            RefreshError::NeedsReauth(response.to_string())
+        }
+        _ => RefreshError::Other(anyhow::Error::new(error).context("refresh failed")),
+    }
 }
 
 async fn fetch_email(access_token: &str) -> Result<String> {
@@ -215,4 +257,35 @@ async fn fetch_email(access_token: &str) -> Result<String> {
 fn expires_at_from(d: Option<Duration>) -> DateTime<Utc> {
     let secs = d.map(|d| d.as_secs() as i64).unwrap_or(3600);
     Utc::now() + chrono::Duration::seconds(secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_grant_requires_reauthentication() {
+        let response = BasicErrorResponse::new(
+            BasicErrorResponseType::InvalidGrant,
+            Some("Token has been expired or revoked.".into()),
+            None,
+        );
+        let error: RequestTokenError<oauth2::reqwest::AsyncHttpClientError, BasicErrorResponse> =
+            RequestTokenError::ServerResponse(response);
+        assert!(matches!(
+            classify_refresh_error(error),
+            RefreshError::NeedsReauth(reason) if reason.starts_with("invalid_grant")
+        ));
+    }
+
+    #[test]
+    fn login_credentials_clear_reauthentication_state() {
+        let credentials = login_credentials(
+            "me@example.com".into(),
+            "refresh".into(),
+            "access".into(),
+            Utc::now(),
+        );
+        assert_eq!(credentials.needs_reauth, None);
+    }
 }

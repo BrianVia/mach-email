@@ -84,6 +84,7 @@ export type AccountStatus = {
   email: string;
   accounts: string[];
   online: boolean;
+  needs_reauth: string[];
 };
 
 export type MailSyncedPayload = {
