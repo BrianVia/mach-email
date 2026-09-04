@@ -10,7 +10,7 @@
 use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
 use mach_core::store::{Draft, Label, MailStore};
 use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
-use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
+use mach_gmail::{GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
 use serde::Serialize;
 use std::sync::Arc;
@@ -66,7 +66,6 @@ fn emit_sync_event<T: Clone + Serialize>(app: &AppHandle, event: &str, payload: 
 
 pub(crate) async fn sync_accounts(
     app: &AppHandle,
-    store: &Arc<SqliteStore>,
     accounts: &GmailAccountPool,
 ) -> serde_json::Value {
     let mut synced = 0;
@@ -74,49 +73,14 @@ pub(crate) async fn sync_accounts(
     let mut last_error = None;
 
     for account in accounts.accounts() {
-        let Some(fetcher) = accounts.get(account) else {
-            continue;
-        };
-        if fetcher.client().needs_reauth().await {
-            continue;
-        }
-        let email = account.as_str().to_string();
-        match sync_account_tick(account, fetcher.client().clone(), store.clone()).await {
-            Ok(report) => {
+        match sync_account(app, accounts, account).await {
+            Ok(true) => {
                 synced += 1;
-                if tick_changed(&report) {
-                    emit_sync_event(
-                        app,
-                        "mail-synced",
-                        MailSyncedPayload {
-                            account: email.clone(),
-                        },
-                    );
-                }
-                emit_sync_event(
-                    app,
-                    "sync-status",
-                    SyncStatusPayload {
-                        account: email,
-                        ok: true,
-                        error: None,
-                    },
-                );
             }
-            Err(error) => {
-                let message = format!("{error:#}");
-                warn!(account = %account, error = %message, "account sync tick failed");
+            Ok(false) => continue,
+            Err(message) => {
                 failed += 1;
                 last_error = Some(message.clone());
-                emit_sync_event(
-                    app,
-                    "sync-status",
-                    SyncStatusPayload {
-                        account: email,
-                        ok: false,
-                        error: Some(message),
-                    },
-                );
             }
         }
     }
@@ -126,6 +90,57 @@ pub(crate) async fn sync_accounts(
         "failed": failed,
         "last_error": last_error,
     })
+}
+
+pub(crate) async fn sync_account(
+    app: &AppHandle,
+    accounts: &GmailAccountPool,
+    account: &AccountId,
+) -> Result<bool, String> {
+    let Some(fetcher) = accounts.get(account) else {
+        return Ok(false);
+    };
+    if fetcher.client().needs_reauth().await {
+        return Ok(false);
+    }
+    let email = account.as_str().to_string();
+    match fetcher.sync_tick().await {
+        Ok(report) => {
+            if tick_changed(&report) {
+                emit_sync_event(
+                    app,
+                    "mail-synced",
+                    MailSyncedPayload {
+                        account: email.clone(),
+                    },
+                );
+            }
+            emit_sync_event(
+                app,
+                "sync-status",
+                SyncStatusPayload {
+                    account: email,
+                    ok: true,
+                    error: None,
+                },
+            );
+            Ok(true)
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            warn!(account = %account, error = %message, "account sync tick failed");
+            emit_sync_event(
+                app,
+                "sync-status",
+                SyncStatusPayload {
+                    account: email,
+                    ok: false,
+                    error: Some(message.clone()),
+                },
+            );
+            Err(message)
+        }
+    }
 }
 
 #[tauri::command]
@@ -284,9 +299,7 @@ pub async fn sync_now(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Out<serde_json::Value>, String> {
-    Ok(Out::ok(
-        sync_accounts(&app, &state.store, &state.body_fetchers).await,
-    ))
+    Ok(Out::ok(sync_accounts(&app, &state.body_fetchers).await))
 }
 
 #[tauri::command]

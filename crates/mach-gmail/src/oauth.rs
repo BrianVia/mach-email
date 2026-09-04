@@ -67,6 +67,9 @@ pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
     for scope in SCOPES {
         req = req.add_scope(Scope::new((*scope).into()));
     }
+    if crate::config::pubsub_topic().is_some() {
+        req = req.add_scope(Scope::new("https://www.googleapis.com/auth/pubsub".into()));
+    }
     let (auth_url, csrf_token) = req
         // `offline` is what makes Google issue a refresh_token; without it
         // we'd silently get only a 1-hour access token and have to re-consent.

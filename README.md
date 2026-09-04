@@ -96,6 +96,27 @@ cd ..
 cargo tauri dev
 ```
 
+## Push notifications (optional)
+
+The desktop app and TUI can use Gmail push notifications while retaining the
+60-second poll as a fallback. Create the Pub/Sub resources in the Google Cloud
+project that owns your OAuth client:
+
+```sh
+gcloud pubsub topics create mach-gmail
+gcloud pubsub topics add-iam-policy-binding mach-gmail \
+  --member=serviceAccount:gmail-api-push@system.gserviceaccount.com \
+  --role=roles/pubsub.publisher
+gcloud pubsub subscriptions create mach-gmail-pull --topic=mach-gmail
+
+export MACH_PUBSUB_TOPIC=projects/PROJECT_ID/topics/mach-gmail
+export MACH_PUBSUB_SUBSCRIPTION=projects/PROJECT_ID/subscriptions/mach-gmail-pull
+mach auth login
+```
+
+Enabling push adds the Google Pub/Sub OAuth scope, so every Gmail account must
+run `mach auth login` again after setting `MACH_PUBSUB_TOPIC`.
+
 The desktop build hook runs the frontend build automatically.
 
 ## Validation

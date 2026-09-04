@@ -342,10 +342,23 @@ pub async fn run_with_user_config(
     let pull_task = tokio::spawn(periodic_pull(
         app.body_fetchers.clone(),
         app.scope.clone(),
-        pull_tx,
+        pull_tx.clone(),
     ));
+    let push_task = mach_gmail::config::pubsub_subscription().and_then(|subscription| {
+        app.body_fetchers.pubsub_client().map(|client| {
+            tokio::spawn(pubsub_pull(
+                app.body_fetchers.clone(),
+                pull_tx,
+                client,
+                subscription,
+            ))
+        })
+    });
     let result = main_loop(&mut app, &mut terminal, &mut pull_rx, &mut search_rx).await;
     pull_task.abort();
+    if let Some(task) = push_task {
+        task.abort();
+    }
     if let Some(task) = app.remote_search_task.take() {
         task.abort();
     }
@@ -421,6 +434,34 @@ async fn periodic_pull(
         if events.send(PullEvent::Finished(report)).is_err() {
             break;
         }
+    }
+}
+
+async fn pubsub_pull(
+    accounts: Arc<mach_gmail::GmailAccountPool>,
+    events: mpsc::UnboundedSender<PullEvent>,
+    client: Arc<mach_gmail::GmailClient>,
+    subscription: String,
+) {
+    let callback_accounts = accounts.clone();
+    let result = mach_gmail::pubsub_pull_loop(client, &subscription, move |email| {
+        let accounts = callback_accounts.clone();
+        let events = events.clone();
+        async move {
+            let account = AccountId::new(email);
+            if accounts.get(&account).is_none() {
+                return;
+            }
+            if events.send(PullEvent::Started).is_err() {
+                return;
+            }
+            let report = accounts.pull_updates(&AccountScope::One(account)).await;
+            let _ = events.send(PullEvent::Finished(report));
+        }
+    })
+    .await;
+    if let Err(error) = result {
+        warn!(%error, "Pub/Sub pull loop stopped; polling remains active");
     }
 }
 

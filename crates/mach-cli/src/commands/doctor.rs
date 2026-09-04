@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Utc;
 use directories::ProjectDirs;
 use mach_core::ids::AccountId;
 use mach_core::store::MailStore;
@@ -34,6 +35,16 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
         Err(_) => "✗ none (read-only mode)",
     };
     println!("OAuth client:    {source}");
+    let pubsub_topic = mach_gmail::config::pubsub_topic();
+    if let Some(topic) = &pubsub_topic {
+        println!("Pub/Sub topic:  {topic}");
+        println!(
+            "subscription:    {}",
+            mach_gmail::config::pubsub_subscription()
+                .as_deref()
+                .unwrap_or("✗ not configured")
+        );
+    }
 
     let accounts: Vec<_> = mach_gmail::credentials::load_all()?
         .into_iter()
@@ -53,6 +64,24 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
                 .map(|value| value.to_string())
                 .unwrap_or("(none — bootstrap first)".into())
         );
+        if pubsub_topic.is_some() {
+            let expiration = store
+                .get_meta(&format!("watch_expiration:{account}"))
+                .await?
+                .and_then(|value| value.parse::<i64>().ok());
+            println!(
+                "Gmail watch:    {}",
+                match expiration {
+                    None => "not registered".into(),
+                    Some(value)
+                        if mach_gmail::should_renew(Some(value), Utc::now().timestamp_millis()) =>
+                    {
+                        format!("renewal due (expiration {value})")
+                    }
+                    Some(value) => format!("active (expiration {value})"),
+                }
+            );
+        }
         let outbox = store
             .outbox_summary(&mach_core::ids::AccountScope::One(account.clone()))
             .await?;
