@@ -26,6 +26,7 @@
 "k"        = "select_prev"
 "down"     = "select_next"
 "up"       = "select_prev"
+"shift+l"  = "load_older"
 
 # Open thread
 "enter"    = { kind = "open_thread", id = "$current_thread" }
@@ -57,6 +58,7 @@
 "g d"      = { kind = "open_label", label_id = "DRAFT"   }
 "g t"      = { kind = "open_label", label_id = "SENT"    }
 "g e"      = { kind = "open_label", label_id = "DONE"    }   # Superhuman "Done" = archived
+"g z"      = { kind = "open_label", label_id = "SNOOZED" }
 "g h"      = { kind = "open_label", label_id = "MUTED"   }
 "g j"      = { kind = "open_label", label_id = "SPAM"    }
 "g k"      = { kind = "open_label", label_id = "TRASH"   }

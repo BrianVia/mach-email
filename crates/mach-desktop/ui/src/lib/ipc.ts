@@ -33,6 +33,15 @@ export type ThreadSummary = {
   label_ids: string[];
 };
 
+export type Label = {
+  account_id: string;
+  id: string;
+  name: string;
+  system: boolean;
+  color: string | null;
+  unread_count: number | null;
+};
+
 export type InlineImageRef = {
   content_id: string;
   attachment_id: string;
@@ -115,6 +124,17 @@ export type SyncNowReport = {
   last_error: string | null;
 };
 
+export type OutboxSummary = {
+  pending: number;
+  failed: number;
+  last_error: string | null;
+};
+
+export type LoadOlderStats = {
+  fetched: number;
+  oldest_ms: number | null;
+};
+
 export type KeymapSources = {
   defaults: string;
   user: string | null;
@@ -147,6 +167,17 @@ export async function listThreads(
   });
   if (!r) return [];
   return unwrap(r);
+}
+
+export async function listLabels(): Promise<Label[]> {
+  const r = await invoke<Out<Label[]> | null>("list_labels");
+  if (!r) return [];
+  return unwrap(r);
+}
+
+export async function loadOlder(label: string, beforeMs: number): Promise<LoadOlderStats> {
+  const result = await invoke<Out<LoadOlderStats>>("load_older", { label, beforeMs });
+  return unwrap(result);
 }
 
 export async function openThread(
@@ -214,6 +245,14 @@ export async function unsubscribePost(url: string): Promise<void> {
 
 export async function unsubscribeMailto(accountId: string, to: string, subject: string): Promise<void> {
   return invoke<void>("unsubscribe_mailto", { accountId, to, subject });
+}
+
+export async function fetchOutboxSummary(): Promise<OutboxSummary> {
+  return unwrap(await invoke<Out<OutboxSummary>>("outbox_summary"));
+}
+
+export async function retryOutbox(): Promise<number> {
+  return unwrap(await invoke<Out<number>>("retry_outbox"));
 }
 
 export async function syncNow(): Promise<SyncNowReport> {

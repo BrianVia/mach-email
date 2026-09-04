@@ -7,17 +7,13 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::stream::{self, StreamExt};
 use mach_core::{
     ids::{AccountId, AccountScope, ThreadId},
     store::{MailStore, ThreadSummary},
 };
 use mach_store::SqliteStore;
-use tracing::warn;
 
-use crate::{client::GmailClient, sync::remote_thread_to_upsert};
-
-const SEARCH_FETCH_CONCURRENCY: usize = 10;
+use crate::{client::GmailClient, sync::fetch_and_upsert_threads};
 
 pub(crate) async fn search_account(
     account: &AccountId,
@@ -38,27 +34,14 @@ pub(crate) async fn search_account(
         .take(limit as usize)
         .collect();
 
-    let mut remote_threads = Vec::with_capacity(ids.len());
-    let mut fetches = stream::iter(ids)
-        .map(|id| {
-            let client = client.clone();
-            async move { client.get_thread_metadata(&id).await }
-        })
-        .buffer_unordered(SEARCH_FETCH_CONCURRENCY);
-    while let Some(result) = fetches.next().await {
-        match result {
-            Ok(thread) => remote_threads.push(thread),
-            Err(error) => warn!(account = %account, %error, "remote search hit fetch failed"),
-        }
-    }
+    let remote_threads = fetch_and_upsert_threads(client, store.clone(), account, ids)
+        .await?
+        .threads;
 
     let ids: Vec<ThreadId> = remote_threads
         .iter()
         .map(|thread| ThreadId::new(thread.id.clone()))
         .collect();
-    let upserts = remote_threads.iter().map(remote_thread_to_upsert).collect();
-    store.upsert_threads(account, upserts).await?;
-
     let scope = AccountScope::One(account.clone());
     let mut summaries = Vec::with_capacity(ids.len());
     for id in ids {

@@ -12,6 +12,7 @@ use crate::ids::{AccountId, AccountScope, DraftId, LabelId, ThreadId};
 use crate::state::{AppState, View};
 use crate::store::{Draft, MailStore, OutboxOpKind};
 use crate::unsubscribe::unsubscribe_targets;
+use crate::user_config::UserConfig;
 
 const UNDO_DEPTH: usize = 20;
 
@@ -31,6 +32,7 @@ pub struct Dispatcher {
     store: Arc<dyn MailStore>,
     scope: AccountScope,
     default_account: Option<AccountId>,
+    user_config: UserConfig,
     state: Mutex<AppState>,
     events: broadcast::Sender<StateEvent>,
     /// Serializes actions and owns the complete undo/redo invariant. Keeping
@@ -91,6 +93,7 @@ impl Dispatcher {
             store,
             scope,
             default_account: None,
+            user_config: UserConfig::default(),
             state: Mutex::new(AppState::default()),
             events,
             history: Mutex::new(ActionHistory::new()),
@@ -99,6 +102,11 @@ impl Dispatcher {
 
     pub fn with_default_account(mut self, account: AccountId) -> Self {
         self.default_account = Some(account);
+        self
+    }
+
+    pub fn with_user_config(mut self, config: UserConfig) -> Self {
+        self.user_config = config;
         self
     }
 
@@ -240,8 +248,10 @@ impl Dispatcher {
     }
 
     async fn compose_new(&self) -> CoreResult<ActionOutcome> {
+        let account_id = self.draft_account()?;
         let draft = Draft {
-            account_id: self.draft_account()?,
+            body_md: self.body_with_signature(&account_id, ""),
+            account_id,
             id: new_draft_id(),
             gmail_draft_id: None,
             thread_id: None,
@@ -250,7 +260,6 @@ impl Dispatcher {
             cc: Vec::new(),
             bcc: Vec::new(),
             subject: String::new(),
-            body_md: String::new(),
             updated_at: chrono::Utc::now(),
         };
         self.store.save_draft_local(&draft).await?;
@@ -306,6 +315,7 @@ impl Dispatcher {
         account_id: AccountId,
         prefill: Prefill,
     ) -> CoreResult<ActionOutcome> {
+        let body_md = self.body_with_signature(&account_id, &prefill.body_md);
         let draft = Draft {
             account_id,
             id: new_draft_id(),
@@ -316,11 +326,22 @@ impl Dispatcher {
             cc: prefill.cc,
             bcc: Vec::new(),
             subject: prefill.subject,
-            body_md: prefill.body_md,
+            body_md,
             updated_at: chrono::Utc::now(),
         };
         self.store.save_draft_local(&draft).await?;
         self.draft_outcome(action_name, draft, None, String::new())
+    }
+
+    fn body_with_signature(&self, account_id: &AccountId, prefill: &str) -> String {
+        let Some(signature) = self.user_config.signature_for(account_id.as_str()) else {
+            return prefill.to_string();
+        };
+        if prefill.is_empty() {
+            format!("\n\n{signature}")
+        } else {
+            format!("\n\n{signature}\n\n{}", prefill.trim_start_matches('\n'))
+        }
     }
 
     async fn save_draft(&self, draft_id: &DraftId, patch: DraftPatch) -> CoreResult<ActionOutcome> {

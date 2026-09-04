@@ -17,10 +17,10 @@ use crossterm::{
 };
 use futures::StreamExt;
 use mach_core::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
-use mach_core::store::{Draft, MailStore, Message, ThreadSummary};
+use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
-    Action, ActionOutcome, Dispatcher, DraftPatch, UnsubscribeTarget,
+    Action, ActionOutcome, Dispatcher, DraftPatch, UnsubscribeTarget, UserConfig,
 };
 use mach_store::SqliteStore;
 use ratatui::Terminal;
@@ -95,6 +95,7 @@ pub struct ComposerView {
     pub draft_id: DraftId,
     pub to: String,
     pub cc: String,
+    pub bcc: String,
     pub subject: String,
     pub body: String,
     pub field: ComposerField,
@@ -105,6 +106,7 @@ pub struct ComposerView {
 pub enum ComposerField {
     To,
     Cc,
+    Bcc,
     Subject,
     Body,
 }
@@ -125,6 +127,7 @@ pub struct StatusLine {
     pub sync: SyncState,
     pub hint: String,
     pub needs_reauth: Vec<String>,
+    pub outbox: OutboxSummary,
 }
 
 pub enum SyncState {
@@ -145,9 +148,14 @@ struct SearchEvent {
 }
 
 impl App {
-    pub async fn new(store: Arc<SqliteStore>, scope: AccountScope) -> Result<Self> {
+    pub async fn new(
+        store: Arc<SqliteStore>,
+        scope: AccountScope,
+        user_config: UserConfig,
+    ) -> Result<Self> {
         let keymap = load_keymap()?;
-        let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone());
+        let dispatcher =
+            Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
 
         // Try to construct a body fetcher; if OAuth creds aren't set up,
         // boot offline. The user can still browse cached mail.
@@ -181,6 +189,7 @@ impl App {
             }
             AccountScope::All => "offline".into(),
         };
+        let outbox = store.outbox_summary(&scope).await?;
         let status = StatusLine {
             account,
             sync: if !needs_reauth.is_empty() && body_fetchers.is_empty() {
@@ -192,6 +201,7 @@ impl App {
             },
             hint: "j/k:nav  e:archive  c:compose  /:search  q:quit".into(),
             needs_reauth,
+            outbox,
         };
 
         Ok(Self {
@@ -285,9 +295,18 @@ impl SearchView {
 }
 
 async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> Result<InboxView> {
+    load_inbox_limit(store, scope, label, 200).await
+}
+
+async fn load_inbox_limit(
+    store: &SqliteStore,
+    scope: &AccountScope,
+    label: &str,
+    limit: u32,
+) -> Result<InboxView> {
     let lid = LabelId::new(label);
     let threads = store
-        .list_threads_in_label(scope, &lid, 200)
+        .list_threads_in_label(scope, &lid, limit)
         .await
         .context("listing inbox threads")?;
     Ok(InboxView {
@@ -300,7 +319,15 @@ async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> R
 
 /// Run the TUI to completion. Returns when the user quits.
 pub async fn run(store: Arc<SqliteStore>, scope: AccountScope) -> Result<()> {
-    let mut app = App::new(store, scope).await?;
+    run_with_user_config(store, scope, UserConfig::default()).await
+}
+
+pub async fn run_with_user_config(
+    store: Arc<SqliteStore>,
+    scope: AccountScope,
+    user_config: UserConfig,
+) -> Result<()> {
+    let mut app = App::new(store, scope, user_config).await?;
     let (search_tx, mut search_rx) = mpsc::unbounded_channel();
     app.search_events = Some(search_tx);
 
@@ -420,6 +447,10 @@ async fn handle_pull_event(app: &mut App, event: PullEvent) {
             if report.succeeded > 0 {
                 refresh_visible_inbox(app).await;
             }
+            match app.store.outbox_summary(&app.scope).await {
+                Ok(summary) => app.status.outbox = summary,
+                Err(error) => warn!(%error, "refreshing outbox summary failed"),
+            }
         }
     }
 }
@@ -513,6 +544,18 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
         format!("{} {}", app.chord_buffer, chord_atom)
     };
 
+    if app
+        .keymap
+        .bindings_for(app.current_mode())
+        .iter()
+        .any(|(chord, action)| chord == &new_chord && action == "load_older")
+    {
+        app.chord_buffer.clear();
+        app.last_chord_continuations.clear();
+        load_older_mail(app).await;
+        return;
+    }
+
     let ctx = app.key_context();
     match app.keymap.resolve(app.current_mode(), &new_chord, &ctx) {
         Resolution::Action(action) => {
@@ -542,6 +585,36 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
                 }
             }
         }
+    }
+}
+
+async fn load_older_mail(app: &mut App) {
+    let View::Inbox(inbox) = &app.view else {
+        return;
+    };
+    let Some(last) = inbox.threads.last() else {
+        return;
+    };
+    let label = inbox.label.clone();
+    let before_ms = last.last_message_at.timestamp_millis();
+    let limit = inbox.threads.len().saturating_add(200) as u32;
+    let selected = inbox.selected;
+    match app
+        .body_fetchers
+        .load_older(&app.scope, &label, before_ms)
+        .await
+    {
+        Ok(stats) => {
+            match load_inbox_limit(&app.store, &app.scope, label.as_str(), limit).await {
+                Ok(mut inbox) => {
+                    inbox.selected = selected.min(inbox.threads.len().saturating_sub(1));
+                    app.view = View::Inbox(inbox);
+                }
+                Err(error) => warn!(%error, "refreshing after load older failed"),
+            }
+            app.status.hint = format!("loaded {} older", stats.fetched);
+        }
+        Err(error) => warn!(%error, "load older failed"),
     }
 }
 
@@ -590,7 +663,8 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
         KeyCode::Tab => {
             c.field = match c.field {
                 ComposerField::To => ComposerField::Cc,
-                ComposerField::Cc => ComposerField::Subject,
+                ComposerField::Cc => ComposerField::Bcc,
+                ComposerField::Bcc => ComposerField::Subject,
                 ComposerField::Subject => ComposerField::Body,
                 ComposerField::Body => ComposerField::To,
             };
@@ -600,7 +674,8 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
             c.field = match c.field {
                 ComposerField::To => ComposerField::Body,
                 ComposerField::Cc => ComposerField::To,
-                ComposerField::Subject => ComposerField::Cc,
+                ComposerField::Bcc => ComposerField::Cc,
+                ComposerField::Subject => ComposerField::Bcc,
                 ComposerField::Body => ComposerField::Subject,
             };
             true
@@ -609,6 +684,7 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
             let target = match c.field {
                 ComposerField::To => &mut c.to,
                 ComposerField::Cc => &mut c.cc,
+                ComposerField::Bcc => &mut c.bcc,
                 ComposerField::Subject => &mut c.subject,
                 ComposerField::Body => &mut c.body,
             };
@@ -626,6 +702,7 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
             let target = match c.field {
                 ComposerField::To => &mut c.to,
                 ComposerField::Cc => &mut c.cc,
+                ComposerField::Bcc => &mut c.bcc,
                 ComposerField::Subject => &mut c.subject,
                 ComposerField::Body => &mut c.body,
             };
@@ -1040,6 +1117,7 @@ fn composer_save_action(view: &View) -> Option<Action> {
         patch: DraftPatch {
             to: Some(split_recipients(&composer.to)),
             cc: Some(split_recipients(&composer.cc)),
+            bcc: Some(split_recipients(&composer.bcc)),
             subject: Some(composer.subject.clone()),
             body_md: Some(composer.body.clone()),
             ..DraftPatch::default()
@@ -1080,6 +1158,7 @@ impl ComposerView {
             draft_id: draft.id,
             to: draft.to.join(", "),
             cc: draft.cc.join(", "),
+            bcc: draft.bcc.join(", "),
             subject: draft.subject,
             body: draft.body_md,
             field: ComposerField::To,
@@ -1159,7 +1238,7 @@ mod tests {
             in_reply_to_message_id: Some(mach_core::ids::MessageId::new("message-1")),
             to: vec!["Alice <alice@example.com>".into(), "bob@example.com".into()],
             cc: vec!["carol@example.com".into()],
-            bcc: Vec::new(),
+            bcc: vec!["blind@example.com".into()],
             subject: "Re: Plans".into(),
             body_md: "Sounds good".into(),
             updated_at: Utc::now(),
@@ -1184,6 +1263,7 @@ mod tests {
         assert_eq!(composer.draft_id.as_str(), "draft-1");
         assert_eq!(composer.to, "Alice <alice@example.com>, bob@example.com");
         assert_eq!(composer.cc, "carol@example.com");
+        assert_eq!(composer.bcc, "blind@example.com");
         assert_eq!(composer.subject, "Re: Plans");
         assert_eq!(composer.body, "Sounds good");
     }
@@ -1193,6 +1273,7 @@ mod tests {
         let mut composer = ComposerView::from_draft(draft(), empty_inbox_view());
         composer.to = " alice@example.com, bob@example.com, ".into();
         composer.cc = " , carol@example.com ".into();
+        composer.bcc = " blind@example.com ".into();
         composer.subject = "Updated".into();
         composer.body = "New body".into();
 
@@ -1205,6 +1286,7 @@ mod tests {
         assert_eq!(draft_id.as_str(), "draft-1");
         assert_eq!(patch.to.unwrap(), ["alice@example.com", "bob@example.com"]);
         assert_eq!(patch.cc.unwrap(), ["carol@example.com"]);
+        assert_eq!(patch.bcc.unwrap(), ["blind@example.com"]);
         assert_eq!(patch.subject.as_deref(), Some("Updated"));
         assert_eq!(patch.body_md.as_deref(), Some("New body"));
         assert!(patch.in_reply_to_message_id.is_none());

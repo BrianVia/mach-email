@@ -8,7 +8,7 @@
 //! need optimistic-update semantics.
 
 use mach_core::ids::{AccountId, AccountScope, LabelId, ThreadId};
-use mach_core::store::{Draft, MailStore};
+use mach_core::store::{Draft, Label, MailStore};
 use mach_core::{Action, ActionOutcome, Dispatcher, DraftPatch};
 use mach_gmail::{sync_account_tick, GmailAccountPool, OutboxWorker, TickReport};
 use mach_store::SqliteStore;
@@ -247,6 +247,39 @@ pub async fn unsubscribe_mailto(
 }
 
 #[tauri::command]
+pub async fn outbox_summary(
+    state: State<'_, AppState>,
+) -> Result<Out<mach_core::OutboxSummary>, String> {
+    Ok(match state.store.outbox_summary(&state.scope).await {
+        Ok(summary) => Out::ok(summary),
+        Err(error) => Out::err(error),
+    })
+}
+
+#[tauri::command]
+pub async fn retry_outbox(state: State<'_, AppState>) -> Result<Out<u32>, String> {
+    let entries = match state.store.list_outbox(&state.scope).await {
+        Ok(entries) => entries,
+        Err(error) => return Ok(Out::err(error)),
+    };
+    let mut accounts = entries
+        .into_iter()
+        .filter(|entry| entry.state == "failed")
+        .map(|entry| entry.account_id)
+        .collect::<Vec<_>>();
+    accounts.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    accounts.dedup();
+    let mut retried = 0;
+    for account in accounts {
+        match state.store.retry_failed_outbox(&account).await {
+            Ok(count) => retried += count,
+            Err(error) => return Ok(Out::err(error)),
+        }
+    }
+    Ok(Out::ok(retried))
+}
+
+#[tauri::command]
 pub async fn sync_now(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -270,6 +303,30 @@ pub async fn list_threads(
     {
         Ok(threads) => Ok(Out::ok(serde_json::to_value(threads).unwrap())),
         Err(e) => Ok(Out::err(e)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_labels(state: State<'_, AppState>) -> Result<Out<Vec<Label>>, String> {
+    match state.store.list_labels(&state.scope).await {
+        Ok(labels) => Ok(Out::ok(labels)),
+        Err(e) => Ok(Out::err(e)),
+    }
+}
+
+#[tauri::command]
+pub async fn load_older(
+    state: State<'_, AppState>,
+    label: String,
+    before_ms: i64,
+) -> Result<Out<mach_gmail::LoadOlderStats>, String> {
+    match state
+        .body_fetchers
+        .load_older(&state.scope, &LabelId::new(label), before_ms)
+        .await
+    {
+        Ok(stats) => Ok(Out::ok(stats)),
+        Err(error) => Ok(Out::err(error)),
     }
 }
 

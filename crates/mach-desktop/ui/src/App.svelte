@@ -8,11 +8,15 @@
     dispatchAction,
     fetchAccountStatus,
     fetchKeymapSources,
+    fetchOutboxSummary,
     fetchSettings,
     flushOutbox,
+    listLabels,
+    loadOlder,
     listThreads,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
+    retryOutbox,
     searchThreads,
     syncNow,
     unsubscribePost,
@@ -20,8 +24,10 @@
     type AccountStatus,
     type ActionOutcome,
     type Draft,
+    type Label,
     type Message,
     type MailSyncedPayload,
+    type OutboxSummary,
     type Settings,
     type SyncStatusPayload,
     type ThreadSummary,
@@ -35,12 +41,12 @@
   import Palette from "./views/Palette.svelte";
   import ChordOverlay from "./views/ChordOverlay.svelte";
 
-  const INBOX_LIMIT = 1000;
+  const INITIAL_LIST_LIMIT = 1000;
 
-  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
+  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
   type ThreadOrigin = { threads: ThreadSummary[]; index: number };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
-  type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
+  type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
   type PaletteView = { kind: "palette"; query: string; selected: number; background: AppView };
@@ -48,7 +54,7 @@
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
-  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0 });
+  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0, limit: INITIAL_LIST_LIMIT });
   let keymap = $state<Keymap | null>(null);
   let bootError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
@@ -57,16 +63,24 @@
   let chordBuf = $state("");
   let chordConts = $state<Continuation[]>([]);
   let status = $state<AccountStatus | null>(null);
+  let outbox = $state<OutboxSummary>({ pending: 0, failed: 0, last_error: null });
   let settings = $state<Settings>({});
+  let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
-  let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
+  let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "" };
+
+  function composerTitle(draft: Draft) {
+    if (draft.in_reply_to_message_id) return "Reply";
+    if (draft.subject.startsWith("Fwd:")) return "Forward";
+    return "New message";
+  }
   let actionErrorTimer: number | undefined;
   let noticeTimer: number | undefined;
 
   let title = $derived.by(() => {
     if (view.kind === "inbox") return labelDisplay(view.label);
     if (view.kind === "thread") return view.thread.subject || "(no subject)";
-    if (view.kind === "composer") return "New message";
+    if (view.kind === "composer") return composerTitle(view.draft);
     return "Search";
   });
 
@@ -83,6 +97,9 @@
     (status?.accounts.length ?? 0) > 0
       && (status?.accounts.every((account) => syncOkByAccount[account] === true) ?? false),
   );
+  let userLabels = $derived.by(() => labels
+    .filter((label) => !label.system && !label.name.startsWith("MACH/"))
+    .sort((a, b) => a.name.localeCompare(b.name)));
 
   function showActionError(error: unknown) {
     actionError = String((error as Error).message ?? error);
@@ -110,6 +127,7 @@
         console.warn("[mach] settings load failed", error);
         settings = {};
       }
+      labels = await listLabels();
       const sources = await fetchKeymapSources();
       try {
         const resolved = Keymap.fromToml(sources.defaults);
@@ -119,9 +137,9 @@
         console.error("[mach] keymap parse failed:", error);
         bootError = `keymap parse: ${(error as Error).message ?? error}`;
       }
-      const threads = await listThreads("INBOX", INBOX_LIMIT);
+      const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
       console.log(`[mach] loaded ${threads.length} threads`);
-      view = { kind: "inbox", label: "INBOX", threads, selected: 0 };
+      view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT };
     } catch (error) {
       console.error("[mach]", error);
       bootError = `boot failed: ${(error as Error).message ?? error}`;
@@ -136,11 +154,19 @@
     }
   }
 
+  async function refreshOutboxSummary() {
+    try {
+      outbox = await fetchOutboxSummary();
+    } catch (error) {
+      console.warn("[mach] outbox summary failed", error);
+    }
+  }
+
   async function refreshInboxPreservingSelection() {
     const currentView = view;
     if (currentView.kind !== "inbox") return;
     const selectedId = currentView.threads[currentView.selected]?.id;
-    const threads = await listThreads(currentView.label, INBOX_LIMIT);
+    const threads = await listThreads(currentView.label, currentView.limit);
     if (view.kind !== "inbox" || view.label !== currentView.label) return;
     const preserved = selectedId
       ? threads.findIndex((thread) => thread.id === selectedId)
@@ -155,6 +181,9 @@
   }
 
   function handleMailSynced(_payload: MailSyncedPayload) {
+    void listLabels().then((next) => (labels = next)).catch((error) => {
+      console.warn("[mach] refreshing labels after sync failed", error);
+    });
     if (view.kind === "inbox") {
       void refreshInboxPreservingSelection().catch((error) => {
         console.warn("[mach] refreshing inbox after sync failed", error);
@@ -165,6 +194,7 @@
   function handleSyncStatus(payload: SyncStatusPayload) {
     syncOkByAccount = { ...syncOkByAccount, [payload.account]: payload.ok };
     if (!payload.ok) void refreshStatus();
+    void refreshOutboxSummary();
   }
 
   function handleKey(event: KeyboardEvent) {
@@ -304,6 +334,7 @@
     }
     const commands = [...byLabel.values()];
     if (background.kind === "thread") commands.push({ label: "Copy as Markdown", chord: "ctrl+shift+c" });
+    commands.push({ label: "Retry failed changes", chord: "retry" });
     return commands;
   }
 
@@ -335,8 +366,24 @@
       copyThreadAsMarkdown(background);
       return;
     }
+    if (command.label === "Retry failed changes") {
+      void retryFailedChanges();
+      return;
+    }
     const resolution = keymap.resolve(currentMode(background), command.chord, currentContext(background));
     if (resolution.kind === "action") void runAction(resolution.action);
+  }
+
+  async function retryFailedChanges() {
+    try {
+      const retried = await retryOutbox();
+      const report = await flushOutbox();
+      await refreshOutboxSummary();
+      if (report.failed > 0) showActionError(report.last_error ?? "Outbox retry failed");
+      else showNotice(`${retried} failed change(s) retried`);
+    } catch (error) {
+      showActionError(error);
+    }
   }
 
   function chordLength(chord: string) {
@@ -361,7 +408,7 @@
             closeComposer();
             return;
           }
-          const threads = await listThreads("INBOX", INBOX_LIMIT);
+          const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
           let selected = 0;
           if (currentView.kind === "thread" && currentView.origin) {
             const { origin } = currentView;
@@ -373,7 +420,7 @@
               ? preserved
               : clamp(origin.index, 0, threads.length - 1);
           }
-          view = { kind: "inbox", label: "INBOX", threads, selected };
+          view = { kind: "inbox", label: "INBOX", threads, selected, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "select_next":
@@ -438,8 +485,8 @@
         }
         case "open_label": {
           const label = action.label_id as string;
-          const threads = await listThreads(label, INBOX_LIMIT);
-          view = { kind: "inbox", label, threads, selected: 0 };
+          const threads = await listThreads(label, INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label, threads, selected: 0, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "search":
@@ -473,8 +520,8 @@
         if (next) {
           await openThreadView(next, { threads: remaining, index: nextIndex });
         } else {
-          const fresh = await listThreads("INBOX", INBOX_LIMIT);
-          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0 };
+          const fresh = await listThreads("INBOX", INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0, limit: INITIAL_LIST_LIMIT };
         }
         return;
       }
@@ -500,7 +547,7 @@
       }
 
       if (isArchiveOrTrash && currentView.kind === "thread") {
-        const threads = await listThreads("INBOX", INBOX_LIMIT);
+        const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
         const at = threads.findIndex((thread) => thread.id === currentView.thread.id);
         // The archived thread is usually gone from the refreshed list; the
         // thread now occupying its date-sorted position is the "next" one.
@@ -510,12 +557,12 @@
         const fallback = at >= 0
           ? Math.min(at, threads.length - 1)
           : successor >= 0 ? successor : Math.max(0, threads.length - 1);
-        view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
+        view = { kind: "inbox", label: "INBOX", threads, selected: fallback, limit: INITIAL_LIST_LIMIT };
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
         const selectedId = currentView.threads[currentView.selected]?.id;
-        const threads = await listThreads(currentView.label, INBOX_LIMIT);
+        const threads = await listThreads(currentView.label, currentView.limit);
         const preserved = selectedId ? threads.findIndex((thread) => thread.id === selectedId) : -1;
         view = {
           ...currentView,
@@ -600,6 +647,7 @@
     return {
       to: draft.to.join(", "),
       cc: draft.cc.join(", "),
+      bcc: draft.bcc.join(", "),
       subject: draft.subject,
       body_md: draft.body_md,
     };
@@ -609,6 +657,7 @@
     return {
       to: parseRecipients(composerFields.to),
       cc: parseRecipients(composerFields.cc),
+      bcc: parseRecipients(composerFields.bcc),
       subject: composerFields.subject,
       body_md: composerFields.body_md,
     };
@@ -695,9 +744,29 @@
     }
   }
 
+  async function loadOlderMail(): Promise<number | null> {
+    const currentView = view;
+    if (currentView.kind !== "inbox") return null;
+    const beforeMs = Date.parse(currentView.threads.at(-1)?.last_message_at ?? "");
+    if (!Number.isFinite(beforeMs)) return 0;
+    try {
+      const stats = await loadOlder(currentView.label, beforeMs);
+      const limit = currentView.limit + 200;
+      const threads = await listThreads(currentView.label, limit);
+      if (view.kind === "inbox" && view.label === currentView.label) {
+        view = { ...view, threads, limit };
+      }
+      return stats.fetched;
+    } catch (error) {
+      showActionError(error);
+      return null;
+    }
+  }
+
   onMount(() => {
     void boot();
     void refreshStatus();
+    void refreshOutboxSummary();
     let destroyed = false;
     const unlisteners: Array<() => void> = [];
     const keepUnlistener = (unlisten: () => void) => {
@@ -741,9 +810,9 @@
 
   function labelDisplay(id: string) {
     const names: Record<string, string> = {
-      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", DONE: "Done",
+      INBOX: "Inbox", STARRED: "Starred", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", DONE: "Done", SNOOZED: "Snoozed", MUTED: "Muted", ALL: "All Mail",
     };
-    return names[id] ?? id;
+    return names[id] ?? userLabels.find((label) => label.id === id)?.name ?? id;
   }
 </script>
 
@@ -752,9 +821,11 @@
   {subtitle}
   accountEmail={status?.email}
   online={allAccountsSynced}
+  {outbox}
   {activeLabel}
   {chordBuf}
   {chordConts}
+  {userLabels}
   onOpenLabel={(label) => void runAction({ kind: "open_label", label_id: label })}
 >
   {#if view.kind === "inbox"}
@@ -764,12 +835,14 @@
         if (view.kind === "inbox") view = { ...view, selected };
       }}
       onOpen={(index) => void openInboxRow(index)}
+      onLoadOlder={loadOlderMail}
     />
   {:else if view.kind === "thread"}
     <ThreadReader v={view} onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)} />
   {:else if view.kind === "composer"}
     <Composer
       draft={view.draft}
+      title={composerTitle(view.draft)}
       onFieldsChange={(fields) => (composerFields = fields)}
       onSend={() => void runAction({ kind: "send_draft", draft_id: view.kind === "composer" ? view.draft.id : "" })}
       onClose={closeComposer}

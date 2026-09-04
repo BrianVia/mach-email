@@ -53,8 +53,10 @@ pub async fn run(simulate_gap: bool, selected_account: Option<&str>) -> Result<(
                 .map(|value| value.to_string())
                 .unwrap_or("(none — bootstrap first)".into())
         );
-        let pending = store.drain_pending_outbox(&account, u32::MAX).await?.len();
-        println!("outbox pending:  {pending}");
+        let outbox = store
+            .outbox_summary(&mach_core::ids::AccountScope::One(account.clone()))
+            .await?;
+        println!("outbox pending:  {}", outbox.pending);
         let draft_counts = store.draft_state_counts(&account).await?;
         let draft_summary = if draft_counts.is_empty() {
             "(none)".to_string()

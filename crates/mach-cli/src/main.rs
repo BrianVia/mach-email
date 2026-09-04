@@ -39,7 +39,16 @@ enum Command {
         /// Force a full bootstrap instead of incremental history sync.
         #[arg(long)]
         bootstrap: bool,
+        /// Load one older window for a label (defaults to INBOX).
+        #[arg(long, num_args = 0..=1, default_missing_value = "INBOX")]
+        older: Option<String>,
+        /// Size of the older-mail window.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
     },
+    /// Inspect or retry durable outgoing changes.
+    #[command(subcommand)]
+    Outbox(OutboxCommand),
     /// Diagnostics. Use to verify environment and exercise rare code paths.
     Doctor {
         /// Wipe the local sync cursor to force gap recovery on next sync.
@@ -60,6 +69,14 @@ enum AuthCommand {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum OutboxCommand {
+    /// List outgoing changes and their retry state.
+    List,
+    /// Reset failed changes so the next sync can retry them.
+    Retry,
 }
 
 #[tokio::main]
@@ -83,7 +100,13 @@ async fn main() -> Result<()> {
         Some(Command::Auth(AuthCommand::Logout { all })) => {
             commands::auth::logout(account, all).await
         }
-        Some(Command::Sync { bootstrap }) => commands::sync::run(bootstrap, account).await,
+        Some(Command::Sync {
+            bootstrap,
+            older,
+            days,
+        }) => commands::sync::run(bootstrap, older.as_deref(), days, account).await,
+        Some(Command::Outbox(OutboxCommand::List)) => commands::outbox::list(account).await,
+        Some(Command::Outbox(OutboxCommand::Retry)) => commands::outbox::retry(account).await,
         Some(Command::Doctor { simulate_gap }) => {
             commands::doctor::run(simulate_gap, account).await
         }

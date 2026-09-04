@@ -108,12 +108,26 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .first()
         .map(|email| format!(" · re-auth needed: {email}"))
         .unwrap_or_default();
+    let (outbox, outbox_color) = if app.status.outbox.failed > 0 {
+        (
+            format!(" · {} failed", app.status.outbox.failed),
+            Color::Red,
+        )
+    } else if app.status.outbox.pending > 0 {
+        (
+            format!(" · {} unsynced", app.status.outbox.pending),
+            Color::Yellow,
+        )
+    } else {
+        (String::new(), DIM)
+    };
 
     let line = Line::from(vec![
         Span::raw(" "),
         sync,
         Span::styled(chord_hint, Style::default().fg(DIM)),
         Span::styled(reauth, Style::default().fg(Color::Red)),
+        Span::styled(outbox, Style::default().fg(outbox_color)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -210,6 +224,7 @@ fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {
         .constraints([
             Constraint::Length(1), // To
             Constraint::Length(1), // Cc
+            Constraint::Length(1), // Bcc
             Constraint::Length(1), // Subject
             Constraint::Length(1), // separator
             Constraint::Min(1),    // Body
@@ -243,12 +258,16 @@ fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {
         chunks[1],
     );
     f.render_widget(
-        field("Subject:", &v.subject, v.field == ComposerField::Subject),
+        field("Bcc:    ", &v.bcc, v.field == ComposerField::Bcc),
         chunks[2],
     );
     f.render_widget(
-        Paragraph::new(Line::styled(" ─────", Style::default().fg(DIM))),
+        field("Subject:", &v.subject, v.field == ComposerField::Subject),
         chunks[3],
+    );
+    f.render_widget(
+        Paragraph::new(Line::styled(" ─────", Style::default().fg(DIM))),
+        chunks[4],
     );
     f.render_widget(
         Paragraph::new(v.body.clone())
@@ -258,7 +277,7 @@ fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {
             } else {
                 Style::default().fg(DIM)
             }),
-        chunks[4],
+        chunks[5],
     );
 }
 
@@ -452,6 +471,9 @@ fn label_display(id: &str) -> String {
         "TRASH" => "Trash".into(),
         "SPAM" => "Spam".into(),
         "DONE" => "Done".into(),
+        "SNOOZED" => "Snoozed".into(),
+        "MUTED" => "Muted".into(),
+        "ALL" => "All Mail".into(),
         other => other.into(),
     }
 }

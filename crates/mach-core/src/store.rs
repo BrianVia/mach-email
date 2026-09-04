@@ -134,6 +134,13 @@ pub struct OutboxOp {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboxSummary {
+    pub pending: u32,
+    pub failed: u32,
+    pub last_error: Option<String>,
+}
+
 /// Local persistence. The dispatcher writes here optimistically; the sync
 /// engine reads pending outbox ops and pushes them upstream.
 #[async_trait]
@@ -217,6 +224,8 @@ pub trait MailStore: Send + Sync {
     ) -> CoreResult<Vec<OutboxOp>>;
     async fn mark_outbox_done(&self, id: i64) -> CoreResult<()>;
     async fn mark_outbox_failed(&self, id: i64, error: &str) -> CoreResult<()>;
+    async fn outbox_summary(&self, scope: &AccountScope) -> CoreResult<OutboxSummary>;
+    async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32>;
 
     /// Currently-stored sync cursor for the active account, if any.
     async fn get_history_cursor(&self, account: &AccountId) -> CoreResult<Option<u64>>;

@@ -16,6 +16,7 @@ pub mod search_query;
 pub mod state;
 pub mod store;
 pub mod unsubscribe;
+pub mod user_config;
 
 pub use action::{Action, ActionOutcome, DraftPatch, OpId};
 pub use dispatcher::Dispatcher;
@@ -25,5 +26,8 @@ pub use ids::{DraftId, LabelId, MessageId, ThreadId};
 pub use keymap::{Chord, KeyContext, Keymap, KeymapError, Mode};
 pub use search_query::SearchQuery;
 pub use state::AppState;
-pub use store::{InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind};
+pub use store::{
+    InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
+};
 pub use unsubscribe::{unsubscribe_targets, UnsubscribeTarget};
+pub use user_config::UserConfig;
