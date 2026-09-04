@@ -13,7 +13,7 @@ use crate::error::CoreResult;
 use crate::ids::{AccountId, AccountScope, DraftId, LabelId, MessageId, ThreadId};
 use crate::store::{
     ActivityEntry, Draft, Label, MailStore, Message, OutboxOp, OutboxOpKind, OutboxSummary,
-    ThreadSummary,
+    ScheduledSend, ThreadSummary,
 };
 
 #[derive(Default)]
@@ -27,7 +27,7 @@ struct Inner {
     messages_by_thread: HashMap<(AccountId, ThreadId), Vec<Message>>,
     labels: Vec<Label>,
     drafts: HashMap<(AccountId, DraftId), Draft>,
-    scheduled_sends: HashMap<(AccountId, DraftId), DateTime<Utc>>,
+    scheduled_sends: HashMap<(AccountId, String), (DraftId, DateTime<Utc>)>,
     outbox: Vec<OutboxOp>,
     outbox_next_attempt_at: HashMap<i64, i64>,
     outbox_undone_by: HashMap<i64, i64>,
@@ -308,9 +308,41 @@ impl MailStore for InMemoryStore {
         {
             return Err(crate::error::CoreError::NotFound("draft not found".into()));
         }
-        inner
+        inner.scheduled_sends.insert(
+            (account.clone(), uuid::Uuid::new_v4().simple().to_string()),
+            (draft_id.clone(), send_at),
+        );
+        Ok(())
+    }
+
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>> {
+        let inner = self.inner.lock().unwrap();
+        let mut sends = inner
             .scheduled_sends
-            .insert((account.clone(), draft_id.clone()), send_at);
+            .iter()
+            .filter_map(|((account_id, send_later_id), (draft_id, send_at))| {
+                let draft = inner.drafts.get(&(account_id.clone(), draft_id.clone()))?;
+                scope_matches(scope, account_id).then(|| ScheduledSend {
+                    send_later_id: send_later_id.clone(),
+                    draft_id: draft_id.clone(),
+                    send_at: *send_at,
+                    subject: draft.subject.clone(),
+                    to: draft.to.clone(),
+                    account_id: account_id.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        sends.sort_by_key(|send| send.send_at);
+        Ok(sends)
+    }
+
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .scheduled_sends
+            .remove(&(account.clone(), send_later_id.to_string()))
+            .ok_or_else(|| crate::error::CoreError::NotFound("scheduled send not found".into()))?;
         Ok(())
     }
 
@@ -325,7 +357,9 @@ impl MailStore for InMemoryStore {
         inner.drafts.remove(&(account.clone(), draft_id.clone()));
         inner
             .scheduled_sends
-            .remove(&(account.clone(), draft_id.clone()));
+            .retain(|(scheduled_account, _), (scheduled_draft, _)| {
+                scheduled_account != account || scheduled_draft != draft_id
+            });
         Ok(())
     }
 
@@ -671,6 +705,7 @@ mod tests {
         let account = AccountId::new("test@example.com");
         let config = crate::UserConfig {
             signatures: [(account.to_string(), "Test Person".into())].into(),
+            ..Default::default()
         };
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(account)).with_user_config(config);
@@ -769,6 +804,7 @@ mod tests {
         let source = seed_message(&store);
         let config = crate::UserConfig {
             signatures: [("default".into(), "Test Person".into())].into(),
+            ..Default::default()
         };
         let dispatcher =
             Dispatcher::with_scope(store, AccountScope::One(source.account_id.clone()))

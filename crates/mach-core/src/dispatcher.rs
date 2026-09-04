@@ -215,6 +215,9 @@ impl Dispatcher {
             Action::SaveDraft { draft_id, patch } => self.save_draft(&draft_id, patch).await,
             Action::SendDraft { draft_id } => self.send_draft(&draft_id).await,
             Action::SendLater { draft_id, at } => self.send_later(&draft_id, at).await,
+            Action::CancelSendLater { send_later_id } => {
+                self.cancel_send_later(&send_later_id).await
+            }
             Action::Search { query, limit } => self.search(&query, limit).await,
             Action::Refresh => Ok(ActionOutcome::empty("refresh")),
             Action::Undo => return self.do_undo(history).await,
@@ -408,6 +411,25 @@ impl Dispatcher {
             .schedule_send(&draft.account_id, draft_id, at)
             .await?;
         self.draft_changed_outcome("send_later", draft.id, None, String::new())
+    }
+
+    async fn cancel_send_later(&self, send_later_id: &str) -> CoreResult<ActionOutcome> {
+        let scheduled = self
+            .store
+            .list_scheduled(&self.scope)
+            .await?
+            .into_iter()
+            .find(|send| send.send_later_id == send_later_id)
+            .ok_or_else(|| CoreError::NotFound("scheduled send not found".into()))?;
+        self.store
+            .cancel_scheduled(&scheduled.account_id, send_later_id)
+            .await?;
+        self.draft_changed_outcome(
+            "cancel_send_later",
+            scheduled.draft_id,
+            None,
+            "scheduled send cancelled".into(),
+        )
     }
 
     fn draft_outcome(

@@ -22,6 +22,19 @@ pub struct ThreadSummary {
     pub label_ids: Vec<LabelId>,
 }
 
+/// Whether an inbox thread needs a response from its account owner.
+pub fn is_awaiting_reply(thread: &ThreadSummary, last_message: Option<&Message>) -> bool {
+    thread
+        .label_ids
+        .iter()
+        .any(|label| label.as_str() == "INBOX")
+        && (thread.unread || thread.starred)
+        && last_message.is_some_and(|message| {
+            crate::compose::normalized_addr_spec(&message.from)
+                != crate::compose::normalized_addr_spec(thread.account_id.as_str())
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub account_id: AccountId,
@@ -99,6 +112,16 @@ pub struct Draft {
     pub subject: String,
     pub body_md: String,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledSend {
+    pub send_later_id: String,
+    pub draft_id: DraftId,
+    pub send_at: DateTime<Utc>,
+    pub subject: String,
+    pub to: Vec<String>,
+    pub account_id: AccountId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +297,8 @@ pub trait MailStore: Send + Sync {
         draft_id: &DraftId,
         send_at: DateTime<Utc>,
     ) -> CoreResult<()>;
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>>;
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()>;
     async fn complete_send(
         &self,
         outbox_row_id: i64,
@@ -333,4 +358,73 @@ pub trait MailRemote: Send + Sync {
     async fn update_draft(&self, gmail_draft_id: &str, draft: &Draft) -> CoreResult<()>;
     async fn send_draft(&self, gmail_draft_id: &str) -> CoreResult<MessageId>;
     async fn delete_draft(&self, gmail_draft_id: &str) -> CoreResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread() -> ThreadSummary {
+        ThreadSummary {
+            account_id: AccountId::new("me@example.com"),
+            id: ThreadId::new("thread"),
+            subject: String::new(),
+            snippet: String::new(),
+            participants: Vec::new(),
+            last_message_at: Utc::now(),
+            message_count: 1,
+            unread: true,
+            starred: false,
+            label_ids: vec![LabelId::new("INBOX")],
+        }
+    }
+
+    fn message(from: &str) -> Message {
+        Message {
+            account_id: AccountId::new("me@example.com"),
+            id: MessageId::new("message"),
+            thread_id: ThreadId::new("thread"),
+            from: from.into(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            subject: String::new(),
+            snippet: String::new(),
+            internal_date: Utc::now(),
+            body_plain: None,
+            body_html: None,
+            headers: None,
+            label_ids: Vec::new(),
+            fetched_full: false,
+            inline_images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn awaiting_reply_requires_inbox_attention_and_external_last_sender() {
+        let mut summary = thread();
+        assert!(is_awaiting_reply(
+            &summary,
+            Some(&message("Sender <them@example.com>"))
+        ));
+        assert!(!is_awaiting_reply(
+            &summary,
+            Some(&message("Me <ME@example.com>"))
+        ));
+
+        summary.unread = false;
+        assert!(!is_awaiting_reply(
+            &summary,
+            Some(&message("them@example.com"))
+        ));
+        summary.starred = true;
+        assert!(is_awaiting_reply(
+            &summary,
+            Some(&message("them@example.com"))
+        ));
+        summary.label_ids.clear();
+        assert!(!is_awaiting_reply(
+            &summary,
+            Some(&message("them@example.com"))
+        ));
+    }
 }

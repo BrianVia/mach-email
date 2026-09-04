@@ -38,6 +38,7 @@
     ["Starred", "STARRED"],
     ["Sent", "SENT"],
     ["Drafts", "DRAFT"],
+    ["Scheduled", "SCHEDULED"],
     ["Done", "DONE"],
     ["Snoozed", "SNOOZED"],
     ["Trash", "TRASH"],

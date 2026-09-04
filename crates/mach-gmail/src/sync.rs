@@ -23,6 +23,47 @@ use crate::outbox::{DrainStats, OutboxWorker};
 
 const BOOTSTRAP_QUERY: &str = "newer_than:30d";
 const BOOTSTRAP_CONCURRENCY: usize = 10;
+const WATCH_RENEWAL_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
+
+pub fn should_renew(expiration_ms: Option<i64>, now_ms: i64) -> bool {
+    expiration_ms.map_or(true, |expiration| {
+        expiration <= now_ms.saturating_add(WATCH_RENEWAL_WINDOW_MS)
+    })
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    #[test]
+    fn renews_missing_or_expiring_watch() {
+        let now = 1_000_000;
+        assert!(should_renew(None, now));
+        assert!(should_renew(Some(now + WATCH_RENEWAL_WINDOW_MS), now));
+        assert!(!should_renew(Some(now + WATCH_RENEWAL_WINDOW_MS + 1), now));
+    }
+}
+
+pub async fn ensure_watch(
+    account: &AccountId,
+    client: &GmailClient,
+    store: &SqliteStore,
+) -> Result<()> {
+    let Some(topic) = crate::config::pubsub_topic() else {
+        return Ok(());
+    };
+    let key = format!("watch_expiration:{account}");
+    let expiration = store
+        .get_meta(&key)
+        .await?
+        .and_then(|value| value.parse().ok());
+    if should_renew(expiration, Utc::now().timestamp_millis()) {
+        store
+            .set_meta(&key, &client.watch(&topic).await?.to_string())
+            .await?;
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TickReport {
@@ -43,6 +84,9 @@ pub async fn sync_account_tick(
     store: Arc<SqliteStore>,
 ) -> Result<TickReport> {
     let now_ms = Utc::now().timestamp_millis();
+    if let Err(error) = ensure_watch(account, &client, &store).await {
+        warn!(%account, %error, "Gmail watch renewal failed; polling remains active");
+    }
     let dispatcher = Dispatcher::with_scope(store.clone(), AccountScope::One(account.clone()));
 
     let due = store.find_due_snoozes(account, now_ms).await?;
