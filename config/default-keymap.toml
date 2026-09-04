@@ -54,6 +54,7 @@
 "g i"      = { kind = "open_label", label_id = "INBOX"   }
 "g s"      = { kind = "open_label", label_id = "STARRED" }
 "g d"      = { kind = "open_label", label_id = "DRAFT"   }
+"g l"      = { kind = "open_label", label_id = "SCHEDULED" }
 "g t"      = { kind = "open_label", label_id = "SENT"    }
 "g e"      = { kind = "open_label", label_id = "DONE"    }   # Superhuman "Done" = archived
 "g z"      = { kind = "open_label", label_id = "SNOOZED" }

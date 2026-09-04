@@ -17,7 +17,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use mach_core::ids::{AccountScope, DraftId, LabelId, ThreadId};
-use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ThreadSummary};
+use mach_core::store::{Draft, MailStore, Message, OutboxSummary, ScheduledSend, ThreadSummary};
 use mach_core::{
     keymap::{KeyContext, Keymap, Mode, Resolution},
     Action, ActionOutcome, Dispatcher, DraftPatch, UserConfig,
@@ -61,6 +61,7 @@ pub enum View {
     Inbox(InboxView),
     Thread(Box<ThreadView>),
     Composer(ComposerView),
+    Scheduled(ScheduledView),
     Search(SearchView),
 }
 
@@ -91,7 +92,13 @@ pub struct ComposerView {
     pub subject: String,
     pub body: String,
     pub field: ComposerField,
+    pub schedule_prompt: bool,
     previous_view: Box<View>,
+}
+
+pub struct ScheduledView {
+    pub sends: Vec<ScheduledSend>,
+    pub selected: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -237,6 +244,7 @@ impl App {
                 current_message: None,
                 current_draft: Some(v.draft_id.as_str().to_string()),
             },
+            View::Scheduled(_) => KeyContext::default(),
             View::Search(v) => KeyContext {
                 selection: v
                     .current_thread_id()
@@ -253,6 +261,7 @@ impl App {
             View::Inbox(_) => Mode::Normal,
             View::Thread(_) => Mode::Reading,
             View::Composer(_) => Mode::Composing,
+            View::Scheduled(_) => Mode::Normal,
             View::Search(_) => Mode::Search,
         }
     }
@@ -296,6 +305,13 @@ async fn load_inbox(store: &SqliteStore, scope: &AccountScope, label: &str) -> R
         threads,
         selected: 0,
         viewport_top: 0,
+    })
+}
+
+async fn load_scheduled(store: &SqliteStore, scope: &AccountScope) -> Result<ScheduledView> {
+    Ok(ScheduledView {
+        sends: store.list_scheduled(scope).await?,
+        selected: 0,
     })
 }
 
@@ -501,10 +517,13 @@ async fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) {
     if thread_scroll_key(app, &k) {
         return;
     }
+    if scheduled_swallow_key(app, &k).await {
+        return;
+    }
     // Composer text input is special: most keys go to the field, not the
     // keymap. We only consult the keymap for specific control bindings.
     if let View::Composer(_) = &app.view {
-        if composer_swallow_key(app, &k) {
+        if composer_swallow_key(app, &k).await {
             return;
         }
     }
@@ -584,8 +603,30 @@ fn thread_scroll_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
     }
 }
 
-fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
+async fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
+    if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('l')) {
+        if let View::Composer(c) = &mut app.view {
+            c.schedule_prompt = true;
+        }
+        return true;
+    }
+    if let View::Composer(c) = &app.view {
+        if c.schedule_prompt {
+            match k.code {
+                KeyCode::Char(choice @ '1'..='4') => {
+                    schedule_composer(app, choice as usize - '1' as usize).await;
+                }
+                KeyCode::Esc => {
+                    if let View::Composer(c) = &mut app.view {
+                        c.schedule_prompt = false;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+    }
     let View::Composer(c) = &mut app.view else {
         return false;
     };
@@ -647,6 +688,39 @@ fn composer_swallow_key(app: &mut App, k: &crossterm::event::KeyEvent) -> bool {
                 ComposerField::Body => &mut c.body,
             };
             target.push(ch);
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn scheduled_swallow_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    let View::Scheduled(view) = &app.view else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Enter => {
+            if let Some(send) = view.sends.get(view.selected) {
+                let draft_id = send.draft_id.clone();
+                if let Ok(Some(draft)) = app.store.find_draft(&app.scope, &draft_id).await {
+                    let previous = std::mem::replace(&mut app.view, empty_inbox_view());
+                    app.view = View::Composer(ComposerView::from_draft(draft, previous));
+                }
+            }
+            true
+        }
+        KeyCode::Char('#') => {
+            if let Some(send) = view.sends.get(view.selected) {
+                let action = Action::CancelSendLater {
+                    send_later_id: send.send_later_id.clone(),
+                };
+                if app.dispatcher.execute(action).await.is_ok() {
+                    if let Ok(scheduled) = load_scheduled(&app.store, &app.scope).await {
+                        app.view = View::Scheduled(scheduled);
+                    }
+                }
+            }
             true
         }
         _ => false,
@@ -810,6 +884,13 @@ async fn execute_action(app: &mut App, action: Action) {
             return;
         }
         Action::OpenLabel { label_id } => {
+            if label_id.as_str() == "SCHEDULED" {
+                match load_scheduled(&app.store, &app.scope).await {
+                    Ok(scheduled) => app.view = View::Scheduled(scheduled),
+                    Err(e) => warn!(error = %e, "open scheduled failed"),
+                }
+                return;
+            }
             match load_inbox(&app.store, &app.scope, label_id.as_str()).await {
                 Ok(inbox) => app.view = View::Inbox(inbox),
                 Err(e) => warn!(error = %e, "open_label failed"),
@@ -937,6 +1018,37 @@ async fn send_composer(app: &mut App) {
     }
 }
 
+async fn schedule_composer(app: &mut App, preset: usize) {
+    if !save_composer(app).await {
+        return;
+    }
+    let View::Composer(composer) = &app.view else {
+        return;
+    };
+    let Some((_, at)) = mach_core::send_later_presets(chrono::Local::now())
+        .into_iter()
+        .nth(preset)
+    else {
+        return;
+    };
+    let local: chrono::DateTime<chrono::Local> = at.into();
+    let action = Action::SendLater {
+        draft_id: composer.draft_id.clone(),
+        at,
+    };
+    match app.dispatcher.execute(action).await {
+        Ok(_) => {
+            app.status.hint = format!("Scheduled for {}", local.format("%a %b %-d, %-I:%M %p"));
+            let View::Composer(composer) = std::mem::replace(&mut app.view, empty_inbox_view())
+            else {
+                return;
+            };
+            app.view = *composer.previous_view;
+        }
+        Err(error) => warn!(%error, "scheduling draft failed"),
+    }
+}
+
 fn composer_save_action(view: &View) -> Option<Action> {
     let View::Composer(composer) = view else {
         return None;
@@ -991,6 +1103,7 @@ impl ComposerView {
             subject: draft.subject,
             body: draft.body_md,
             field: ComposerField::To,
+            schedule_prompt: false,
             previous_view: Box::new(previous_view),
         }
     }
@@ -1045,6 +1158,12 @@ fn advance_selection(app: &mut App, delta: i32) {
                 let next =
                     (v.selected as i32 + delta).clamp(0, v.results.len() as i32 - 1) as usize;
                 v.selected = next;
+            }
+        }
+        View::Scheduled(v) => {
+            if !v.sends.is_empty() {
+                v.selected =
+                    (v.selected as i32 + delta).clamp(0, v.sends.len() as i32 - 1) as usize;
             }
         }
         _ => {}

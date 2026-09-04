@@ -20,6 +20,7 @@ pub const DISPATCHER_ACTION_NAMES: &[&str] = &[
     "undo",
     "redo",
     "refresh",
+    "cancel_send_later",
 ];
 
 /// Deterministic identifier for a single mutation. Stamped on every outbox op
@@ -114,6 +115,9 @@ pub enum Action {
         draft_id: DraftId,
         at: DateTime<Utc>,
     },
+    CancelSendLater {
+        send_later_id: String,
+    },
 
     // --- Discovery ---
     Search {
@@ -153,6 +157,7 @@ impl Action {
             Action::SaveDraft { .. } => "save_draft",
             Action::SendDraft { .. } => "send_draft",
             Action::SendLater { .. } => "send_later",
+            Action::CancelSendLater { .. } => "cancel_send_later",
             Action::Search { .. } => "search",
             Action::OpenLabel { .. } => "open_label",
             Action::Undo => "undo",
@@ -176,6 +181,7 @@ impl Action {
                 | Action::SaveDraft { .. }
                 | Action::SendDraft { .. }
                 | Action::SendLater { .. }
+                | Action::CancelSendLater { .. }
         )
     }
 

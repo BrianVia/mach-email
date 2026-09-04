@@ -7,7 +7,7 @@ use mach_core::{
     search_query::SearchQuery,
     store::{
         Draft, Label, MailStore, Message, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
-        ThreadSummary,
+        ScheduledSend, ThreadSummary,
     },
 };
 use rusqlite::{params, params_from_iter, types::Value, OptionalExtension, Row};
@@ -1377,6 +1377,63 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>> {
+        let pool = self.pool.clone();
+        let account = scope.account().map(|value| value.as_str().to_string());
+        spawn_blocking(move || -> CoreResult<Vec<ScheduledSend>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT s.id, s.draft_id, s.send_at, d.subject, d.to_addrs, s.account_id
+                     FROM send_later s
+                     JOIN drafts d ON d.account_id = s.account_id AND d.id = s.draft_id
+                     WHERE s.state = 'scheduled' AND (?1 IS NULL OR s.account_id = ?1)
+                     ORDER BY s.send_at",
+                )
+                .map_err(map_err)?;
+            let sends = stmt
+                .query_map(params![account], |row| {
+                    let to: String = row.get(4)?;
+                    Ok(ScheduledSend {
+                        send_later_id: row.get(0)?,
+                        draft_id: DraftId::new(row.get::<_, String>(1)?),
+                        send_at: ms_to_dt(row.get(2)?),
+                        subject: row.get(3)?,
+                        to: serde_json::from_str(&to).unwrap_or_default(),
+                        account_id: AccountId::new(row.get::<_, String>(5)?),
+                    })
+                })
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(sends)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        let send_later_id = send_later_id.to_string();
+        spawn_blocking(move || -> CoreResult<()> {
+            let conn = pool.get().map_err(map_err)?;
+            let changed = conn
+                .execute(
+                    "UPDATE send_later SET state = 'cancelled'
+                     WHERE account_id = ?1 AND id = ?2 AND state = 'scheduled'",
+                    params![account.as_str(), send_later_id],
+                )
+                .map_err(map_err)?;
+            if changed == 0 {
+                return Err(CoreError::NotFound("scheduled send not found".into()));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
     async fn complete_send(
         &self,
         outbox_row_id: i64,
@@ -2037,6 +2094,46 @@ mod tests {
             .unwrap();
         assert_eq!(state, "draft");
         assert_eq!(outbox_count, 0);
+    }
+
+    #[tokio::test]
+    async fn scheduled_send_lists_joined_draft_and_cancel_keeps_draft() {
+        let pool = open_in_memory().unwrap();
+        let store = SqliteStore::new(pool.clone());
+        let draft = draft("scheduled");
+        let at = Utc::now() + chrono::Duration::hours(1);
+        store.save_draft_local(&draft).await.unwrap();
+        store
+            .schedule_send(&account(), &draft.id, at)
+            .await
+            .unwrap();
+
+        let sends = store.list_scheduled(&scope()).await.unwrap();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].draft_id, draft.id);
+        assert_eq!(sends[0].subject, draft.subject);
+        assert_eq!(sends[0].to, draft.to);
+
+        store
+            .cancel_scheduled(&account(), &sends[0].send_later_id)
+            .await
+            .unwrap();
+        assert!(store.list_scheduled(&scope()).await.unwrap().is_empty());
+        assert!(store
+            .get_draft(&account(), &draft.id)
+            .await
+            .unwrap()
+            .is_some());
+        let state: String = pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM send_later WHERE account_id = ?1 AND id = ?2",
+                params![account().as_str(), sends[0].send_later_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "cancelled");
     }
 
     #[tokio::test]

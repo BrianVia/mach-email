@@ -98,6 +98,16 @@ pub struct Draft {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledSend {
+    pub send_later_id: String,
+    pub draft_id: DraftId,
+    pub send_at: DateTime<Utc>,
+    pub subject: String,
+    pub to: Vec<String>,
+    pub account_id: AccountId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutboxOpKind {
     ModifyLabels {
@@ -200,6 +210,8 @@ pub trait MailStore: Send + Sync {
         draft_id: &DraftId,
         send_at: DateTime<Utc>,
     ) -> CoreResult<()>;
+    async fn list_scheduled(&self, scope: &AccountScope) -> CoreResult<Vec<ScheduledSend>>;
+    async fn cancel_scheduled(&self, account: &AccountId, send_later_id: &str) -> CoreResult<()>;
     async fn complete_send(
         &self,
         outbox_row_id: i64,

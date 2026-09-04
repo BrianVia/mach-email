@@ -80,6 +80,15 @@ export type Draft = {
   updated_at: string;
 };
 
+export type ScheduledSend = {
+  send_later_id: string;
+  draft_id: string;
+  send_at: string;
+  subject: string;
+  to: string[];
+  account_id: string;
+};
+
 export type ActionOutcome = {
   action_name: string;
   op_id: string | null;
@@ -156,6 +165,19 @@ export async function listLabels(): Promise<Label[]> {
   const r = await invoke<Out<Label[]> | null>("list_labels");
   if (!r) return [];
   return unwrap(r);
+}
+
+export async function listScheduled(): Promise<ScheduledSend[]> {
+  const result = await invoke<Out<ScheduledSend[]> | null>("list_scheduled");
+  return result ? unwrap(result) : [];
+}
+
+export async function openDraft(draftId: string): Promise<Draft> {
+  return unwrap(await invoke<Out<Draft>>("open_draft", { draftId }));
+}
+
+export async function fetchSendLaterPresets(): Promise<[string, string][]> {
+  return invoke<[string, string][]>("send_later_presets");
 }
 
 export async function openThread(
