@@ -40,8 +40,14 @@ pub struct Dispatcher {
 
 #[derive(Debug)]
 struct ActionHistory {
-    undo: VecDeque<Action>,
-    redo: VecDeque<Action>,
+    undo: VecDeque<HistoryEntry>,
+    redo: VecDeque<HistoryEntry>,
+}
+
+#[derive(Debug)]
+struct HistoryEntry {
+    forward: Action,
+    inverse: Vec<Action>,
 }
 
 impl ActionHistory {
@@ -52,25 +58,25 @@ impl ActionHistory {
         }
     }
 
-    fn record_new(&mut self, inverse: Action) {
-        push_bounded(&mut self.undo, inverse);
+    fn record_new(&mut self, entry: HistoryEntry) {
+        push_bounded(&mut self.undo, entry);
         self.redo.clear();
     }
 
-    fn record_undo(&mut self, inverse: Action) {
-        push_bounded(&mut self.undo, inverse);
+    fn record_undo(&mut self, entry: HistoryEntry) {
+        push_bounded(&mut self.undo, entry);
     }
 
-    fn record_redo(&mut self, action: Action) {
-        push_bounded(&mut self.redo, action);
+    fn record_redo(&mut self, entry: HistoryEntry) {
+        push_bounded(&mut self.redo, entry);
     }
 }
 
-fn push_bounded(stack: &mut VecDeque<Action>, action: Action) {
+fn push_bounded(stack: &mut VecDeque<HistoryEntry>, entry: HistoryEntry) {
     if stack.len() == UNDO_DEPTH {
         stack.pop_front();
     }
-    stack.push_back(action);
+    stack.push_back(entry);
 }
 
 impl Dispatcher {
@@ -124,6 +130,7 @@ impl Dispatcher {
     ) -> CoreResult<ActionOutcome> {
         // Compute the inverse BEFORE mutating so we don't lose info that
         // a later mutation might wipe (e.g. star toggle has the bool baked in).
+        let forward = action.clone();
         let inverse = if track_for_undo {
             self.compute_inverse(&action).await?
         } else {
@@ -202,8 +209,8 @@ impl Dispatcher {
         // On success, push inverse to undo stack and (when this is a
         // first-class user action, not a replay) clear redo.
         if track_for_undo {
-            if let (Ok(_), Some(inv)) = (&outcome, inverse) {
-                history.record_new(inv);
+            if let (Ok(_), Some(inverse)) = (&outcome, inverse) {
+                history.record_new(HistoryEntry { forward, inverse });
             }
         }
         outcome
@@ -389,7 +396,7 @@ impl Dispatcher {
         })
     }
     async fn do_undo(&self, history: &mut ActionHistory) -> CoreResult<ActionOutcome> {
-        let Some(inverse) = history.undo.pop_back() else {
+        let Some(entry) = history.undo.pop_back() else {
             return Ok(ActionOutcome {
                 action_name: "undo".into(),
                 op_id: None,
@@ -399,17 +406,16 @@ impl Dispatcher {
                 message: "nothing to undo".into(),
             });
         };
-        let redo_action = self
-            .compute_inverse(&inverse)
-            .await?
-            .unwrap_or_else(|| inverse.clone());
-        let outcome = Box::pin(self.execute_inner(inverse, false, history)).await?;
-        history.record_redo(redo_action);
+        let mut outcome = ActionOutcome::empty("undo");
+        for inverse in entry.inverse.iter().cloned() {
+            outcome = Box::pin(self.execute_inner(inverse, false, history)).await?;
+        }
+        history.record_redo(entry);
         Ok(outcome)
     }
 
     async fn do_redo(&self, history: &mut ActionHistory) -> CoreResult<ActionOutcome> {
-        let Some(action) = history.redo.pop_back() else {
+        let Some(entry) = history.redo.pop_back() else {
             return Ok(ActionOutcome {
                 action_name: "redo".into(),
                 op_id: None,
@@ -419,11 +425,8 @@ impl Dispatcher {
                 message: "nothing to redo".into(),
             });
         };
-        let undo_inverse = self.compute_inverse(&action).await?;
-        let outcome = Box::pin(self.execute_inner(action, false, history)).await?;
-        if let Some(inv) = undo_inverse {
-            history.record_undo(inv);
-        }
+        let outcome = Box::pin(self.execute_inner(entry.forward.clone(), false, history)).await?;
+        history.record_undo(entry);
         Ok(outcome)
     }
 
@@ -584,7 +587,49 @@ impl Dispatcher {
     /// Build an inverse from the state that actually exists before mutation.
     /// This prevents undo from changing threads on which the original action
     /// was a no-op (for example, starring an already-starred thread).
-    async fn compute_inverse(&self, action: &Action) -> CoreResult<Option<Action>> {
+    async fn compute_inverse(&self, action: &Action) -> CoreResult<Option<Vec<Action>>> {
+        if let Action::Trash { thread_ids } = action {
+            // trash() adds TRASH and removes INBOX; the inverse is exactly that, reversed.
+            let untrash = self.with_label_state(thread_ids, "TRASH", false).await?;
+            let restore_inbox = self.with_label_state(thread_ids, "INBOX", true).await?;
+            let mut inverse = Vec::new();
+            if !untrash.is_empty() {
+                inverse.push(Action::RemoveLabel {
+                    thread_ids: untrash,
+                    label_id: LabelId::new("TRASH"),
+                });
+            }
+            if !restore_inbox.is_empty() {
+                inverse.push(Action::AddLabel {
+                    thread_ids: restore_inbox,
+                    label_id: LabelId::new("INBOX"),
+                });
+            }
+            return Ok((!inverse.is_empty()).then_some(inverse));
+        }
+
+        if let Action::Snooze { thread_ids, until } = action {
+            let snoozed = LabelId::new(format!("MACH/Snoozed/{}", until.to_rfc3339()));
+            let restore_inbox = self.with_label_state(thread_ids, "INBOX", true).await?;
+            let remove_snoozed = self
+                .with_label_state(thread_ids, snoozed.as_str(), false)
+                .await?;
+            let mut inverse = Vec::new();
+            if !restore_inbox.is_empty() {
+                inverse.push(Action::AddLabel {
+                    thread_ids: restore_inbox,
+                    label_id: LabelId::new("INBOX"),
+                });
+            }
+            if !remove_snoozed.is_empty() {
+                inverse.push(Action::RemoveLabel {
+                    thread_ids: remove_snoozed,
+                    label_id: snoozed,
+                });
+            }
+            return Ok((!inverse.is_empty()).then_some(inverse));
+        }
+
         let inverse = match action {
             Action::Archive { thread_ids } => {
                 let changed = self.with_label_state(thread_ids, "INBOX", true).await?;
@@ -638,7 +683,7 @@ impl Dispatcher {
             }
             _ => None,
         };
-        Ok(inverse)
+        Ok(inverse.map(|action| vec![action]))
     }
 
     async fn with_label_state(

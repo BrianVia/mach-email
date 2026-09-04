@@ -785,6 +785,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undo_trash_restores_labels_and_redo_retrashes() {
+        let store = Arc::new(InMemoryStore::new());
+        seed_thread(&store, "t1", &["INBOX", "UNREAD"]);
+        let dispatcher = Dispatcher::new(store.clone());
+
+        dispatcher
+            .execute(Action::Trash {
+                thread_ids: vec![ThreadId::new("t1")],
+            })
+            .await
+            .unwrap();
+        dispatcher.execute(Action::Undo).await.unwrap();
+
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "INBOX"));
+        assert!(!thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "TRASH"));
+        assert!(store.outbox_snapshot().iter().any(|op| matches!(
+            &op.kind,
+            OutboxOpKind::ModifyLabels { remove, .. }
+                if remove.iter().any(|label| label.as_str() == "TRASH")
+        )));
+
+        dispatcher.execute(Action::Redo).await.unwrap();
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "INBOX"));
+        assert!(thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "TRASH"));
+    }
+
+    #[tokio::test]
+    async fn undo_snooze_restores_inbox_and_removes_snoozed_label() {
+        let store = Arc::new(InMemoryStore::new());
+        seed_thread(&store, "t1", &["INBOX"]);
+        let dispatcher = Dispatcher::new(store.clone());
+        let until = Utc::now() + chrono::Duration::hours(1);
+        let snoozed = format!("MACH/Snoozed/{}", until.to_rfc3339());
+
+        dispatcher
+            .execute(Action::Snooze {
+                thread_ids: vec![ThreadId::new("t1")],
+                until,
+            })
+            .await
+            .unwrap();
+        dispatcher.execute(Action::Undo).await.unwrap();
+
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "INBOX"));
+        assert!(!thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == snoozed));
+
+        dispatcher.execute(Action::Redo).await.unwrap();
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == "INBOX"));
+        assert!(thread
+            .label_ids
+            .iter()
+            .any(|label| label.as_str() == snoozed));
+    }
+
+    #[tokio::test]
+    async fn undo_trash_on_already_trashed_thread_is_a_no_op() {
+        let store = Arc::new(InMemoryStore::new());
+        seed_thread(&store, "t1", &["TRASH"]);
+        let dispatcher = Dispatcher::new(store.clone());
+
+        dispatcher
+            .execute(Action::Trash {
+                thread_ids: vec![ThreadId::new("t1")],
+            })
+            .await
+            .unwrap();
+        let outcome = dispatcher.execute(Action::Undo).await.unwrap();
+
+        assert!(outcome.message.contains("nothing"));
+        let thread = store
+            .get_thread(&AccountScope::All, &ThreadId::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(thread.label_ids, vec![LabelId::new("TRASH")]);
+        assert_eq!(store.outbox_snapshot().len(), 1);
+    }
+
+    #[tokio::test]
     async fn undo_with_empty_stack_returns_friendly_outcome() {
         let store = Arc::new(InMemoryStore::new());
         let dispatcher = Dispatcher::new(store);
