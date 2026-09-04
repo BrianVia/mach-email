@@ -32,6 +32,34 @@ impl SqliteStore {
     pub fn pool(&self) -> &DbPool {
         &self.pool
     }
+
+    pub async fn recent_done_outbox(
+        &self,
+        account: &AccountId,
+        since_ms: i64,
+    ) -> CoreResult<Vec<OutboxOp>> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        spawn_blocking(move || -> CoreResult<Vec<OutboxOp>> {
+            let conn = pool.get().map_err(map_err)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, account_id, op_id, op_kind, payload_json, created_at,
+                            attempts, last_error
+                     FROM outbox
+                     WHERE account_id = ?1 AND state = 'done' AND completed_at >= ?2",
+                )
+                .map_err(map_err)?;
+            let rows = stmt
+                .query_map(params![account.as_str(), since_ms], row_to_outbox)
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_err)?;
+            Ok(rows)
+        })
+        .await
+        .map_err(map_err)?
+    }
 }
 
 /// Inputs the sync engine writes during bootstrap / incremental updates.
@@ -683,17 +711,19 @@ fn row_to_draft(row: &Row) -> rusqlite::Result<Draft> {
     })
 }
 
-fn row_to_outbox(row: &Row) -> CoreResult<OutboxOp> {
-    let payload_json: String = row.get("payload_json").map_err(map_err)?;
-    let kind: OutboxOpKind = serde_json::from_str(&payload_json)?;
+fn row_to_outbox(row: &Row) -> rusqlite::Result<OutboxOp> {
+    let payload_json: String = row.get("payload_json")?;
+    let kind: OutboxOpKind = serde_json::from_str(&payload_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(OutboxOp {
-        id: row.get("id").map_err(map_err)?,
-        account_id: AccountId::new(row.get::<_, String>("account_id").map_err(map_err)?),
-        op_id: OpId(row.get::<_, String>("op_id").map_err(map_err)?),
+        id: row.get("id")?,
+        account_id: AccountId::new(row.get::<_, String>("account_id")?),
+        op_id: OpId(row.get::<_, String>("op_id")?),
         kind,
-        created_at: ms_to_dt(row.get("created_at").map_err(map_err)?),
-        attempts: row.get::<_, i64>("attempts").map_err(map_err)? as u32,
-        last_error: row.get("last_error").map_err(map_err)?,
+        created_at: ms_to_dt(row.get("created_at")?),
+        attempts: row.get::<_, i64>("attempts")? as u32,
+        last_error: row.get("last_error")?,
     })
 }
 
@@ -1393,20 +1423,7 @@ impl MailStore for SqliteStore {
                 .map_err(map_err)?;
             for id in ids {
                 let op = detail
-                    .query_row(params![id], |row| {
-                        // Hop back through CoreResult by wrapping the JSON
-                        // parse failure as a synthesized rusqlite error.
-                        row_to_outbox(row).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    e.to_string(),
-                                )),
-                            )
-                        })
-                    })
+                    .query_row(params![id], row_to_outbox)
                     .map_err(map_err)?;
                 out.push(op);
             }
@@ -1421,8 +1438,8 @@ impl MailStore for SqliteStore {
         spawn_blocking(move || -> CoreResult<()> {
             let conn = pool.get().map_err(map_err)?;
             conn.execute(
-                "UPDATE outbox SET state = 'done' WHERE id = ?1",
-                params![id],
+                "UPDATE outbox SET state = 'done', completed_at = ?1 WHERE id = ?2",
+                params![Utc::now().timestamp_millis(), id],
             )
             .map_err(map_err)?;
             Ok(())
@@ -1769,7 +1786,7 @@ mod tests {
     #[tokio::test]
     async fn outbox_round_trips() {
         let pool = open_in_memory().unwrap();
-        let store = SqliteStore::new(pool);
+        let store = SqliteStore::new(pool.clone());
         let op_id = OpId::new();
         let id = store
             .enqueue_outbox(
@@ -1792,6 +1809,29 @@ mod tests {
         store.mark_outbox_done(id).await.unwrap();
         let pending = store.drain_pending_outbox(&account(), 10).await.unwrap();
         assert!(pending.is_empty());
+
+        let completed_at: i64 = pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT completed_at FROM outbox WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .recent_done_outbox(&account(), completed_at)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .recent_done_outbox(&account(), completed_at + 1)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

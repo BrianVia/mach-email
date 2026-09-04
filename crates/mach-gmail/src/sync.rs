@@ -7,7 +7,7 @@
 //! messages forever — the bug almost every TUI mail client gets wrong on the
 //! first try. The order in [`bootstrap`] is deliberate.
 //!
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -18,7 +18,7 @@ use mach_core::{Action, Dispatcher};
 use mach_store::{LabelUpsert, MessageUpsert, SqliteStore, ThreadUpsert};
 use tracing::{info, warn};
 
-use crate::client::{GmailClient, RemoteMessage, RemoteThread};
+use crate::client::{GmailClient, HistoryRecord, RemoteMessage, RemoteThread};
 use crate::outbox::{DrainStats, OutboxWorker};
 
 const BOOTSTRAP_QUERY: &str = "newer_than:30d";
@@ -307,12 +307,49 @@ fn parse_address_list(raw: &str) -> Vec<String> {
 #[derive(Debug, Default, Clone)]
 pub struct IncrementalStats {
     pub events: u32,
+    pub echoes_suppressed: u32,
     /// Distinct threads we re-fetched as a result of history events.
     pub threads_refetched: u32,
     /// `true` if the server replied 404 (gap) and we triggered a
     /// re-bootstrap on the last 7 days.
     pub gap_recovered: bool,
     pub new_cursor: u64,
+}
+
+fn is_echo(record: &HistoryRecord, expected: &HashSet<(String, String, bool)>) -> bool {
+    if expected.is_empty()
+        || !record.messages_added.is_empty()
+        || !record.messages_deleted.is_empty()
+    {
+        return false;
+    }
+
+    let mut effects = HashSet::new();
+    for (entries, added) in [
+        (&record.labels_added, true),
+        (&record.labels_removed, false),
+    ] {
+        for entry in entries {
+            if entry.label_ids.is_empty() {
+                return false;
+            }
+            effects.extend(
+                entry
+                    .label_ids
+                    .iter()
+                    .map(|label| (entry.message.thread_id.clone(), label.clone(), added)),
+            );
+        }
+    }
+    let net: HashSet<_> = effects
+        .iter()
+        .filter(|(thread, label, added)| {
+            !effects.contains(&(thread.clone(), label.clone(), !added))
+        })
+        .cloned()
+        .collect();
+
+    !net.is_empty() && net.is_subset(expected)
 }
 
 /// Incremental sync. Reads the stored cursor, asks Gmail for everything
@@ -335,6 +372,47 @@ pub async fn incremental_sync(
         .ok_or_else(|| anyhow::anyhow!("no history cursor — bootstrap first"))?;
     info!(cursor, "incremental sync starting");
 
+    let recent = store
+        .recent_done_outbox(&account, Utc::now().timestamp_millis() - 60_000)
+        .await?;
+    let mut expected = HashSet::new();
+    for op in recent {
+        match op.kind {
+            mach_core::store::OutboxOpKind::ModifyLabels {
+                thread_ids,
+                add,
+                remove,
+            } => {
+                for thread in thread_ids {
+                    expected.extend(
+                        add.iter()
+                            .map(|label| {
+                                (
+                                    thread.as_str().to_string(),
+                                    label.as_str().to_string(),
+                                    true,
+                                )
+                            })
+                            .chain(remove.iter().map(|label| {
+                                (
+                                    thread.as_str().to_string(),
+                                    label.as_str().to_string(),
+                                    false,
+                                )
+                            })),
+                    );
+                }
+            }
+            mach_core::store::OutboxOpKind::Trash { thread_ids } => {
+                for thread in thread_ids {
+                    expected.insert((thread.as_str().to_string(), "TRASH".into(), true));
+                    expected.insert((thread.as_str().to_string(), "INBOX".into(), false));
+                }
+            }
+            _ => {}
+        }
+    }
+
     let mut next_token: Option<String> = None;
     let mut touched_threads: std::collections::HashSet<String> = Default::default();
     let mut deleted_messages: std::collections::HashSet<String> = Default::default();
@@ -351,6 +429,10 @@ pub async fn incremental_sync(
         };
         for record in page.history {
             stats.events += 1;
+            if is_echo(&record, &expected) {
+                stats.echoes_suppressed += 1;
+                continue;
+            }
             for r in record
                 .messages_added
                 .iter()
@@ -493,6 +575,7 @@ async fn gap_recover(
 
     Ok(IncrementalStats {
         events: 0,
+        echoes_suppressed: 0,
         threads_refetched: refetched,
         gap_recovered: true,
         new_cursor,
@@ -502,6 +585,55 @@ async fn gap_recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history(value: serde_json::Value) -> HistoryRecord {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn inbox_removed() -> HistoryRecord {
+        history(serde_json::json!({
+            "labelsRemoved": [{
+                "message": {"id": "message", "threadId": "thread"},
+                "labelIds": ["INBOX"]
+            }]
+        }))
+    }
+
+    #[test]
+    fn exact_echo_is_suppressed() {
+        let expected = HashSet::from([("thread".into(), "INBOX".into(), false)]);
+        assert!(is_echo(&inbox_removed(), &expected));
+    }
+
+    #[test]
+    fn echo_with_unexpected_label_is_not_suppressed() {
+        let expected = HashSet::from([("thread".into(), "INBOX".into(), false)]);
+        let extra = history(serde_json::json!({
+            "labelsRemoved": [{
+                "message": {"id": "message", "threadId": "thread"},
+                "labelIds": ["INBOX", "UNREAD"]
+            }]
+        }));
+        assert!(!is_echo(&extra, &expected));
+    }
+
+    #[test]
+    fn echo_with_added_message_is_not_suppressed() {
+        let expected = HashSet::from([("thread".into(), "INBOX".into(), false)]);
+        let message_added = history(serde_json::json!({
+            "messagesAdded": [{"message": {"id": "message", "threadId": "thread"}}],
+            "labelsRemoved": [{
+                "message": {"id": "message", "threadId": "thread"},
+                "labelIds": ["INBOX"]
+            }]
+        }));
+        assert!(!is_echo(&message_added, &expected));
+    }
+
+    #[test]
+    fn empty_expectations_never_suppress() {
+        assert!(!is_echo(&inbox_removed(), &HashSet::new()));
+    }
 
     #[test]
     fn message_upsert_serializes_only_present_threading_headers() {
