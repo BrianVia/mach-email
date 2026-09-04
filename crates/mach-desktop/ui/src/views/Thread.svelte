@@ -7,7 +7,23 @@
 
   let { v }: { v: { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number } } = $props();
   let overrides = $state<Record<string, boolean>>({});
+  let shownRemoteImages = $state<Record<string, boolean>>({});
+  let remoteImageAllow = $state(loadRemoteImageAllow());
   let previousSelected = $state<number | null>(null);
+
+  function loadRemoteImageAllow(): string[] {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem("mach.remoteImageAllow") ?? "[]");
+      return Array.isArray(value) ? value.filter((email): email is string => typeof email === "string").map((email) => email.toLowerCase()) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function alwaysShowRemoteImages(email: string) {
+    remoteImageAllow = [...new Set([...remoteImageAllow, email.toLowerCase()])];
+    localStorage.setItem("mach.remoteImageAllow", JSON.stringify(remoteImageAllow));
+  }
 
   $effect(() => {
     const selected = v.selectedMsg;
@@ -31,7 +47,7 @@
   }
 
   function senderEmail(from: string): string {
-    return from.match(/<([^>]+)>/)?.[1] ?? "";
+    return (from.match(/<([^>]+)>/)?.[1] ?? from.match(/[^\s<>@]+@[^\s<>@]+/)?.[0] ?? "").trim();
   }
 
   // The webview has no handler for target="_blank", so anchor clicks
@@ -86,7 +102,20 @@
               <p class="preview-only">Preview only — full message not fetched yet. Press <kbd>⌃R</kbd> to retry.</p>
             {/if}
             {#if message.body_html && message.body_html.length > 0}
-              <div class="message-body mach-html">{@html renderEmailHtml(message).html}</div>
+              {@const email = senderEmail(message.from).toLowerCase()}
+              {@const rendered = renderEmailHtml(message, { showRemote: shownRemoteImages[message.id] || remoteImageAllow.includes(email) })}
+              {#if rendered.blockedRemoteCount > 0}
+                <div class="remote-images-bar">
+                  <span>{rendered.blockedRemoteCount} remote {rendered.blockedRemoteCount === 1 ? "image" : "images"} blocked</span>
+                  <span aria-hidden="true">·</span>
+                  <button type="button" onclick={() => (shownRemoteImages[message.id] = true)}>Show images</button>
+                  {#if email}
+                    <span aria-hidden="true">·</span>
+                    <button type="button" onclick={() => alwaysShowRemoteImages(email)}>Always show from {email}</button>
+                  {/if}
+                </div>
+              {/if}
+              <div class="message-body mach-html">{@html rendered.html}</div>
             {:else}
               <div class="message-body plain">{@html linkify(message.body_plain ?? message.snippet ?? "(no body)")}</div>
             {/if}
@@ -119,6 +148,8 @@
   .message-body { padding: 0 20px 20px; overflow-wrap: anywhere; color: var(--muted); font-size: 14px; line-height: 1.6; }
   .preview-only { margin: 0 20px 12px; padding: 8px 12px; border-radius: 8px; background: color-mix(in oklab, var(--accent) 10%, transparent); color: var(--muted); font-size: 12.5px; }
   .preview-only kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
+  .remote-images-bar { display: flex; gap: 6px; align-items: center; padding: 7px 20px; color: var(--muted); font-size: 11.5px; }
+  .remote-images-bar button { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; }
   .plain { white-space: pre-wrap; }
   :global(.mach-html img) { display: block; max-width: 100%; height: auto; border-radius: 6px; }
   :global(.mach-html a) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
