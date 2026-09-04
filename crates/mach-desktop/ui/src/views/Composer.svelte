@@ -16,6 +16,7 @@
     onClose,
     onError,
     snippets,
+    fromLabel,
   }: {
     draft: Draft;
     title: string;
@@ -26,6 +27,7 @@
     onClose: () => void;
     onError: (error: unknown) => void;
     snippets: Record<string, string>;
+    fromLabel: string;
   } = $props();
   let to = $state(untrack(() => draft.to.join(", ")));
   let cc = $state(untrack(() => draft.cc.join(", ")));
@@ -103,6 +105,7 @@
       <button class="escape" onclick={onClose}>esc</button>
     </header>
     <div class="fields">
+      <div class="field"><span>From</span><span class="from" title={draft.account_id}>{fromLabel}</span></div>
       <label><span>To</span><input bind:this={firstInput} bind:value={to} oninput={fieldsChanged} /></label>
       <label><span>Cc</span><input bind:value={cc} oninput={fieldsChanged} /></label>
       <label><span>Bcc</span><input bind:value={bcc} oninput={fieldsChanged} /></label>
@@ -172,10 +175,11 @@
   .escape { border: 0; background: transparent; color: var(--muted); font-size: 12px; }
   .escape:hover { color: var(--text); }
   .fields { padding: 0 24px; }
-  label { display: flex; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border); }
-  label span { width: 64px; color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  label, .field { display: flex; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  label span, .field > span { width: 64px; color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
   input, textarea { border: 0; background: transparent; color: var(--text); font-family: inherit; outline: 0; }
   input { min-width: 0; flex: 1; font-size: 14px; }
+  .from { width: auto; color: var(--text); font-size: 14px; letter-spacing: normal; text-transform: none; }
   .body-field { position: relative; }
   textarea { display: block; width: 100%; height: 14rem; padding: 16px 24px; resize: none; font-size: 14px; line-height: 1.6; }
   textarea::placeholder { color: var(--muted); }

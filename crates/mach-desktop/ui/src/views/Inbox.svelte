@@ -19,6 +19,7 @@
     split,
     onSplit,
     onLoadOlder,
+    accountLabel,
   }: {
     v: { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
     onSelect: (index: number) => void;
@@ -26,6 +27,7 @@
     split: Split;
     onSplit: (split: Split) => void;
     onLoadOlder: () => Promise<number | null>;
+    accountLabel: (email: string) => string;
   } = $props();
 
   let highlight = $state<HTMLDivElement>();
@@ -197,6 +199,7 @@
               title={item.thread.account_id}
               aria-hidden="true"
             ></span>
+            <span class="account-text" title={item.thread.account_id}>{accountLabel(item.thread.account_id)}</span>
           {/if}
           <span class:unread-text={item.thread.unread} class="sender">
             {prettySender(item.thread.participants[0] ?? "(no sender)")}
@@ -239,6 +242,7 @@
   .unread { border-radius: 50%; background: var(--accent); }
   :global(.star) { color: var(--starred); }
   .account-marker { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; }
+  .account-text { max-width: 90px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .sender { width: 13rem; flex-shrink: 0; overflow: hidden; color: color-mix(in oklab, var(--text) 78%, transparent); font-size: 13.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
   .badge { flex-shrink: 0; padding: 1px 6px; border-radius: 4px; background: color-mix(in oklab, var(--badge) 14%, transparent); color: color-mix(in oklab, var(--badge) 80%, var(--text)); font-size: 10px; font-weight: 500; letter-spacing: .02em; }
   .summary { min-width: 0; flex: 1; overflow: hidden; color: color-mix(in oklab, var(--text) 78%, transparent); font-size: 13.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }

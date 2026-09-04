@@ -7,6 +7,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UserConfig {
     #[serde(default)]
+    pub accounts: BTreeMap<String, String>,
+    #[serde(default)]
     pub signatures: BTreeMap<String, String>,
     #[serde(default)]
     pub snippets: BTreeMap<String, String>,
@@ -72,6 +74,10 @@ impl UserConfig {
             .or_else(|| self.signatures.get("default"))
             .map(String::as_str)
     }
+
+    pub fn account_label<'a>(&'a self, email: &'a str) -> &'a str {
+        self.accounts.get(email).map_or(email, String::as_str)
+    }
 }
 
 #[cfg(test)]
@@ -83,7 +89,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mach-config-{}.toml", uuid::Uuid::new_v4()));
         std::fs::write(
             &path,
-            "[signatures]\ndefault = \"—\\nBrian\"\n\"me@work.com\" = \"Brian Via\\nWork\"\n\n[snippets]\nthanks = \"Thanks so much,\\nBrian\"\n",
+            "[accounts]\n\"me@work.com\" = \"Work\"\n\n[signatures]\ndefault = \"—\\nBrian\"\n\"me@work.com\" = \"Brian Via\\nWork\"\n\n[snippets]\nthanks = \"Thanks so much,\\nBrian\"\n",
         )
         .unwrap();
 
@@ -93,12 +99,15 @@ mod tests {
         assert_eq!(config.signature_for("me@work.com"), Some("Brian Via\nWork"));
         assert_eq!(config.signature_for("x@example.com"), Some("—\nBrian"));
         assert_eq!(config.snippets["thanks"], "Thanks so much,\nBrian");
+        assert_eq!(config.account_label("me@work.com"), "Work");
+        assert_eq!(config.account_label("x@example.com"), "x@example.com");
     }
 
     #[test]
     fn missing_file_yields_default() {
         let path = std::env::temp_dir().join(format!("mach-missing-{}.toml", uuid::Uuid::new_v4()));
         let config = UserConfig::load(&path).unwrap();
+        assert!(config.accounts.is_empty());
         assert!(config.signatures.is_empty());
         assert!(config.snippets.is_empty());
     }

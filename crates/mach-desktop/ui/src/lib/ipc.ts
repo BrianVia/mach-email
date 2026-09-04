@@ -143,6 +143,7 @@ export type ActionOutcome = {
 export type AccountStatus = {
   email: string;
   accounts: string[];
+  account_labels: Record<string, string>;
   online: boolean;
   needs_reauth: string[];
 };
@@ -193,6 +194,7 @@ export type KeymapSources = {
 
 export type Settings = {
   after_archive?: "next" | "list";
+  account_labels?: Record<string, string>;
 };
 
 // Backend Ok/Err discriminated union.
@@ -305,6 +307,10 @@ export async function fetchSnippets(): Promise<Record<string, string>> {
 
 export async function fetchAccountStatus(): Promise<AccountStatus> {
   return invoke<AccountStatus>("account_status");
+}
+
+export async function addAccount(): Promise<string> {
+  return invoke<string>("add_account");
 }
 
 export async function flushOutbox(): Promise<{

@@ -9,6 +9,8 @@
     title,
     subtitle,
     accountEmail,
+    accountLabel,
+    onAddAccount,
     online,
     outbox,
     activeLabel,
@@ -22,6 +24,8 @@
     title: string;
     subtitle: string;
     accountEmail?: string;
+    accountLabel?: string;
+    onAddAccount: () => void;
     online: boolean;
     outbox: OutboxSummary;
     activeLabel?: string;
@@ -54,7 +58,8 @@
       <div class="subtitle" data-tauri-drag-region>{subtitle}</div>
     </div>
     <div class="account">
-      <span>{accountEmail}</span>
+      <span title={accountEmail}>{accountLabel}</span>
+      <button class="add-account" type="button" aria-label="Add account" title="Add account" onclick={onAddAccount}>+</button>
       <span class:online class="status-pill">
         <i></i>{online ? "Live" : "Offline"}
       </span>
@@ -115,6 +120,7 @@
   .title { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 600; line-height: 17px; text-overflow: ellipsis; white-space: nowrap; }
   .subtitle { overflow: hidden; color: var(--muted); font-size: 11px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
   .account { display: flex; flex-shrink: 0; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+  .add-account { padding: 0 3px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 15px; }
   .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; color: var(--muted); background: color-mix(in oklab, var(--muted) 14%, transparent); font-weight: 500; }
   .status-pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
   .status-pill.online { color: var(--success); background: color-mix(in oklab, var(--success) 14%, transparent); }

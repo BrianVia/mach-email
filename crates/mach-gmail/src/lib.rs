@@ -3,6 +3,7 @@
 //! The sync engine in `sync.rs` is the highest-risk file in the workspace —
 //! `historyId` gap recovery is where most TUI mail clients silently drift.
 
+mod accounts;
 pub mod body;
 pub mod body_fetcher;
 pub mod client;
@@ -14,6 +15,7 @@ mod search;
 pub mod sync;
 mod unsubscribe;
 
+pub use accounts::{add_account, bootstrap_account};
 pub use body_fetcher::{
     fetch_attachment_cached, guess_mime_type, save_attachment_to_downloads, BodyFetcher,
     FetchOutcome, GmailAccountPool, PullReport, RemoteSearchReport,

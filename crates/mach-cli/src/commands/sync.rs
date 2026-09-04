@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use mach_core::ids::{AccountId, LabelId};
-use mach_core::MailStore;
 use mach_gmail::{config::OAuthConfig, GmailClient};
 use tracing::warn;
 
@@ -76,7 +75,19 @@ async fn sync_account(
         return Ok(());
     }
 
-    if bootstrap_account(bootstrap, email, client.clone(), store.clone()).await? {
+    if let Some(stats) =
+        mach_gmail::bootstrap_account(bootstrap, email, client.clone(), store.clone()).await?
+    {
+        println!(
+            "✓ Bootstrap complete: {} threads / {} messages / {} labels (account: {}, history_id: {})",
+            stats.threads, stats.messages, stats.labels, stats.email, stats.history_id
+        );
+        if stats.failed_thread_fetches > 0 {
+            println!(
+                "  ⚠ {} thread fetch(es) failed — see logs (rerun to retry)",
+                stats.failed_thread_fetches
+            );
+        }
         return Ok(());
     }
 
@@ -110,33 +121,4 @@ async fn sync_account(
         }
     }
     Ok(())
-}
-
-/// Ensure one authenticated account has an initial local snapshot. Both login
-/// and normal sync use this boundary so "new account" behavior has one owner.
-pub(crate) async fn bootstrap_account(
-    force: bool,
-    email: &str,
-    client: std::sync::Arc<GmailClient>,
-    store: std::sync::Arc<mach_store::SqliteStore>,
-) -> Result<bool> {
-    let account = AccountId::new(email);
-    if !force && store.get_history_cursor(&account).await?.is_some() {
-        return Ok(false);
-    }
-    if !force {
-        println!("[{email}] No sync cursor; bootstrapping account");
-    }
-    let stats = mach_gmail::bootstrap(client, store).await?;
-    println!(
-        "✓ Bootstrap complete: {} threads / {} messages / {} labels (account: {}, history_id: {})",
-        stats.threads, stats.messages, stats.labels, stats.email, stats.history_id
-    );
-    if stats.failed_thread_fetches > 0 {
-        println!(
-            "  ⚠ {} thread fetch(es) failed — see logs (rerun to retry)",
-            stats.failed_thread_fetches
-        );
-    }
-    Ok(true)
 }

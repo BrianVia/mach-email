@@ -134,7 +134,7 @@ pub(crate) async fn sync_accounts(
     let mut last_error = None;
 
     for account in accounts.accounts() {
-        match sync_account(app, accounts, account).await {
+        match sync_account(app, accounts, &account).await {
             Ok(true) => {
                 synced += 1;
             }
@@ -260,7 +260,7 @@ pub(crate) async fn drain_outbox(
     let mut last_error = None;
 
     for account in accounts.accounts() {
-        let Some(fetcher) = accounts.get(account) else {
+        let Some(fetcher) = accounts.get(&account) else {
             continue;
         };
         let worker = OutboxWorker::new(account.clone(), fetcher.client().clone(), store.clone());
@@ -623,23 +623,24 @@ pub fn keymap_sources(state: State<'_, AppState>) -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn settings() -> serde_json::Value {
-    let Some(contents) =
-        crate::config_dir().and_then(|dir| std::fs::read_to_string(dir.join("settings.toml")).ok())
-    else {
-        return serde_json::json!({});
-    };
-
-    match toml::from_str::<toml::Value>(&contents) {
-        Ok(settings) => serde_json::to_value(settings).unwrap_or_else(|error| {
-            warn!(error = %error, "serializing settings failed");
-            serde_json::json!({})
-        }),
-        Err(error) => {
-            warn!(error = %error, "parsing settings.toml failed");
-            serde_json::json!({})
-        }
-    }
+pub fn settings(state: State<'_, AppState>) -> serde_json::Value {
+    let mut settings = crate::config_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join("settings.toml")).ok())
+        .map_or_else(
+            || serde_json::json!({}),
+            |contents| match toml::from_str::<toml::Value>(&contents) {
+                Ok(settings) => serde_json::to_value(settings).unwrap_or_else(|error| {
+                    warn!(error = %error, "serializing settings failed");
+                    serde_json::json!({})
+                }),
+                Err(error) => {
+                    warn!(error = %error, "parsing settings.toml failed");
+                    serde_json::json!({})
+                }
+            },
+        );
+    settings["account_labels"] = serde_json::json!(state.user_config.accounts);
+    settings
 }
 
 #[tauri::command]
@@ -649,6 +650,12 @@ pub fn snippets(state: State<'_, AppState>) -> BTreeMap<String, String> {
 
 #[tauri::command]
 pub fn account_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let mut accounts = state
+        .body_fetchers
+        .accounts()
+        .map(|account| account.to_string())
+        .collect::<Vec<_>>();
+    accounts.sort();
     let needs_reauth = mach_gmail::credentials::load_all()
         .map_err(|error| error.to_string())?
         .into_iter()
@@ -656,13 +663,45 @@ pub fn account_status(state: State<'_, AppState>) -> Result<serde_json::Value, S
         .map(|credentials| credentials.email)
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
-        "email": if state.account_emails.len() == 1 {
-            state.account_emails.first().cloned().unwrap_or_default()
+        "email": if accounts.len() == 1 {
+            accounts.first().cloned().unwrap_or_default()
         } else {
-            format!("All accounts ({})", state.account_emails.len())
+            format!("All accounts ({})", accounts.len())
         },
-        "accounts": state.account_emails,
+        "accounts": accounts,
+        "account_labels": state.user_config.accounts,
         "online": !state.body_fetchers.is_empty(),
         "needs_reauth": needs_reauth,
     }))
+}
+
+#[tauri::command]
+pub async fn add_account(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let credentials = mach_gmail::add_account(state.store.clone())
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    state
+        .body_fetchers
+        .add(&credentials, state.store.clone())
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    let email = credentials.email;
+    emit_sync_event(
+        &app,
+        "sync-status",
+        SyncStatusPayload {
+            account: email.clone(),
+            ok: true,
+            error: None,
+        },
+    );
+    emit_sync_event(
+        &app,
+        "mail-synced",
+        MailSyncedPayload {
+            account: email.clone(),
+            new_threads: Vec::new(),
+        },
+    );
+    Ok(email)
 }

@@ -55,10 +55,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_top_bar(f, app, layout[0]);
     match &app.view {
-        View::Inbox(v) => draw_inbox(f, v, app.inbox_split, layout[1]),
+        View::Inbox(v) => draw_inbox(f, v, app.inbox_split, &app.user_config, layout[1]),
         View::Thread(v) => draw_thread(f, v, layout[1]),
         View::Composer(v) => draw_composer(f, v, layout[1]),
-        View::Search(v) => draw_search(f, v, layout[1]),
+        View::Search(v) => draw_search(f, v, &app.user_config, layout[1]),
         View::Activity(v) => draw_activity(f, v, layout[1]),
         View::Scheduled(v) => draw_scheduled(f, v, layout[1]),
     }
@@ -148,7 +148,13 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_inbox(f: &mut Frame, v: &InboxView, split: Split, area: Rect) {
+fn draw_inbox(
+    f: &mut Frame,
+    v: &InboxView,
+    split: Split,
+    config: &mach_core::UserConfig,
+    area: Rect,
+) {
     let inner = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(DIM))
@@ -202,7 +208,7 @@ fn draw_inbox(f: &mut Frame, v: &InboxView, split: Split, area: Rect) {
         return;
     }
 
-    draw_mailbox_table(f, &threads, v.selected, v.viewport_top, list_area);
+    draw_mailbox_table(f, &threads, v.selected, v.viewport_top, config, list_area);
 }
 
 fn draw_thread(f: &mut Frame, v: &ThreadView, area: Rect) {
@@ -413,7 +419,7 @@ fn draw_scheduled(f: &mut Frame, view: &ScheduledView, area: Rect) {
     f.render_widget(table, area);
 }
 
-fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
+fn draw_search(f: &mut Frame, v: &SearchView, config: &mach_core::UserConfig, area: Rect) {
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(DIM));
@@ -464,7 +470,7 @@ fn draw_search(f: &mut Frame, v: &SearchView, area: Rect) {
         return;
     }
 
-    draw_mailbox_table(f, &v.results, v.selected, 0, chunks[1]);
+    draw_mailbox_table(f, &v.results, v.selected, 0, config, chunks[1]);
 }
 
 fn draw_activity(f: &mut Frame, v: &ActivityView, area: Rect) {
@@ -507,6 +513,7 @@ fn draw_mailbox_table<T: Borrow<ThreadSummary>>(
     threads: &[T],
     selected: usize,
     viewport_top: usize,
+    config: &mach_core::UserConfig,
     area: Rect,
 ) {
     let row_count = area.height.saturating_sub(1) as usize;
@@ -549,7 +556,8 @@ fn draw_mailbox_table<T: Borrow<ThreadSummary>>(
             };
             Row::new(vec![
                 Cell::from(marker),
-                Cell::from(thread.account_id.to_string()).style(Style::default().fg(DIM)),
+                Cell::from(config.account_label(thread.account_id.as_str()).to_string())
+                    .style(Style::default().fg(DIM)),
                 Cell::from(pretty_when(&thread.last_message_at)).style(Style::default().fg(DIM)),
                 Cell::from(
                     thread

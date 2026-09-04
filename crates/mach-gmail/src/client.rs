@@ -35,6 +35,13 @@ impl GmailClient {
         let creds = credentials::load(account)
             .context("loading stored credentials")?
             .ok_or_else(|| anyhow!("no credentials for {account} — run `mach auth login` first"))?;
+        Self::from_credentials(config, creds)
+    }
+
+    pub(crate) fn from_credentials(
+        config: OAuthConfig,
+        creds: StoredCredentials,
+    ) -> Result<Arc<Self>> {
         let http = Client::builder()
             .gzip(true)
             .user_agent(concat!("mach/", env!("CARGO_PKG_VERSION")))

@@ -67,6 +67,7 @@ one time-sorted inbox and shows the owning address and date on each row:
 Configure signatures in the platform config directory's `config.toml` under
 `[signatures]`; use `default = "Your name"` as a fallback and
 `"me@work.com" = "Work signature"` for an account-specific signature.
+Configure account nicknames in the same file under `[accounts]` as `"me@work.com" = "Work"`.
 
 ```sh
 mach                         # unified inbox

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
@@ -134,7 +134,7 @@ pub struct BodyFetcher {
 /// authenticated Gmail client may read remote data for a cached account.
 #[derive(Default)]
 pub struct GmailAccountPool {
-    fetchers: HashMap<AccountId, Arc<BodyFetcher>>,
+    fetchers: RwLock<HashMap<AccountId, Arc<BodyFetcher>>>,
 }
 
 #[derive(Debug, Default)]
@@ -278,23 +278,67 @@ impl GmailAccountPool {
                 }
             }
         }
-        Ok(Self { fetchers })
+        Ok(Self {
+            fetchers: RwLock::new(fetchers),
+        })
     }
 
-    pub fn get(&self, account: &AccountId) -> Option<&Arc<BodyFetcher>> {
-        self.fetchers.get(account)
+    pub async fn add(
+        &self,
+        credentials: &crate::StoredCredentials,
+        store: Arc<SqliteStore>,
+    ) -> Result<()> {
+        let config = crate::config::OAuthConfig::load()?;
+        self.add_with_config(credentials, config, store)
     }
 
-    pub fn accounts(&self) -> impl Iterator<Item = &AccountId> {
-        self.fetchers.keys()
+    fn add_with_config(
+        &self,
+        credentials: &crate::StoredCredentials,
+        config: crate::config::OAuthConfig,
+        store: Arc<SqliteStore>,
+    ) -> Result<()> {
+        let account = AccountId::new(credentials.email.clone());
+        let client = GmailClient::from_credentials(config, credentials.clone())?;
+        self.fetchers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                account.clone(),
+                Arc::new(BodyFetcher::new(account, client, store)),
+            );
+        Ok(())
+    }
+
+    pub fn get(&self, account: &AccountId) -> Option<Arc<BodyFetcher>> {
+        self.fetchers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(account)
+            .cloned()
+    }
+
+    pub fn accounts(&self) -> impl Iterator<Item = AccountId> {
+        self.fetchers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.fetchers.is_empty()
+        self.fetchers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
     }
 
     pub fn pubsub_client(&self) -> Option<Arc<GmailClient>> {
         self.fetchers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .next()
             .map(|fetcher| fetcher.client.clone())
@@ -306,6 +350,8 @@ impl GmailAccountPool {
     pub async fn pull_updates(&self, scope: &AccountScope) -> PullReport {
         let selected: Vec<_> = self
             .fetchers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter(|(account, _)| scope.account().map_or(true, |wanted| wanted == *account))
             .map(|(account, fetcher)| (account.clone(), fetcher.clone()))
@@ -351,6 +397,8 @@ impl GmailAccountPool {
     ) -> RemoteSearchReport {
         let selected: Vec<_> = self
             .fetchers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter(|(account, _)| scope.account().map_or(true, |wanted| wanted == *account))
             .map(|(account, fetcher)| (account.clone(), fetcher.clone()))
@@ -402,6 +450,8 @@ impl GmailAccountPool {
     ) -> Result<crate::sync::LoadOlderStats> {
         let selected: Vec<_> = self
             .fetchers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter(|(account, _)| scope.account().map_or(true, |wanted| wanted == *account))
             .map(|(account, fetcher)| (account.clone(), fetcher.clone()))
@@ -479,5 +529,39 @@ fn parse_message_into_update(m: &RemoteMessage, parsed: &ParsedBody) -> MessageB
         body_html,
         calendar_ics: parsed.calendar.clone(),
         inline_images_json,
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[test]
+    fn add_makes_account_visible() {
+        let store = Arc::new(SqliteStore::new(mach_store::open_in_memory().unwrap()));
+        let credentials = crate::StoredCredentials {
+            email: "new@example.com".into(),
+            refresh_token: "refresh".into(),
+            access_token: "access".into(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            needs_reauth: None,
+        };
+        let pool = GmailAccountPool::default();
+
+        pool.add_with_config(
+            &credentials,
+            crate::OAuthConfig {
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+            },
+            store,
+        )
+        .unwrap();
+
+        let account = AccountId::new("new@example.com");
+        assert_eq!(pool.accounts().collect::<Vec<_>>(), vec![account.clone()]);
+        assert!(pool.get(&account).is_some());
     }
 }

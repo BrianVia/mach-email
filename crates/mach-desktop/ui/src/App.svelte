@@ -15,6 +15,7 @@
   import { splitOf, type Split } from "./lib/split";
   import {
     dispatchAction,
+    addAccount,
     fetchAccountStatus,
     fetchKeymapSources,
     fetchOutboxSummary,
@@ -95,6 +96,10 @@
   let pendingNotificationThread: ThreadSummary | null = null;
   const notificationThreads = new Map<string, ThreadSummary>();
   let sendLaterOptions = $state<[string, string][]>([]);
+
+  function accountLabel(email: string) {
+    return status?.account_labels[email] ?? settings.account_labels?.[email] ?? email;
+  }
 
   function composerTitle(draft: Draft) {
     if (draft.in_reply_to_message_id) return "Reply";
@@ -444,6 +449,7 @@
     const commands = [...byLabel.values()];
     if (background.kind === "thread") commands.push({ label: "Copy as Markdown", chord: "ctrl+shift+c" });
     commands.push({ label: "Retry failed changes", chord: "retry" });
+    commands.push({ label: "Add account…", chord: "add-account" });
     commands.push(
       { label: "Notifications: on", chord: "on" },
       { label: "Notifications: off", chord: "off" },
@@ -483,6 +489,10 @@
       void retryFailedChanges();
       return;
     }
+    if (command.label === "Add account…") {
+      void addAccountFromApp();
+      return;
+    }
     if (command.label.startsWith("Notifications: ")) {
       const enabled = command.label.endsWith("on");
       localStorage.setItem("mach.notifications", enabled ? "on" : "off");
@@ -501,6 +511,22 @@
       if (report.failed > 0) showActionError(report.last_error ?? "Outbox retry failed");
       else showNotice(`${retried} failed change(s) retried`);
     } catch (error) {
+      showActionError(error);
+    }
+  }
+
+  async function addAccountFromApp() {
+    if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
+    notice = "Finish signing in in your browser…";
+    noticePath = null;
+    try {
+      const email = await addAccount();
+      await refreshStatus();
+      labels = await listLabels();
+      await refreshInboxPreservingSelection();
+      showNotice(`Added ${accountLabel(email)}`);
+    } catch (error) {
+      notice = null;
       showActionError(error);
     }
   }
@@ -1038,7 +1064,9 @@
 <Shell
   {title}
   {subtitle}
-  accountEmail={status?.email}
+  accountEmail={status?.accounts.length === 1 ? status.accounts[0] : status?.email}
+  accountLabel={status?.accounts.length === 1 ? accountLabel(status.accounts[0]) : status?.email}
+  onAddAccount={() => void addAccountFromApp()}
   online={allAccountsSynced}
   {outbox}
   {activeLabel}
@@ -1058,6 +1086,7 @@
       }}
       onOpen={(index) => void openInboxRow(index)}
       onLoadOlder={loadOlderMail}
+      {accountLabel}
     />
   {:else if view.kind === "scheduled"}
     <Scheduled
@@ -1086,6 +1115,7 @@
       onClose={closeComposer}
       onError={showActionError}
       {snippets}
+      fromLabel={accountLabel(view.draft.account_id)}
     />
   {:else if view.kind === "search"}
     <SearchOverlay

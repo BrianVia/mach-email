@@ -30,7 +30,6 @@ pub struct AppState {
     pub body_fetchers: Arc<GmailAccountPool>,
     pub default_keymap_toml: String,
     pub user_keymap_toml: Option<String>,
-    pub account_emails: Vec<String>,
     pub synced_accounts: Arc<Mutex<HashSet<AccountId>>>,
     pub user_config: UserConfig,
 }
@@ -116,8 +115,6 @@ async fn main() -> Result<()> {
             Arc::new(GmailAccountPool::default())
         }
     };
-    let account_emails = accounts.into_iter().map(|account| account.email).collect();
-
     let state = AppState {
         store,
         scope,
@@ -125,7 +122,6 @@ async fn main() -> Result<()> {
         body_fetchers,
         default_keymap_toml: mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string(),
         user_keymap_toml: load_user_keymap_toml(),
-        account_emails,
         synced_accounts: Arc::new(Mutex::new(HashSet::new())),
         user_config,
     };
@@ -196,6 +192,7 @@ async fn main() -> Result<()> {
             commands::settings,
             commands::snippets,
             commands::account_status,
+            commands::add_account,
             commands::flush_outbox,
             commands::unsubscribe_post,
             commands::unsubscribe_mailto,
@@ -237,12 +234,7 @@ async fn serve_mach_uri(
     };
 
     let account_id = mach_core::ids::AccountId::new(account);
-    let Some(fetcher) = app
-        .state::<AppState>()
-        .body_fetchers
-        .get(&account_id)
-        .cloned()
-    else {
+    let Some(fetcher) = app.state::<AppState>().body_fetchers.get(&account_id) else {
         return Response::builder()
             .status(503)
             .body(b"offline - account unavailable".to_vec())

@@ -46,12 +46,14 @@ pub struct App {
     pub store: Arc<SqliteStore>,
     pub scope: AccountScope,
     pub dispatcher: Dispatcher,
+    pub user_config: UserConfig,
     snippets: BTreeMap<String, String>,
     /// Body fetcher is optional — if creds are missing we run offline,
     /// serving whatever's already cached.
     pub body_fetchers: Arc<mach_gmail::GmailAccountPool>,
     pub hyperlinks: Arc<HyperlinkRegistry>,
     search_events: Option<mpsc::UnboundedSender<SearchEvent>>,
+    account_events: Option<mpsc::UnboundedSender<AccountEvent>>,
     remote_search_task: Option<tokio::task::JoinHandle<()>>,
 
     pub view: View,
@@ -169,6 +171,8 @@ struct SearchEvent {
     report: mach_gmail::RemoteSearchReport,
 }
 
+struct AccountEvent(Result<String, String>);
+
 impl App {
     pub async fn new(
         store: Arc<SqliteStore>,
@@ -177,8 +181,8 @@ impl App {
     ) -> Result<Self> {
         let keymap = load_keymap()?;
         let snippets = user_config.snippets.clone();
-        let dispatcher =
-            Dispatcher::with_scope(store.clone(), scope.clone()).with_user_config(user_config);
+        let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone())
+            .with_user_config(user_config.clone());
 
         // Try to construct a body fetcher; if OAuth creds aren't set up,
         // boot offline. The user can still browse cached mail.
@@ -206,7 +210,7 @@ impl App {
             .collect::<Vec<_>>();
 
         let account = match &scope {
-            AccountScope::One(account) => account.to_string(),
+            AccountScope::One(account) => user_config.account_label(account.as_str()).to_string(),
             AccountScope::All if !body_fetchers.is_empty() => {
                 format!("All accounts ({})", body_fetchers.accounts().count())
             }
@@ -232,10 +236,12 @@ impl App {
             store,
             scope,
             dispatcher,
+            user_config,
             snippets,
             body_fetchers,
             hyperlinks,
             search_events: None,
+            account_events: None,
             remote_search_task: None,
             view,
             status,
@@ -380,6 +386,8 @@ pub async fn run_with_user_config(
     let mut app = App::new(store, scope, user_config).await?;
     let (search_tx, mut search_rx) = mpsc::unbounded_channel();
     app.search_events = Some(search_tx);
+    let (account_tx, mut account_rx) = mpsc::unbounded_channel();
+    app.account_events = Some(account_tx);
 
     // Terminal setup.
     enable_raw_mode().context("enable_raw_mode")?;
@@ -404,7 +412,14 @@ pub async fn run_with_user_config(
             ))
         })
     });
-    let result = main_loop(&mut app, &mut terminal, &mut pull_rx, &mut search_rx).await;
+    let result = main_loop(
+        &mut app,
+        &mut terminal,
+        &mut pull_rx,
+        &mut search_rx,
+        &mut account_rx,
+    )
+    .await;
     pull_task.abort();
     if let Some(task) = push_task {
         task.abort();
@@ -431,6 +446,7 @@ async fn main_loop(
     terminal: &mut Terminal<crate::backend::HyperlinkBackend<io::Stdout>>,
     pull_events: &mut mpsc::UnboundedReceiver<PullEvent>,
     search_events: &mut mpsc::UnboundedReceiver<SearchEvent>,
+    account_events: &mut mpsc::UnboundedReceiver<AccountEvent>,
 ) -> Result<()> {
     // Initial draw before we block on input.
     terminal.draw(|f| draw(f, app)).context("initial draw")?;
@@ -461,6 +477,9 @@ async fn main_loop(
             }
             Some(event) = search_events.recv() => {
                 handle_search_event(app, event);
+            }
+            Some(event) = account_events.recv() => {
+                handle_account_event(app, event).await;
             }
         }
         terminal.draw(|f| draw(f, app)).context("draw")?;
@@ -603,6 +622,20 @@ fn handle_search_event(app: &mut App, event: SearchEvent) {
     search.remote_failures = event.report.failures.len();
     for (account, error) in event.report.failures {
         warn!(account = %account, error, "remote search failed");
+    }
+}
+
+async fn handle_account_event(app: &mut App, AccountEvent(result): AccountEvent) {
+    match result {
+        Ok(email) => {
+            app.status.hint = format!("Added {email}");
+            if matches!(app.scope, AccountScope::All) {
+                app.status.account =
+                    format!("All accounts ({})", app.body_fetchers.accounts().count());
+            }
+            refresh_visible_inbox(app).await;
+        }
+        Err(error) => app.status.hint = error,
     }
 }
 
@@ -837,6 +870,29 @@ async fn activity_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
 }
 
 async fn execute_adapter_action(app: &mut App, action: &str) {
+    if action == "add_account" {
+        app.status.hint = "Finish signing in in your browser…".into();
+        let Some(events) = app.account_events.clone() else {
+            return;
+        };
+        let store = app.store.clone();
+        let accounts = app.body_fetchers.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let credentials = mach_gmail::add_account(store.clone())
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                accounts
+                    .add(&credentials, store)
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                Ok(credentials.email)
+            }
+            .await;
+            let _ = events.send(AccountEvent(result));
+        });
+        return;
+    }
     if action == "load_older" {
         load_older_mail(app).await;
         return;
