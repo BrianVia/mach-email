@@ -26,6 +26,7 @@
 "k"        = "select_prev"
 "down"     = "select_next"
 "up"       = "select_prev"
+"shift+l"  = "load_older"
 
 # Inbox categories (adapter-resolved; no dispatcher action)
 "1"        = "inbox_split_important"

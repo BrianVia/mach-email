@@ -64,6 +64,10 @@ account is bootstrapped automatically. A later `mach sync` also bootstraps any
 account missing its initial cursor. The default TUI merges every account into
 one time-sorted inbox and shows the owning address and date on each row:
 
+Configure signatures in the platform config directory's `config.toml` under
+`[signatures]`; use `default = "Your name"` as a fallback and
+`"me@work.com" = "Work signature"` for an account-specific signature.
+
 ```sh
 mach                         # unified inbox
 mach --account me@work.com   # one account

@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use mach_core::ids::AccountId;
 use mach_core::ids::AccountScope;
+use mach_core::UserConfig;
 use mach_store::SqliteStore;
 
 pub fn db_path() -> Result<PathBuf> {
@@ -21,6 +22,12 @@ pub fn account_scope(account: Option<&str>) -> AccountScope {
     account
         .map(|email| AccountScope::One(AccountId::new(email)))
         .unwrap_or_default()
+}
+
+pub fn user_config() -> Result<UserConfig> {
+    let dirs = ProjectDirs::from("com", "via", "mach")
+        .context("could not resolve OS configuration directory")?;
+    UserConfig::load(&dirs.config_dir().join("config.toml")).context("loading user config")
 }
 
 pub async fn open_store() -> Result<Arc<SqliteStore>> {

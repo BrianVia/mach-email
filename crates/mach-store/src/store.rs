@@ -61,6 +61,43 @@ impl SqliteStore {
         .await
         .map_err(map_err)?
     }
+
+    pub async fn get_meta(&self, key: &str) -> CoreResult<Option<String>> {
+        let pool = self.pool.clone();
+        let key = key.to_string();
+        spawn_blocking(move || -> CoreResult<Option<String>> {
+            pool.get()
+                .map_err(map_err)?
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![key],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map(Option::flatten)
+                .map_err(map_err)
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    pub async fn set_meta(&self, key: &str, value: &str) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let key = key.to_string();
+        let value = value.to_string();
+        spawn_blocking(move || -> CoreResult<()> {
+            pool.get()
+                .map_err(map_err)?
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)\n                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )
+                .map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
 }
 
 /// Inputs the sync engine writes during bootstrap / incremental updates.
@@ -2202,6 +2239,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(message.headers, Some(headers));
+    }
+
+    #[tokio::test]
+    async fn meta_round_trips() {
+        let store = SqliteStore::new(open_in_memory().unwrap());
+
+        assert_eq!(store.get_meta("cursor").await.unwrap(), None);
+        store.set_meta("cursor", "123").await.unwrap();
+        assert_eq!(
+            store.get_meta("cursor").await.unwrap().as_deref(),
+            Some("123")
+        );
+        store.set_meta("cursor", "456").await.unwrap();
+        assert_eq!(
+            store.get_meta("cursor").await.unwrap().as_deref(),
+            Some("456")
+        );
     }
 
     #[tokio::test]

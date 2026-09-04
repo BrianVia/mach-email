@@ -261,6 +261,7 @@ fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {
         .constraints([
             Constraint::Length(1), // To
             Constraint::Length(1), // Cc
+            Constraint::Length(1), // Bcc
             Constraint::Length(1), // Subject
             Constraint::Length(1), // separator
             Constraint::Min(1),    // Body
@@ -294,12 +295,16 @@ fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {
         chunks[1],
     );
     f.render_widget(
-        field("Subject:", &v.subject, v.field == ComposerField::Subject),
+        field("Bcc:    ", &v.bcc, v.field == ComposerField::Bcc),
         chunks[2],
     );
     f.render_widget(
-        Paragraph::new(Line::styled(" ─────", Style::default().fg(DIM))),
+        field("Subject:", &v.subject, v.field == ComposerField::Subject),
         chunks[3],
+    );
+    f.render_widget(
+        Paragraph::new(Line::styled(" ─────", Style::default().fg(DIM))),
+        chunks[4],
     );
     f.render_widget(
         Paragraph::new(v.body.clone())
@@ -309,7 +314,7 @@ fn draw_composer(f: &mut Frame, v: &ComposerView, area: Rect) {
             } else {
                 Style::default().fg(DIM)
             }),
-        chunks[4],
+        chunks[5],
     );
 }
 

@@ -16,6 +16,7 @@ pub mod mock;
 pub mod search_query;
 pub mod state;
 pub mod store;
+pub mod user_config;
 
 pub use action::{Action, ActionOutcome, DraftPatch, OpId};
 pub use dispatcher::Dispatcher;
@@ -29,3 +30,4 @@ pub use state::AppState;
 pub use store::{
     InlineImageRow, MailRemote, MailStore, MessageHeaders, OutboxOp, OutboxOpKind, OutboxSummary,
 };
+pub use user_config::UserConfig;

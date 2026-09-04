@@ -610,6 +610,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compose_new_appends_configured_signature() {
+        let store = Arc::new(InMemoryStore::new());
+        let account = AccountId::new("test@example.com");
+        let config = crate::UserConfig {
+            signatures: [(account.to_string(), "Test Person".into())].into(),
+        };
+        let dispatcher =
+            Dispatcher::with_scope(store, AccountScope::One(account)).with_user_config(config);
+
+        let outcome = dispatcher.execute(Action::ComposeNew).await.unwrap();
+        let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
+        assert_eq!(draft.body_md, "\n\nTest Person");
+    }
+
+    #[tokio::test]
     async fn all_accounts_scope_saves_and_sends_draft_from_non_default_account() {
         let store = Arc::new(InMemoryStore::new());
         let default_account = AccountId::new("default@example.com");
@@ -690,6 +705,29 @@ mod tests {
         let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
         assert_eq!(draft.thread_id, Some(source.thread_id));
         assert_eq!(draft.in_reply_to_message_id, Some(source.id));
+    }
+
+    #[tokio::test]
+    async fn reply_places_signature_before_quote() {
+        let store = Arc::new(InMemoryStore::new());
+        let source = seed_message(&store);
+        let config = crate::UserConfig {
+            signatures: [("default".into(), "Test Person".into())].into(),
+        };
+        let dispatcher =
+            Dispatcher::with_scope(store, AccountScope::One(source.account_id.clone()))
+                .with_user_config(config);
+
+        let outcome = dispatcher
+            .execute(Action::Reply {
+                message_id: source.id,
+                all: false,
+            })
+            .await
+            .unwrap();
+        let draft: Draft = serde_json::from_value(outcome.data.unwrap()["draft"].clone()).unwrap();
+        assert!(draft.body_md.starts_with("\n\nTest Person\n\nOn "));
+        assert!(draft.body_md.ends_with("\n> Can you help?"));
     }
 
     #[tokio::test]

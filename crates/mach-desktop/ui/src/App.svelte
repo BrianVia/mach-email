@@ -12,6 +12,7 @@
     fetchSettings,
     flushOutbox,
     listLabels,
+    loadOlder,
     listThreads,
     openThread as openThreadIpc,
     refetchThread as refetchThreadIpc,
@@ -37,12 +38,12 @@
   import Palette from "./views/Palette.svelte";
   import ChordOverlay from "./views/ChordOverlay.svelte";
 
-  const INBOX_LIMIT = 1000;
+  const INITIAL_LIST_LIMIT = 1000;
 
-  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number };
+  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
   type ThreadOrigin = { threads: ThreadSummary[]; index: number };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
-  type ComposerFields = { to: string; cc: string; subject: string; body_md: string };
+  type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
   type SearchView = { kind: "search"; query: string; results: ThreadSummary[]; selected: number; background: AppView };
   type PaletteView = { kind: "palette"; query: string; selected: number; background: AppView };
@@ -50,7 +51,7 @@
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
-  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0 });
+  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0, limit: INITIAL_LIST_LIMIT });
   let inboxSplit = $state<Split>("important");
   let keymap = $state<Keymap | null>(null);
   let bootError = $state<string | null>(null);
@@ -63,14 +64,20 @@
   let settings = $state<Settings>({});
   let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
-  let composerFields: ComposerFields = { to: "", cc: "", subject: "", body_md: "" };
+  let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "" };
+
+  function composerTitle(draft: Draft) {
+    if (draft.in_reply_to_message_id) return "Reply";
+    if (draft.subject.startsWith("Fwd:")) return "Forward";
+    return "New message";
+  }
   let actionErrorTimer: number | undefined;
   let noticeTimer: number | undefined;
 
   let title = $derived.by(() => {
     if (view.kind === "inbox") return labelDisplay(view.label);
     if (view.kind === "thread") return view.thread.subject || "(no subject)";
-    if (view.kind === "composer") return "New message";
+    if (view.kind === "composer") return composerTitle(view.draft);
     return "Search";
   });
 
@@ -145,9 +152,9 @@
         console.error("[mach] keymap parse failed:", error);
         bootError = `keymap parse: ${(error as Error).message ?? error}`;
       }
-      const threads = await listThreads("INBOX", INBOX_LIMIT);
+      const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
       console.log(`[mach] loaded ${threads.length} threads`);
-      view = { kind: "inbox", label: "INBOX", threads, selected: 0 };
+      view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT };
     } catch (error) {
       console.error("[mach]", error);
       bootError = `boot failed: ${(error as Error).message ?? error}`;
@@ -174,7 +181,7 @@
     const currentView = view;
     if (currentView.kind !== "inbox") return;
     const selectedId = visibleInboxThreads(currentView)[currentView.selected]?.id;
-    const threads = await listThreads(currentView.label, INBOX_LIMIT);
+    const threads = await listThreads(currentView.label, currentView.limit);
     if (view.kind !== "inbox" || view.label !== currentView.label) return;
     const visible = visibleInboxThreads({ ...currentView, threads });
     const preserved = selectedId
@@ -415,12 +422,12 @@
             closeComposer();
             return;
           }
-          const threads = await listThreads("INBOX", INBOX_LIMIT);
+          const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
           let selected = 0;
           if (currentView.kind === "thread" && currentView.origin) {
             const { origin } = currentView;
             const selectedId = origin.threads[origin.index]?.id;
-            const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0 });
+            const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT });
             const preserved = selectedId
               ? visible.findIndex((thread) => thread.id === selectedId)
               : -1;
@@ -428,7 +435,7 @@
               ? preserved
               : clamp(origin.index, 0, visible.length - 1);
           }
-          view = { kind: "inbox", label: "INBOX", threads, selected };
+          view = { kind: "inbox", label: "INBOX", threads, selected, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "select_next":
@@ -496,8 +503,8 @@
         }
         case "open_label": {
           const label = action.label_id as string;
-          const threads = await listThreads(label, INBOX_LIMIT);
-          view = { kind: "inbox", label, threads, selected: 0 };
+          const threads = await listThreads(label, INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label, threads, selected: 0, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "search":
@@ -531,8 +538,8 @@
         if (next) {
           await openThreadView(next, { threads: remaining, index: nextIndex });
         } else {
-          const fresh = await listThreads("INBOX", INBOX_LIMIT);
-          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0 };
+          const fresh = await listThreads("INBOX", INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0, limit: INITIAL_LIST_LIMIT };
         }
         return;
       }
@@ -560,8 +567,8 @@
       }
 
       if (isArchiveOrTrash && currentView.kind === "thread") {
-        const threads = await listThreads("INBOX", INBOX_LIMIT);
-        const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0 });
+        const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
+        const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT });
         const at = visible.findIndex((thread) => thread.id === currentView.thread.id);
         // The archived thread is usually gone from the refreshed list; the
         // thread now occupying its date-sorted position is the "next" one.
@@ -571,12 +578,12 @@
         const fallback = at >= 0
           ? Math.min(at, visible.length - 1)
           : successor >= 0 ? successor : Math.max(0, visible.length - 1);
-        view = { kind: "inbox", label: "INBOX", threads, selected: fallback };
+        view = { kind: "inbox", label: "INBOX", threads, selected: fallback, limit: INITIAL_LIST_LIMIT };
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
         const selectedId = visibleInboxThreads(currentView)[currentView.selected]?.id;
-        const threads = await listThreads(currentView.label, INBOX_LIMIT);
+        const threads = await listThreads(currentView.label, currentView.limit);
         const visible = visibleInboxThreads({ ...currentView, threads });
         const preserved = selectedId ? visible.findIndex((thread) => thread.id === selectedId) : -1;
         view = {
@@ -633,6 +640,7 @@
     return {
       to: draft.to.join(", "),
       cc: draft.cc.join(", "),
+      bcc: draft.bcc.join(", "),
       subject: draft.subject,
       body_md: draft.body_md,
     };
@@ -642,6 +650,7 @@
     return {
       to: parseRecipients(composerFields.to),
       cc: parseRecipients(composerFields.cc),
+      bcc: parseRecipients(composerFields.bcc),
       subject: composerFields.subject,
       body_md: composerFields.body_md,
     };
@@ -728,6 +737,25 @@
     }
   }
 
+  async function loadOlderMail(): Promise<number | null> {
+    const currentView = view;
+    if (currentView.kind !== "inbox") return null;
+    const beforeMs = Date.parse(currentView.threads.at(-1)?.last_message_at ?? "");
+    if (!Number.isFinite(beforeMs)) return 0;
+    try {
+      const stats = await loadOlder(currentView.label, beforeMs);
+      const limit = currentView.limit + 200;
+      const threads = await listThreads(currentView.label, limit);
+      if (view.kind === "inbox" && view.label === currentView.label) {
+        view = { ...view, threads, limit };
+      }
+      return stats.fetched;
+    } catch (error) {
+      showActionError(error);
+      return null;
+    }
+  }
+
   onMount(() => {
     void boot();
     void refreshStatus();
@@ -802,12 +830,14 @@
         if (view.kind === "inbox") view = { ...view, selected };
       }}
       onOpen={(index) => void openInboxRow(index)}
+      onLoadOlder={loadOlderMail}
     />
   {:else if view.kind === "thread"}
     <ThreadReader v={view} />
   {:else if view.kind === "composer"}
     <Composer
       draft={view.draft}
+      title={composerTitle(view.draft)}
       onFieldsChange={(fields) => (composerFields = fields)}
       onSend={() => void runAction({ kind: "send_draft", draft_id: view.kind === "composer" ? view.draft.id : "" })}
       onClose={closeComposer}
