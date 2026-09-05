@@ -6,11 +6,18 @@
 //! `get_thread_metadata`. Mutating endpoints (modify, send, drafts) come
 //! with the outbox-drain follow-up.
 
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use reqwest::{Client, StatusCode};
+use reqwest::{header::RETRY_AFTER, Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
@@ -21,6 +28,57 @@ use crate::oauth;
 
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 const PUBSUB_BASE: &str = "https://pubsub.googleapis.com/v1";
+const MAX_RATE_LIMIT_RETRIES: u8 = 6;
+static JITTER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn is_retryable_rate_limit(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS
+        || (status == StatusCode::FORBIDDEN
+            && (body.contains("rateLimitExceeded") || body.contains("RATE_LIMIT_EXCEEDED")))
+}
+
+async fn retry_rate_limit(
+    status: StatusCode,
+    body: &str,
+    retry_after: Option<&str>,
+    attempt: u8,
+) -> bool {
+    if attempt >= MAX_RATE_LIMIT_RETRIES || !is_retryable_rate_limit(status, body) {
+        return false;
+    }
+
+    let jitter = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ JITTER_SEQUENCE
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0x9e3779b97f4a7c15))
+        % 1_000;
+    let backoff = Duration::from_millis(((2_000u64 << attempt) + jitter).min(60_000));
+    let retry_after = retry_after.and_then(|value| {
+        value
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .ok()
+            .or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(value)
+                    .ok()?
+                    .signed_duration_since(chrono::Utc::now())
+                    .to_std()
+                    .ok()
+            })
+    });
+    let delay = retry_after.map_or(backoff, |delay| delay.max(backoff));
+    warn!(
+        status = status.as_u16(),
+        attempt = attempt + 1,
+        ?delay,
+        "Gmail rate limited request; retrying"
+    );
+    tokio::time::sleep(delay).await;
+    true
+}
 
 pub struct GmailClient {
     config: OAuthConfig,
@@ -100,30 +158,43 @@ impl GmailClient {
         // One retry on 401 — covers the case where the cached access_token
         // got invalidated server-side (revoked, password change, etc.) faster
         // than the local expires_at suggests.
-        for attempt in 0..2u8 {
+        let mut refreshed = false;
+        let mut rate_attempt = 0;
+        loop {
             let token = self.access_token().await?;
             let resp = self.http.get(url).bearer_auth(&token).send().await?;
             match resp.status() {
                 StatusCode::OK => return resp.json().await.context("parsing JSON response"),
-                StatusCode::UNAUTHORIZED if attempt == 0 => {
+                StatusCode::UNAUTHORIZED if !refreshed => {
                     warn!("got 401, forcing token refresh and retrying");
                     self.refresh().await?;
+                    refreshed = true;
                     continue;
                 }
                 s => {
+                    let retry_after = resp
+                        .headers()
+                        .get(RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
                     let body = resp.text().await.unwrap_or_default();
+                    if retry_rate_limit(s, &body, retry_after.as_deref(), rate_attempt).await {
+                        rate_attempt += 1;
+                        continue;
+                    }
                     bail!("HTTP {s} from {url}: {body}");
                 }
             }
         }
-        unreachable!()
     }
 
     async fn get_json_optional<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
     ) -> Result<Option<T>> {
-        for attempt in 0..2u8 {
+        let mut refreshed = false;
+        let mut rate_attempt = 0;
+        loop {
             let token = self.access_token().await?;
             let resp = self.http.get(url).bearer_auth(&token).send().await?;
             match resp.status() {
@@ -131,17 +202,26 @@ impl GmailClient {
                     return resp.json().await.context("parsing JSON response").map(Some)
                 }
                 StatusCode::NOT_FOUND => return Ok(None),
-                StatusCode::UNAUTHORIZED if attempt == 0 => {
+                StatusCode::UNAUTHORIZED if !refreshed => {
                     warn!("got 401, forcing token refresh and retrying");
                     self.refresh().await?;
+                    refreshed = true;
                 }
                 status => {
+                    let retry_after = resp
+                        .headers()
+                        .get(RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
                     let body = resp.text().await.unwrap_or_default();
+                    if retry_rate_limit(status, &body, retry_after.as_deref(), rate_attempt).await {
+                        rate_attempt += 1;
+                        continue;
+                    }
                     bail!("HTTP {status} from {url}: {body}");
                 }
             }
         }
-        unreachable!()
     }
 
     pub async fn get_profile(&self) -> Result<Profile> {
@@ -273,7 +353,9 @@ impl GmailClient {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<T> {
-        for attempt in 0..2u8 {
+        let mut refreshed = false;
+        let mut rate_attempt = 0;
+        loop {
             let token = self.access_token().await?;
             let resp = self
                 .http
@@ -292,18 +374,27 @@ impl GmailClient {
                     }
                     return resp.json().await.context("parsing POST response");
                 }
-                StatusCode::UNAUTHORIZED if attempt == 0 => {
+                StatusCode::UNAUTHORIZED if !refreshed => {
                     warn!("got 401 on POST; forcing refresh + retry");
                     self.refresh().await?;
+                    refreshed = true;
                     continue;
                 }
                 s => {
+                    let retry_after = resp
+                        .headers()
+                        .get(RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
                     let body = resp.text().await.unwrap_or_default();
+                    if retry_rate_limit(s, &body, retry_after.as_deref(), rate_attempt).await {
+                        rate_attempt += 1;
+                        continue;
+                    }
                     bail!("HTTP {s} from POST {url}: {body}");
                 }
             }
         }
-        unreachable!()
     }
 
     /// GET `users/me/history?startHistoryId=X&historyTypes=...`. Returns
@@ -328,26 +419,37 @@ impl GmailClient {
     }
 
     async fn get_json_with_404<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
-        for attempt in 0..2u8 {
+        let mut refreshed = false;
+        let mut rate_attempt = 0;
+        loop {
             let token = self.access_token().await?;
             let resp = self.http.get(url).bearer_auth(&token).send().await?;
             match resp.status() {
                 StatusCode::OK => return resp.json().await.context("parsing JSON response"),
-                StatusCode::UNAUTHORIZED if attempt == 0 => {
+                StatusCode::UNAUTHORIZED if !refreshed => {
                     warn!("got 401, forcing token refresh and retrying");
                     self.refresh().await?;
+                    refreshed = true;
                     continue;
                 }
                 StatusCode::NOT_FOUND => {
                     bail!("HTTP 404 (history gap — cursor too old)");
                 }
                 s => {
+                    let retry_after = resp
+                        .headers()
+                        .get(RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
                     let body = resp.text().await.unwrap_or_default();
+                    if retry_rate_limit(s, &body, retry_after.as_deref(), rate_attempt).await {
+                        rate_attempt += 1;
+                        continue;
+                    }
                     bail!("HTTP {s} from {url}: {body}");
                 }
             }
         }
-        unreachable!()
     }
 
     pub async fn get_thread_metadata(&self, id: &str) -> Result<RemoteThread> {
@@ -637,5 +739,18 @@ mod tests {
                 history_id: "987".into(),
             }
         );
+    }
+
+    #[test]
+    fn identifies_retryable_rate_limits() {
+        assert!(is_retryable_rate_limit(
+            StatusCode::FORBIDDEN,
+            r#"{"reason":"rateLimitExceeded"}"#
+        ));
+        assert!(!is_retryable_rate_limit(
+            StatusCode::FORBIDDEN,
+            r#"{"reason":"forbidden"}"#
+        ));
+        assert!(is_retryable_rate_limit(StatusCode::TOO_MANY_REQUESTS, ""));
     }
 }

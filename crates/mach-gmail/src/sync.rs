@@ -22,7 +22,8 @@ use crate::client::{GmailClient, HistoryRecord, RemoteMessage, RemoteThread};
 use crate::outbox::{DrainStats, OutboxWorker};
 
 const BOOTSTRAP_QUERY: &str = "newer_than:30d";
-const BOOTSTRAP_CONCURRENCY: usize = 10;
+// Gmail allows 6000 quota units/min/user; keep bootstrap fan-out conservative.
+const BOOTSTRAP_CONCURRENCY: usize = 8;
 const WATCH_RENEWAL_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
 
 pub fn should_renew(expiration_ms: Option<i64>, now_ms: i64) -> bool {
@@ -73,7 +74,7 @@ pub struct TickReport {
     pub incremental: Option<IncrementalStats>,
 }
 
-/// Run one complete non-bootstrap sync pass for an authenticated account.
+/// Run one complete sync pass for an authenticated account.
 ///
 /// This is the sole owner of ordering scheduled local work, pushing queued
 /// mutations, and then pulling Gmail history. Adapters decide when to call it
@@ -135,13 +136,18 @@ pub async fn sync_account_tick(
 
     let outbox = OutboxWorker::new(account.clone(), client.clone(), store.clone());
     let outbox = outbox.drain_once(200).await?;
-    let incremental = incremental_sync(client, store).await?;
+    let incremental = if store.get_history_cursor(account).await?.is_some() {
+        Some(incremental_sync(client, store).await?)
+    } else {
+        bootstrap(client, store).await?;
+        None
+    };
 
     Ok(TickReport {
         unsnoozed: due.len(),
         sends_fired,
         outbox,
-        incremental: Some(incremental),
+        incremental,
     })
 }
 
@@ -365,9 +371,7 @@ pub async fn bootstrap(
     }
     info!(count = stubs.len(), "thread stubs listed");
 
-    // 4. Fetch metadata for each stub. Bounded concurrency — Gmail caps at
-    //    ~250 concurrent connections per user, but bootstrap should stay
-    //    well-mannered. 10 in flight gives ~10x speedup without aggression.
+    // 4. Fetch metadata for each stub with bounded concurrency.
     let hydrated = fetch_and_upsert_threads(
         client.clone(),
         store.clone(),
