@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod debug_server;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -140,6 +141,9 @@ async fn main() -> Result<()> {
         .setup(|app| {
             use tauri::Manager;
 
+            if let Some(window) = app.get_webview_window("main") {
+                debug_server::start(window);
+            }
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>();
             let body_fetchers = state.body_fetchers.clone();
@@ -186,6 +190,7 @@ async fn main() -> Result<()> {
         })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            commands::frontend_log,
             commands::dispatch_action,
             commands::list_threads,
             commands::list_labels,

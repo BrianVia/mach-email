@@ -1,6 +1,7 @@
 /* @refresh reload */
 import { mount } from "svelte";
 import App from "./App.svelte";
+import "./lib/debug";
 import "./aurora/theme.css";
 import "./aurora/mach.css";
 

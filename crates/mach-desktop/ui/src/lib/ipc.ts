@@ -7,9 +7,14 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 // plain browser tab (for frontend-only debugging), `invoke` is undefined.
 // Wrap it so calls don't blow up the whole boot — they just resolve to
 // `null` and the UI shows empty state.
-function isInTauri(): boolean {
-  return typeof tauriInvoke === "function" && "__TAURI_INTERNALS__" in window;
+export function isInTauri(): boolean {
+  return typeof window !== "undefined" && typeof tauriInvoke === "function" && "__TAURI_INTERNALS__" in window;
 }
+
+export function frontendLog(level: "error" | "warn" | "info", message: string): void {
+  if (isInTauri()) void tauriInvoke("frontend_log", { level, message }).catch(() => {});
+}
+
 const invoke: typeof tauriInvoke = async (cmd, args) => {
   if (!isInTauri()) {
     console.warn(
@@ -17,7 +22,19 @@ const invoke: typeof tauriInvoke = async (cmd, args) => {
     );
     return null as never;
   }
-  return tauriInvoke(cmd, args);
+  const started = performance.now();
+  try {
+    return await tauriInvoke(cmd, args);
+  } finally {
+    const elapsed = performance.now() - started;
+    let logAll = false;
+    try {
+      logAll = localStorage.getItem("mach.debugIpc") === "1";
+    } catch {}
+    if (logAll || elapsed > 100) {
+      frontendLog(logAll ? "info" : "warn", `ipc ${cmd} took ${Math.round(elapsed)}ms`);
+    }
+  }
 };
 
 export type ThreadSummary = {

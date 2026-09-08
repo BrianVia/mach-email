@@ -23,6 +23,15 @@ use tracing::warn;
 use crate::AppState;
 
 #[tauri::command]
+pub fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => tracing::error!(target: "mach::frontend", "{message}"),
+        "warn" => tracing::warn!(target: "mach::frontend", "{message}"),
+        _ => tracing::info!(target: "mach::frontend", "{message}"),
+    }
+}
+
+#[tauri::command]
 pub async fn save_attachment(
     state: State<'_, AppState>,
     account: String,

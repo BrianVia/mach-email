@@ -75,6 +75,7 @@
   type AppView = InboxView | ThreadView | ComposerView | ScheduledView | SearchView | PaletteView | ActivityView;
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
+  type MachDebugWindow = Window & { __machDebugState?: () => unknown };
 
   let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0, limit: INITIAL_LIST_LIMIT, account: null });
   let inboxSplit = $state<Split>("important");
@@ -154,6 +155,24 @@
     return inbox.label === "INBOX"
       ? threads.filter((thread) => splitOf(thread.label_ids) === inboxSplit)
       : threads;
+  }
+
+  function debugState() {
+    const visibleView = view.kind === "palette" ? view.background : view;
+    const threads = visibleView.kind === "inbox"
+      ? visibleInboxThreads(visibleView)
+      : visibleView.kind === "search" ? visibleView.results : [];
+    return {
+      view_kind: view.kind,
+      label: visibleView.kind === "inbox" ? visibleView.label : null,
+      selected_index: view.kind === "thread" ? view.selectedMsg : view.kind === "composer" ? null : view.selected,
+      visible_thread_count: threads.length,
+      visible_threads: threads.slice(0, 20).map(({ id, subject, unread, account_id }) => ({ id, subject, unread, account_id })),
+      active_split: inboxSplit,
+      account_filter: visibleView.kind === "inbox" ? visibleView.account : null,
+      palette_open: view.kind === "palette",
+      notice,
+    };
   }
 
   function selectInboxAccount(inbox: InboxView, account: string | null): InboxView {
@@ -1046,6 +1065,7 @@
   }
 
   onMount(() => {
+    (window as MachDebugWindow).__machDebugState = debugState;
     void boot();
     void refreshStatus();
     void refreshOutboxSummary();
@@ -1081,6 +1101,7 @@
     document.body.focus();
 
     return () => {
+      delete (window as MachDebugWindow).__machDebugState;
       destroyed = true;
       for (const unlisten of unlisteners) unlisten();
       document.removeEventListener("keydown", handleKey, true);
