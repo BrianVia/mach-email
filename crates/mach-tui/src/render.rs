@@ -193,7 +193,8 @@ fn draw_inbox(
             Paragraph::new(Line::from(vec![
                 tab("1 Important", Split::Important),
                 tab("2 Other", Split::Other),
-                tab("3 Newsletters", Split::Newsletters),
+                tab("3 Updates", Split::Updates),
+                tab("4 Newsletters", Split::Newsletters),
             ])),
             chunks[0],
         );

@@ -63,8 +63,8 @@
 
   const INITIAL_LIST_LIMIT = 1000;
 
-  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
-  type ThreadOrigin = { threads: ThreadSummary[]; index: number };
+  type InboxView = { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number; account: string | null };
+  type ThreadOrigin = { threads: ThreadSummary[]; index: number; account: string | null };
   type ThreadView = { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number; origin?: ThreadOrigin };
   type ComposerFields = { to: string; cc: string; bcc: string; subject: string; body_md: string; attachments: DraftAttachment[] };
   type ComposerView = { kind: "composer"; draft: Draft; background: AppView };
@@ -76,7 +76,7 @@
   type PaletteCommand = { label: string; chord: string };
   type Continuation = { next: string; action_name: string };
 
-  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0, limit: INITIAL_LIST_LIMIT });
+  let view = $state<AppView>({ kind: "inbox", label: "INBOX", threads: [], selected: 0, limit: INITIAL_LIST_LIMIT, account: null });
   let inboxSplit = $state<Split>("important");
   let keymap = $state<Keymap | null>(null);
   let bootError = $state<string | null>(null);
@@ -119,7 +119,9 @@
   });
 
   let subtitle = $derived.by(() => {
-    if (view.kind === "inbox") return `${visibleInboxThreads(view).length.toLocaleString()} threads`;
+    if (view.kind === "inbox") {
+      return `${visibleInboxThreads(view).length.toLocaleString()} threads${view.account ? ` · only ${view.account}` : ""}`;
+    }
     if (view.kind === "thread") {
       return `${view.thread.participants.slice(0, 2).join(", ")}${view.thread.participants.length > 2 ? ` +${view.thread.participants.length - 2}` : ""}`;
     }
@@ -146,9 +148,27 @@
   }
 
   function visibleInboxThreads(inbox: InboxView): ThreadSummary[] {
+    const threads = inbox.account === null
+      ? inbox.threads
+      : inbox.threads.filter((thread) => thread.account_id === inbox.account);
     return inbox.label === "INBOX"
-      ? inbox.threads.filter((thread) => splitOf(thread.label_ids) === inboxSplit)
-      : inbox.threads;
+      ? threads.filter((thread) => splitOf(thread.label_ids) === inboxSplit)
+      : threads;
+  }
+
+  function selectInboxAccount(inbox: InboxView, account: string | null): InboxView {
+    const next = { ...inbox, account };
+    return { ...next, selected: clamp(next.selected, 0, visibleInboxThreads(next).length - 1) };
+  }
+
+  function inboxAccounts(inbox: InboxView): string[] {
+    return status?.accounts.length ? status.accounts : [...new Set(inbox.threads.map((thread) => thread.account_id))];
+  }
+
+  function cycleInboxAccount(inbox: InboxView): InboxView {
+    const accounts = inboxAccounts(inbox);
+    const next = accounts[accounts.indexOf(inbox.account ?? "") + 1] ?? null;
+    return selectInboxAccount(inbox, next);
   }
 
   function selectInboxSplit(split: Split) {
@@ -180,7 +200,7 @@
   async function boot() {
     try {
       const savedSplit = localStorage.getItem("mach.inboxSplit");
-      if (savedSplit === "important" || savedSplit === "other" || savedSplit === "newsletters") {
+      if (savedSplit === "important" || savedSplit === "other" || savedSplit === "updates" || savedSplit === "newsletters") {
         inboxSplit = savedSplit;
       }
       try {
@@ -202,7 +222,7 @@
       }
       const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
       console.log(`[mach] loaded ${threads.length} threads`);
-      view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT };
+      view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT, account: null };
     } catch (error) {
       console.error("[mach]", error);
       bootError = `boot failed: ${(error as Error).message ?? error}`;
@@ -321,9 +341,20 @@
       : currentView.kind === "palette" && currentView.background.kind === "thread"
         ? currentView.background
         : null;
+    const openInbox = currentView.kind === "inbox"
+      ? currentView
+      : currentView.kind === "palette" && currentView.background.kind === "inbox"
+        ? currentView.background
+        : null;
     if (chord === "ctrl+shift+c" && openThread) {
       event.preventDefault();
       copyThreadAsMarkdown(openThread);
+      return;
+    }
+    if (chord === "`" && openInbox) {
+      event.preventDefault();
+      const inbox = cycleInboxAccount(openInbox);
+      view = currentView.kind === "palette" ? { ...currentView, background: inbox } : inbox;
       return;
     }
     if (chord === "ctrl+k") {
@@ -426,6 +457,10 @@
       mute: "Mute thread",
       unsubscribe: "Unsubscribe",
       show_activity: "Show activity",
+      inbox_split_important: "Important",
+      inbox_split_other: "Other",
+      inbox_split_updates: "Updates",
+      inbox_split_newsletters: "Newsletters",
     };
     const byLabel = new Map<string, PaletteCommand>();
 
@@ -448,6 +483,10 @@
     }
     const commands = [...byLabel.values()];
     if (background.kind === "thread") commands.push({ label: "Copy as Markdown", chord: "ctrl+shift+c" });
+    if (background.kind === "inbox") {
+      commands.push(...inboxAccounts(background).map((account) => ({ label: `Show only ${account}`, chord: `account:${account}` })));
+      if (background.account !== null) commands.push({ label: "Show all accounts", chord: "accounts-all" });
+    }
     commands.push({ label: "Retry failed changes", chord: "retry" });
     commands.push({ label: "Add account…", chord: "add-account" });
     commands.push(
@@ -483,6 +522,14 @@
     view = background;
     if (command.label === "Copy as Markdown" && background.kind === "thread") {
       copyThreadAsMarkdown(background);
+      return;
+    }
+    if (background.kind === "inbox" && command.chord.startsWith("account:")) {
+      view = selectInboxAccount(background, command.chord.slice("account:".length));
+      return;
+    }
+    if (background.kind === "inbox" && command.chord === "accounts-all") {
+      view = selectInboxAccount(background, null);
       return;
     }
     if (command.label === "Retry failed changes") {
@@ -574,7 +621,7 @@
             // Restore the in-memory list instantly; refresh it in the
             // background so Esc never waits on the IPC round trip.
             const { origin } = currentView;
-            const restored: InboxView = { kind: "inbox", label: "INBOX", threads: origin.threads, selected: 0, limit: INITIAL_LIST_LIMIT };
+            const restored: InboxView = { kind: "inbox", label: "INBOX", threads: origin.threads, selected: 0, limit: INITIAL_LIST_LIMIT, account: origin.account };
             const visible = visibleInboxThreads(restored);
             const preserved = visible.findIndex((thread) => thread.id === currentView.thread.id);
             restored.selected = preserved >= 0 ? preserved : clamp(origin.index, 0, visible.length - 1);
@@ -583,7 +630,7 @@
             return;
           }
           const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
-          view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT };
+          view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT, account: null };
           return;
         }
         case "undo_activity": {
@@ -598,6 +645,7 @@
           return;
         case "inbox_split_important":
         case "inbox_split_other":
+        case "inbox_split_updates":
         case "inbox_split_newsletters":
           if (currentView.kind === "inbox" && currentView.label === "INBOX") {
             selectInboxSplit(kind.slice("inbox_split_".length) as Split);
@@ -662,7 +710,7 @@
             : -1;
           await openThreadView(
             thread,
-            currentView.kind === "inbox" ? { threads: visibleInboxThreads(currentView), index: at } : undefined,
+            currentView.kind === "inbox" ? { threads: visibleInboxThreads(currentView), index: at, account: currentView.account } : undefined,
           );
           return;
         }
@@ -673,7 +721,7 @@
             return;
           }
           const threads = await listThreads(label, INITIAL_LIST_LIMIT);
-          view = { kind: "inbox", label, threads, selected: 0, limit: INITIAL_LIST_LIMIT };
+          view = { kind: "inbox", label, threads, selected: 0, limit: INITIAL_LIST_LIMIT, account: null };
           return;
         }
         case "search":
@@ -701,17 +749,17 @@
         && currentView.origin
         && (settings.after_archive ?? "next") === "next"
       ) {
-        const { threads, index } = currentView.origin;
+        const { threads, index, account } = currentView.origin;
         const archivedId = currentView.thread.id;
         const remaining = threads.filter((thread) => thread.id !== archivedId);
         void dispatchAction(action).catch(showActionError);
         const nextIndex = Math.min(index, remaining.length - 1);
         const next = remaining[nextIndex];
         if (next) {
-          await openThreadView(next, { threads: remaining, index: nextIndex });
+          await openThreadView(next, { threads: remaining, index: nextIndex, account });
         } else {
           const fresh = await listThreads("INBOX", INITIAL_LIST_LIMIT);
-          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0, limit: INITIAL_LIST_LIMIT };
+          view = { kind: "inbox", label: "INBOX", threads: fresh, selected: 0, limit: INITIAL_LIST_LIMIT, account: null };
         }
         return;
       }
@@ -740,7 +788,7 @@
 
       if (isArchiveOrTrash && currentView.kind === "thread") {
         const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
-        const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT });
+        const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT, account: null });
         const at = visible.findIndex((thread) => thread.id === currentView.thread.id);
         // The archived thread is usually gone from the refreshed list; the
         // thread now occupying its date-sorted position is the "next" one.
@@ -750,7 +798,7 @@
         const fallback = at >= 0
           ? Math.min(at, visible.length - 1)
           : successor >= 0 ? successor : Math.max(0, visible.length - 1);
-        view = { kind: "inbox", label: "INBOX", threads, selected: fallback, limit: INITIAL_LIST_LIMIT };
+        view = { kind: "inbox", label: "INBOX", threads, selected: fallback, limit: INITIAL_LIST_LIMIT, account: null };
       }
 
       if (!isArchiveOrTrash && currentView.kind === "inbox" && removedSet.size) {
@@ -944,7 +992,7 @@
     const thread = threads[index];
     if (!thread) return;
     try {
-      await openThreadView(thread, { threads, index });
+      await openThreadView(thread, { threads, index, account: view.account });
     } catch (error) {
       console.warn("open thread failed", error);
       showActionError(error);

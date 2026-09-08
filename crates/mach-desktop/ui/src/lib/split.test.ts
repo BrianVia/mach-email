@@ -5,6 +5,8 @@ describe("splitOf", () => {
   test.each([
     [["INBOX", "IMPORTANT"], "important"],
     [["IMPORTANT", "CATEGORY_PROMOTIONS"], "newsletters"],
+    [["CATEGORY_UPDATES"], "updates"],
+    [["CATEGORY_UPDATES", "CATEGORY_PROMOTIONS"], "updates"],
     [["CATEGORY_SOCIAL"], "other"],
   ] as const)("classifies %j as %s", (labels, split) => {
     expect(splitOf([...labels])).toBe(split);

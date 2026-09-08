@@ -909,6 +909,7 @@ async fn execute_adapter_action(app: &mut App, action: &str) {
     let split = match action {
         "inbox_split_important" => Split::Important,
         "inbox_split_other" => Split::Other,
+        "inbox_split_updates" => Split::Updates,
         "inbox_split_newsletters" => Split::Newsletters,
         _ => return,
     };

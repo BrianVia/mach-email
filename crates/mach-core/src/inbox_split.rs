@@ -5,12 +5,15 @@ pub enum Split {
     #[default]
     Important,
     Other,
+    Updates,
     Newsletters,
 }
 
 pub fn split_of(label_ids: &[LabelId]) -> Split {
     let has = |label| label_ids.iter().any(|id| id.as_str() == label);
-    if ["CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS"]
+    if has("CATEGORY_UPDATES") {
+        Split::Updates
+    } else if ["CATEGORY_PROMOTIONS", "CATEGORY_FORUMS"]
         .into_iter()
         .any(has)
     {
@@ -41,6 +44,11 @@ mod tests {
         assert_eq!(
             split_of(&labels(&["IMPORTANT", "CATEGORY_PROMOTIONS"])),
             Split::Newsletters
+        );
+        assert_eq!(split_of(&labels(&["CATEGORY_UPDATES"])), Split::Updates);
+        assert_eq!(
+            split_of(&labels(&["CATEGORY_UPDATES", "CATEGORY_PROMOTIONS"])),
+            Split::Updates
         );
         assert_eq!(split_of(&labels(&["CATEGORY_SOCIAL"])), Split::Other);
     }

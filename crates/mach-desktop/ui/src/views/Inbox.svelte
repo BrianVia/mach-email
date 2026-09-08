@@ -21,7 +21,7 @@
     onLoadOlder,
     accountLabel,
   }: {
-    v: { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number };
+    v: { kind: "inbox"; label: string; threads: ThreadSummary[]; selected: number; limit: number; account: string | null };
     onSelect: (index: number) => void;
     onOpen: (index: number) => void;
     split: Split;
@@ -54,11 +54,12 @@
   }
 
   // ponytail: client-side split is capped by the current list limit; move it into the store if pagination needs category-complete results.
-  let threads = $derived(v.label === "INBOX" ? v.threads.filter((thread) => splitOf(thread.label_ids) === split) : v.threads);
-  let splits = $derived((["important", "other", "newsletters"] as const).map((candidate) => ({
+  let accountThreads = $derived(v.account === null ? v.threads : v.threads.filter((thread) => thread.account_id === v.account));
+  let threads = $derived(v.label === "INBOX" ? accountThreads.filter((thread) => splitOf(thread.label_ids) === split) : accountThreads);
+  let splits = $derived((["important", "other", "updates", "newsletters"] as const).map((candidate) => ({
     value: candidate,
     label: candidate[0].toUpperCase() + candidate.slice(1),
-    unread: v.threads.filter((thread) => splitOf(thread.label_ids) === candidate && thread.unread).length,
+    unread: accountThreads.filter((thread) => splitOf(thread.label_ids) === candidate && thread.unread).length,
   })));
 
   let inboxLayout = $derived.by(() => {

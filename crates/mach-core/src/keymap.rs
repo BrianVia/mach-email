@@ -294,7 +294,10 @@ impl Keymap {
             let name = template_action_name(tpl);
             if matches!(
                 name.as_str(),
-                "inbox_split_important" | "inbox_split_other" | "inbox_split_newsletters"
+                "inbox_split_important"
+                    | "inbox_split_other"
+                    | "inbox_split_updates"
+                    | "inbox_split_newsletters"
             ) {
                 return Resolution::AdapterAction(name);
             }
@@ -570,13 +573,13 @@ mod tests {
         let km = Keymap::from_toml(
             r#"
             [normal]
-            "1" = "inbox_split_important"
+            "3" = "inbox_split_updates"
         "#,
         )
         .unwrap();
         assert!(matches!(
-            km.resolve(Mode::Normal, "1", &KeyContext::default()),
-            Resolution::AdapterAction(name) if name == "inbox_split_important"
+            km.resolve(Mode::Normal, "3", &KeyContext::default()),
+            Resolution::AdapterAction(name) if name == "inbox_split_updates"
         ));
     }
 
