@@ -570,20 +570,20 @@
             closeComposer();
             return;
           }
-          const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
-          let selected = 0;
           if (currentView.kind === "thread" && currentView.origin) {
+            // Restore the in-memory list instantly; refresh it in the
+            // background so Esc never waits on the IPC round trip.
             const { origin } = currentView;
-            const selectedId = origin.threads[origin.index]?.id;
-            const visible = visibleInboxThreads({ kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT });
-            const preserved = selectedId
-              ? visible.findIndex((thread) => thread.id === selectedId)
-              : -1;
-            selected = preserved >= 0
-              ? preserved
-              : clamp(origin.index, 0, visible.length - 1);
+            const restored: InboxView = { kind: "inbox", label: "INBOX", threads: origin.threads, selected: 0, limit: INITIAL_LIST_LIMIT };
+            const visible = visibleInboxThreads(restored);
+            const preserved = visible.findIndex((thread) => thread.id === currentView.thread.id);
+            restored.selected = preserved >= 0 ? preserved : clamp(origin.index, 0, visible.length - 1);
+            view = restored;
+            void refreshInboxPreservingSelection().catch((error) => console.warn("[mach] inbox refresh failed", error));
+            return;
           }
-          view = { kind: "inbox", label: "INBOX", threads, selected, limit: INITIAL_LIST_LIMIT };
+          const threads = await listThreads("INBOX", INITIAL_LIST_LIMIT);
+          view = { kind: "inbox", label: "INBOX", threads, selected: 0, limit: INITIAL_LIST_LIMIT };
           return;
         }
         case "undo_activity": {
