@@ -2735,7 +2735,14 @@ mod tests {
         let other = AccountId::new("other@example.com");
         seed(&pool, "mine", "mine", "mine", &["Label_1"]);
         seed_for(&pool, &other, "theirs", "theirs", "theirs", &["Label_9"]);
-        seed_for(&pool, &other, "unrelated", "unrelated", "unrelated", &["Label_8"]);
+        seed_for(
+            &pool,
+            &other,
+            "unrelated",
+            "unrelated",
+            "unrelated",
+            &["Label_8"],
+        );
         let conn = pool.get().unwrap();
         for (account, id, name) in [
             (account(), "Label_1", "Cora/Action"),
@@ -2751,13 +2758,15 @@ mod tests {
         drop(conn);
 
         let store = SqliteStore::new(pool);
-        let threads = store
-            .list_threads_in_label(&AccountScope::All, &LabelId::new("Label_1"), 10)
-            .await
-            .unwrap();
-        let mut ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
-        ids.sort();
-        assert_eq!(ids, ["mine", "theirs"]);
+        for label in ["Label_1", "Label_9"] {
+            let threads = store
+                .list_threads_in_label(&AccountScope::All, &LabelId::new(label), 10)
+                .await
+                .unwrap();
+            let mut ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
+            ids.sort();
+            assert_eq!(ids, ["mine", "theirs"]);
+        }
     }
 
     #[tokio::test]

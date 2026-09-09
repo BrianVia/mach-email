@@ -144,11 +144,14 @@
   // One sidebar row per label name: the store matches same-named labels
   // across accounts, so any one account's id opens all of them.
   let sidebarLabels = $derived.by(() => {
-    const byName = new Map<string, Label>();
+    const byName = new Map<string, Label & { ids: string[] }>();
     for (const label of userLabels) {
       const seen = byName.get(label.name);
-      if (!seen) byName.set(label.name, { ...label });
-      else if (label.unread_count) seen.unread_count = (seen.unread_count ?? 0) + label.unread_count;
+      if (!seen) byName.set(label.name, { ...label, ids: [label.id] });
+      else {
+        seen.ids.push(label.id);
+        if (label.unread_count !== null) seen.unread_count = (seen.unread_count ?? 0) + label.unread_count;
+      }
     }
     return [...byName.values()];
   });

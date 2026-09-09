@@ -31,7 +31,7 @@
     activeLabel?: string;
     chordBuf: string;
     chordConts: Continuation[];
-    userLabels: { id: string; name: string; unread_count: number | null }[];
+    userLabels: { id: string; ids: string[]; name: string; unread_count: number | null }[];
     onOpenLabel: (label: string) => void;
     onOpenActivity: () => void;
     children: Snippet;
@@ -92,7 +92,7 @@
       >
         <summary class="section-header">Labels</summary>
         {#each userLabels as label}
-          <SidebarItem active={activeLabel === label.id} onclick={() => onOpenLabel(label.id)}>
+          <SidebarItem active={activeLabel !== undefined && label.ids.includes(activeLabel)} onclick={() => onOpenLabel(label.id)}>
             <span class="label-row"><span>{label.name}</span>{#if label.unread_count}<span>{label.unread_count}</span>{/if}</span>
           </SidebarItem>
         {/each}
