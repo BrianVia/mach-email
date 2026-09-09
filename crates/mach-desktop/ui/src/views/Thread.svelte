@@ -6,8 +6,9 @@
   import { renderEmailHtml } from "../lib/html";
   import { avatarColor, initialsFor } from "../lib/avatar";
 
-  let { v, onUnsubscribe, onAttachmentSaved, onError, onRespond }: {
+  let { v, blockRemoteImages = false, onUnsubscribe, onAttachmentSaved, onError, onRespond }: {
     v: { kind: "thread"; thread: ThreadSummary; messages: Message[]; selectedMsg: number };
+    blockRemoteImages?: boolean;
     onUnsubscribe: (messageId: string) => void;
     onAttachmentSaved: (path: string) => void;
     onError: (error: unknown) => void;
@@ -161,7 +162,7 @@
             {/if}
             {#if message.body_html && message.body_html.length > 0}
               {@const email = senderEmail(message.from).toLowerCase()}
-              {@const rendered = renderEmailHtml(message, { showRemote: shownRemoteImages[message.id] || remoteImageAllow.includes(email) })}
+              {@const rendered = renderEmailHtml(message, { showRemote: !blockRemoteImages || shownRemoteImages[message.id] || remoteImageAllow.includes(email) })}
               {#if rendered.blockedRemoteCount > 0}
                 <div class="remote-images-bar">
                   <span>{rendered.blockedRemoteCount} remote {rendered.blockedRemoteCount === 1 ? "image" : "images"} blocked</span>

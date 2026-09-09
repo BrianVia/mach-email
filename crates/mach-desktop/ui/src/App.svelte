@@ -1168,6 +1168,7 @@
   {:else if view.kind === "thread"}
     <ThreadReader
       v={view}
+      blockRemoteImages={settings.block_remote_images ?? false}
       onUnsubscribe={(messageId) => void beginUnsubscribe(messageId).catch(showActionError)}
       onAttachmentSaved={showSavedAttachment}
       onError={showActionError}

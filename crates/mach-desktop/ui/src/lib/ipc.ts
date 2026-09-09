@@ -211,6 +211,9 @@ export type KeymapSources = {
 
 export type Settings = {
   after_archive?: "next" | "list";
+  // Remote images load by default; `block_remote_images = true` in
+  // settings.toml restores click-to-show blocking.
+  block_remote_images?: boolean;
   account_labels?: Record<string, string>;
 };
 
