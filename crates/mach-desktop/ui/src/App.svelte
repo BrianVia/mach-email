@@ -141,6 +141,17 @@
   let userLabels = $derived.by(() => labels
     .filter((label) => !label.system && !label.name.startsWith("MACH/"))
     .sort((a, b) => a.name.localeCompare(b.name)));
+  // One sidebar row per label name: the store matches same-named labels
+  // across accounts, so any one account's id opens all of them.
+  let sidebarLabels = $derived.by(() => {
+    const byName = new Map<string, Label>();
+    for (const label of userLabels) {
+      const seen = byName.get(label.name);
+      if (!seen) byName.set(label.name, { ...label });
+      else if (label.unread_count) seen.unread_count = (seen.unread_count ?? 0) + label.unread_count;
+    }
+    return [...byName.values()];
+  });
 
   function showActionError(error: unknown) {
     actionError = String((error as Error).message ?? error);
@@ -1141,7 +1152,7 @@
   {activeLabel}
   {chordBuf}
   {chordConts}
-  {userLabels}
+  userLabels={sidebarLabels}
   onOpenLabel={(label) => void runAction({ kind: "open_label", label_id: label })}
   onOpenActivity={() => void openActivity()}
 >

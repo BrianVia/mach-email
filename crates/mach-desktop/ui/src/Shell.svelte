@@ -37,6 +37,10 @@
     children: Snippet;
   } = $props();
 
+  let labelsCollapsed = $state((() => {
+    try { return localStorage.getItem("mach.labelsCollapsed") === "1"; } catch { return false; }
+  })());
+
   const labels = [
     ["Inbox", "INBOX"],
     ["Starred", "STARRED"],
@@ -79,12 +83,20 @@
           {name}
         </SidebarItem>
       {/each}
-      <div class="section-header">Labels</div>
-      {#each userLabels as label}
-        <SidebarItem active={activeLabel === label.id} onclick={() => onOpenLabel(label.id)}>
-          <span class="label-row"><span>{label.name}</span>{#if label.unread_count}<span>{label.unread_count}</span>{/if}</span>
-        </SidebarItem>
-      {/each}
+      <details
+        open={!labelsCollapsed}
+        ontoggle={(event) => {
+          labelsCollapsed = !event.currentTarget.open;
+          try { localStorage.setItem("mach.labelsCollapsed", labelsCollapsed ? "1" : "0"); } catch {}
+        }}
+      >
+        <summary class="section-header">Labels</summary>
+        {#each userLabels as label}
+          <SidebarItem active={activeLabel === label.id} onclick={() => onOpenLabel(label.id)}>
+            <span class="label-row"><span>{label.name}</span>{#if label.unread_count}<span>{label.unread_count}</span>{/if}</span>
+          </SidebarItem>
+        {/each}
+      </details>
       <div class="sidebar-spacer"></div>
       <SidebarItem active={activeLabel === "ACTIVITY"} onclick={onOpenActivity}>Activity</SidebarItem>
       <div class="sidebar-hint">g then i/s/t/d/e/z/k/j/a</div>
@@ -131,6 +143,10 @@
   aside { display: flex; min-height: 0; flex-direction: column; padding: 14px; border-right: 1px solid var(--border); background: var(--sidebar); }
   .brand { padding: 8px 9px 18px; font-weight: 750; }
   .section-header { padding: 18px 9px 6px; color: var(--muted); font-size: 11px; font-weight: 600; }
+  summary.section-header { cursor: pointer; list-style: none; user-select: none; }
+  summary.section-header::-webkit-details-marker { display: none; }
+  summary.section-header::before { content: "▾"; display: inline-block; width: 12px; }
+  details:not([open]) > summary.section-header::before { content: "▸"; }
   .label-row { display: flex; width: 100%; justify-content: space-between; gap: 8px; }
   .sidebar-hint { margin: 16px 9px 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
   .sidebar-spacer { flex: 1; }

@@ -1005,20 +1005,31 @@ impl MailStore for SqliteStore {
             }
             // Filter via JSON containment. With label-id strings always quoted
             // in the JSON array, a LIKE check is safe — no false positives.
+            // Gmail mints a different id per account for the same-named user
+            // label, so a label also matches every account's label with the
+            // same name — one "Cora/Action" entry covers all accounts.
             let needle = format!("\"{}\"", label.as_str());
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT account_id, id, subject, snippet, participants_json, last_message_at,
                             message_count, unread, starred, label_ids_json
                      FROM threads
-                     WHERE label_ids_json LIKE '%' || ?1 || '%'
+                     WHERE (label_ids_json LIKE '%' || ?1 || '%'
+                            OR EXISTS (
+                              SELECT 1 FROM json_each(label_ids_json) j
+                              JOIN labels l ON l.account_id = threads.account_id AND l.id = j.value
+                              WHERE l.name IN (SELECT name FROM labels WHERE id = ?4)
+                            ))
                        AND (?2 IS NULL OR account_id = ?2)
                      ORDER BY last_message_at DESC
                      LIMIT ?3",
                 )
                 .map_err(map_err)?;
             let rows = stmt
-                .query_map(params![needle, account, limit as i64], row_to_thread)
+                .query_map(
+                    params![needle, account, limit as i64, label.as_str()],
+                    row_to_thread,
+                )
                 .map_err(map_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_err)?;
@@ -2716,6 +2727,37 @@ mod tests {
         assert!(snoozed
             .iter()
             .any(|thread| thread.id.as_str() == "gmail-id"));
+    }
+
+    #[tokio::test]
+    async fn list_threads_in_label_matches_same_named_labels_across_accounts() {
+        let pool = open_in_memory().unwrap();
+        let other = AccountId::new("other@example.com");
+        seed(&pool, "mine", "mine", "mine", &["Label_1"]);
+        seed_for(&pool, &other, "theirs", "theirs", "theirs", &["Label_9"]);
+        seed_for(&pool, &other, "unrelated", "unrelated", "unrelated", &["Label_8"]);
+        let conn = pool.get().unwrap();
+        for (account, id, name) in [
+            (account(), "Label_1", "Cora/Action"),
+            (other.clone(), "Label_9", "Cora/Action"),
+            (other.clone(), "Label_8", "Cora/Other"),
+        ] {
+            conn.execute(
+                "INSERT INTO labels (account_id, id, name, type) VALUES (?1, ?2, ?3, 'user')",
+                params![account.as_str(), id, name],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let store = SqliteStore::new(pool);
+        let threads = store
+            .list_threads_in_label(&AccountScope::All, &LabelId::new("Label_1"), 10)
+            .await
+            .unwrap();
+        let mut ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["mine", "theirs"]);
     }
 
     #[tokio::test]
