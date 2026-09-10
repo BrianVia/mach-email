@@ -40,7 +40,7 @@ pub async fn retry(selected_account: Option<&str>) -> Result<()> {
     };
     let mut retried = 0;
     for account in accounts {
-        retried += store.retry_failed_outbox(&account).await?;
+        retried += store.retry_failed_outbox(&account, true).await?;
     }
     println!("{retried} outbox operation(s) queued for retry");
     Ok(())

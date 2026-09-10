@@ -406,7 +406,7 @@ pub async fn retry_outbox(state: State<'_, AppState>) -> Result<Out<u32>, String
     accounts.dedup();
     let mut retried = 0;
     for account in accounts {
-        match state.store.retry_failed_outbox(&account).await {
+        match state.store.retry_failed_outbox(&account, true).await {
             Ok(count) => retried += count,
             Err(error) => return Ok(Out::err(error)),
         }

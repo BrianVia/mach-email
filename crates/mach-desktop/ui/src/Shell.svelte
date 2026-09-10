@@ -19,6 +19,7 @@
     userLabels,
     onOpenLabel,
     onOpenActivity,
+    onRetryFailed,
     children,
   }: {
     title: string;
@@ -34,6 +35,7 @@
     userLabels: { id: string; ids: string[]; name: string; unread_count: number | null }[];
     onOpenLabel: (label: string) => void;
     onOpenActivity: () => void;
+    onRetryFailed: () => void;
     children: Snippet;
   } = $props();
 
@@ -68,7 +70,7 @@
         <i></i>{online ? "Live" : "Offline"}
       </span>
       {#if outbox.failed > 0}
-        <span class="status-pill failed" title={outbox.last_error ?? undefined}>{outbox.failed} failed</span>
+        <button type="button" class="status-pill failed" title={`${outbox.last_error ?? ""}\nClick to retry`.trim()} onclick={onRetryFailed}>{outbox.failed} failed</button>
       {:else if outbox.pending > 0}
         <span class="status-pill unsynced">{outbox.pending} unsynced</span>
       {/if}
@@ -139,6 +141,7 @@
   .status-pill.online i { background: var(--success); box-shadow: 0 0 6px color-mix(in oklab, var(--success) 60%, transparent); }
   .status-pill.unsynced { color: #d99500; background: color-mix(in oklab, #d99500 14%, transparent); }
   .status-pill.failed { color: var(--danger); background: color-mix(in oklab, var(--danger) 14%, transparent); }
+  button.status-pill { border: 0; font: inherit; cursor: pointer; }
   .body { display: grid; min-height: 0; grid-template-columns: 210px 1fr; }
   aside { display: flex; min-height: 0; flex-direction: column; padding: 14px; border-right: 1px solid var(--border); background: var(--sidebar); }
   .brand { padding: 8px 9px 18px; font-weight: 750; }

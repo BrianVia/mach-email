@@ -1822,7 +1822,11 @@ impl MailStore for SqliteStore {
         .map_err(map_err)?
     }
 
-    async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32> {
+    async fn retry_failed_outbox(
+        &self,
+        account: &AccountId,
+        include_sends: bool,
+    ) -> CoreResult<u32> {
         let pool = self.pool.clone();
         let account = account.clone();
         spawn_blocking(move || -> CoreResult<u32> {
@@ -1830,8 +1834,9 @@ impl MailStore for SqliteStore {
             conn.execute(
                 "UPDATE outbox
                  SET state = 'pending', attempts = 0, next_attempt_at = 0
-                 WHERE account_id = ?1 AND state = 'failed'",
-                params![account.as_str()],
+                 WHERE account_id = ?1 AND state = 'failed'
+                   AND (?2 OR op_kind != 'send_draft')",
+                params![account.as_str(), include_sends],
             )
             .map(|count| count as u32)
             .map_err(map_err)
@@ -2332,7 +2337,7 @@ mod tests {
         }
         let summary = store.outbox_summary(&scope()).await.unwrap();
         assert_eq!((summary.pending, summary.failed), (0, 1));
-        assert_eq!(store.retry_failed_outbox(&account()).await.unwrap(), 1);
+        assert_eq!(store.retry_failed_outbox(&account(), true).await.unwrap(), 1);
         let summary = store.outbox_summary(&scope()).await.unwrap();
         assert_eq!((summary.pending, summary.failed), (1, 0));
         assert_eq!(

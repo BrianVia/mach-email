@@ -442,12 +442,17 @@ impl MailStore for InMemoryStore {
         })
     }
 
-    async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32> {
+    async fn retry_failed_outbox(
+        &self,
+        account: &AccountId,
+        include_sends: bool,
+    ) -> CoreResult<u32> {
         let mut inner = self.inner.lock().unwrap();
         let ids: Vec<_> = inner
             .outbox
             .iter_mut()
             .filter(|op| &op.account_id == account && op.attempts >= 5)
+            .filter(|op| include_sends || !matches!(op.kind, OutboxOpKind::SendDraft { .. }))
             .map(|op| {
                 op.attempts = 0;
                 op.id

@@ -137,11 +137,20 @@ pub async fn sync_account_tick(
     let outbox = OutboxWorker::new(account.clone(), client.clone(), store.clone());
     let outbox = outbox.drain_once(200).await?;
     let incremental = if store.get_history_cursor(account).await?.is_some() {
-        Some(incremental_sync(client, store).await?)
+        Some(incremental_sync(client, store.clone()).await?)
     } else {
-        bootstrap(client, store).await?;
+        bootstrap(client, store.clone()).await?;
         None
     };
+
+    // A successful sync proves auth and quota are back, so dead-lettered ops
+    // from an outage longer than the retry ladder (~14h) get another run.
+    // ponytail: a genuinely bad op (thread gone) re-arms every cycle too;
+    // filter on the stored last_error if that ever churns visibly.
+    let rearmed = store.retry_failed_outbox(account, false).await?;
+    if rearmed > 0 {
+        info!(%account, rearmed, "re-armed dead-lettered outbox ops after successful sync");
+    }
 
     Ok(TickReport {
         unsnoozed: due.len(),

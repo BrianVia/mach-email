@@ -343,7 +343,12 @@ pub trait MailStore: Send + Sync {
     async fn mark_outbox_done(&self, id: i64) -> CoreResult<()>;
     async fn mark_outbox_failed(&self, id: i64, error: &str) -> CoreResult<()>;
     async fn outbox_summary(&self, scope: &AccountScope) -> CoreResult<OutboxSummary>;
-    async fn retry_failed_outbox(&self, account: &AccountId) -> CoreResult<u32>;
+    /// Re-arm dead-lettered ops so the next drain retries them. Sends are
+    /// only re-armed when `include_sends` is set: an explicit user retry
+    /// should send, an automatic sweep after an outage must not fire a
+    /// stale email on its own.
+    async fn retry_failed_outbox(&self, account: &AccountId, include_sends: bool)
+        -> CoreResult<u32>;
     async fn list_activity(
         &self,
         scope: &AccountScope,

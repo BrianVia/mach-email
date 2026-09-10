@@ -1158,6 +1158,7 @@
   userLabels={sidebarLabels}
   onOpenLabel={(label) => void runAction({ kind: "open_label", label_id: label })}
   onOpenActivity={() => void openActivity()}
+  onRetryFailed={() => void retryFailedChanges()}
 >
   {#if view.kind === "inbox"}
     <Inbox
