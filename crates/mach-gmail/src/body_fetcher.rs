@@ -50,6 +50,17 @@ fn attachment_cache_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("mach-attachments"))
 }
 
+/// Gmail attachment ids run 400+ chars; filenames cap at 255 on macOS/Linux,
+/// so the raw id used to fail with "File name too long". Hash it instead.
+/// ponytail: std SipHash may change across Rust releases — worst case is a cache miss.
+fn attachment_cache_name(account: &AccountId, attachment_id: &str) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    attachment_id.hash(&mut hasher);
+    let safe_account = account.as_str().replace(['/', '\\'], "_");
+    format!("{safe_account}-{:016x}", hasher.finish())
+}
+
 pub async fn fetch_attachment_cached(
     client: &GmailClient,
     account: &AccountId,
@@ -58,9 +69,7 @@ pub async fn fetch_attachment_cached(
 ) -> Result<PathBuf> {
     let cache_dir = attachment_cache_dir();
     std::fs::create_dir_all(&cache_dir).context("creating attachment cache")?;
-    let safe_account = account.as_str().replace(['/', '\\'], "_");
-    let safe_attachment = attachment_id.replace(['/', '\\'], "_");
-    let path = cache_dir.join(format!("{safe_account}-{safe_attachment}"));
+    let path = cache_dir.join(attachment_cache_name(account, attachment_id));
     if path.is_file() {
         return Ok(path);
     }
@@ -543,6 +552,16 @@ mod pool_tests {
     use chrono::Utc;
 
     use super::*;
+
+    #[test]
+    fn attachment_cache_name_fits_in_a_filename() {
+        let account = AccountId::new("brian.a.via@gmail.com");
+        let long_id = "A".repeat(404);
+        let name = attachment_cache_name(&account, &long_id);
+        assert!(name.len() < 255, "{name}");
+        assert_eq!(name, attachment_cache_name(&account, &long_id));
+        assert_ne!(name, attachment_cache_name(&account, &"B".repeat(404)));
+    }
 
     #[test]
     fn add_makes_account_visible() {
