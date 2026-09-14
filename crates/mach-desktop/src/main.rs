@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
             let state = app.state::<AppState>();
             let body_fetchers = state.body_fetchers.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
                 interval.tick().await;
                 loop {
                     interval.tick().await;
