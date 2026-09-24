@@ -10,6 +10,7 @@
 
 mod commands;
 mod debug_server;
+mod jev;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
