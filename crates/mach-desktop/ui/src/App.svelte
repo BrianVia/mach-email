@@ -764,13 +764,17 @@
           await openActivity();
           return;
         case "refresh": {
+          showNotice("Syncing all accounts…");
+          const report = await syncNow();
           if (currentView.kind === "thread") {
             const opened = await refetchThreadIpc(currentView.thread.id);
             view = { kind: "thread", thread: opened.thread, messages: opened.messages, selectedMsg: currentView.selectedMsg };
           } else if (currentView.kind === "inbox") {
-            await syncNow();
             await refreshInboxPreservingSelection();
           }
+          showNotice(report.failed
+            ? `Sync failed: ${report.last_error ?? "unknown error"}`
+            : `Synced ${report.synced} account${report.synced === 1 ? "" : "s"}`);
           return;
         }
       }
