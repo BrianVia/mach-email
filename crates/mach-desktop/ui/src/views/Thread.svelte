@@ -20,6 +20,39 @@
   let previousSelected = $state<number | null>(null);
   let inviteReplies = $state<Record<string, "sending" | "sent" | "failed">>({});
 
+  type Viewer = { message: Message; images: NonNullable<Message["attachments"]>; index: number };
+  let viewer = $state<Viewer | null>(null);
+
+  const attachmentUrl = (message: Message, attachmentId: string) =>
+    `mach://attachment/${message.account_id}/${message.id}/${attachmentId}`;
+
+  function openViewer(message: Message, attachmentId: string) {
+    const images = (message.attachments ?? []).filter((a) => a.mime_type.startsWith("image/"));
+    viewer = { message, images, index: Math.max(0, images.findIndex((a) => a.attachment_id === attachmentId)) };
+  }
+
+  function step(delta: number) {
+    if (viewer) viewer.index = (viewer.index + delta + viewer.images.length) % viewer.images.length;
+  }
+
+  function saveViewed() {
+    if (!viewer) return;
+    const image = viewer.images[viewer.index];
+    void saveAttachment(viewer.message.account_id, viewer.message.id, image.attachment_id, image.filename).then(onAttachmentSaved).catch(onError);
+  }
+
+  // Window capture runs before App's document-level key handler, so the
+  // viewer owns the keyboard while it is open.
+  function viewerKey(event: KeyboardEvent) {
+    if (!viewer) return;
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    if (event.key === "Escape") viewer = null;
+    else if (event.key === "ArrowRight" || event.key === "l") step(1);
+    else if (event.key === "ArrowLeft" || event.key === "h") step(-1);
+    else if (event.key === "s" && (event.metaKey || event.ctrlKey)) saveViewed();
+  }
+
   async function respond(messageId: string, response: "accepted" | "tentative" | "declined") {
     inviteReplies[messageId] = "sending";
     try {
@@ -183,12 +216,14 @@
                 {#each message.attachments as attachment (attachment.attachment_id)}
                   <button
                     type="button"
-                    onclick={() => void saveAttachment(message.account_id, message.id, attachment.attachment_id, attachment.filename).then(onAttachmentSaved).catch(onError)}
+                    onclick={() => attachment.mime_type.startsWith("image/")
+                      ? openViewer(message, attachment.attachment_id)
+                      : void saveAttachment(message.account_id, message.id, attachment.attachment_id, attachment.filename).then(onAttachmentSaved).catch(onError)}
                     class:thumb={attachment.mime_type.startsWith("image/")}
-                    title={`Save ${attachment.filename}`}
+                    title={attachment.mime_type.startsWith("image/") ? `View ${attachment.filename}` : `Save ${attachment.filename}`}
                   >
                     {#if attachment.mime_type.startsWith("image/")}
-                      <img src={`mach://attachment/${message.account_id}/${message.id}/${attachment.attachment_id}`} alt={attachment.filename} loading="lazy" />
+                      <img src={attachmentUrl(message, attachment.attachment_id)} alt={attachment.filename} loading="lazy" />
                     {:else}
                       📎 {attachment.filename} <small>{humanSize(attachment.size)}</small>
                     {/if}
@@ -202,6 +237,26 @@
     </div>
   </div>
 </div>
+
+<svelte:window onkeydowncapture={viewerKey} />
+
+{#if viewer}
+  {@const image = viewer.images[viewer.index]}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="viewer" role="dialog" aria-modal="true" aria-label={image.filename} tabindex="-1" onclick={(e) => { if (e.target === e.currentTarget) viewer = null; }}>
+    <img src={attachmentUrl(viewer.message, image.attachment_id)} alt={image.filename} />
+    {#if viewer.images.length > 1}
+      <button type="button" class="nav prev" aria-label="Previous image" onclick={() => step(-1)}>‹</button>
+      <button type="button" class="nav next" aria-label="Next image" onclick={() => step(1)}>›</button>
+    {/if}
+    <div class="viewer-bar">
+      <span>{image.filename}</span>
+      <span class="count">{viewer.index + 1} / {viewer.images.length}</span>
+      <button type="button" onclick={saveViewed}>Save</button>
+      <button type="button" aria-label="Close" onclick={() => (viewer = null)}>✕</button>
+    </div>
+  </div>
+{/if}
 
 <style>
   .reader { height: 100%; overflow-y: auto; }
@@ -229,6 +284,16 @@
   .attachments small { margin-left: 4px; color: var(--muted); }
   .attachments button.thumb { padding: 0; border-radius: 8px; overflow: hidden; }
   .attachments .thumb img { display: block; width: 140px; height: 140px; object-fit: cover; }
+  .viewer { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / 0.88); }
+  .viewer > img { max-width: calc(100vw - 120px); max-height: calc(100vh - 110px); object-fit: contain; border-radius: 4px; }
+  .viewer .nav { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 64px; border: 0; border-radius: 8px; background: rgb(255 255 255 / 0.1); color: #fff; font-size: 32px; cursor: pointer; }
+  .viewer .nav:hover { background: rgb(255 255 255 / 0.2); }
+  .viewer .prev { left: 16px; }
+  .viewer .next { right: 16px; }
+  .viewer-bar { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 32px); padding: 6px 8px 6px 14px; border-radius: 999px; background: rgb(0 0 0 / 0.6); color: #fff; font-size: 13px; }
+  .viewer-bar span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .viewer-bar .count { color: rgb(255 255 255 / 0.6); flex: none; }
+  .viewer-bar button { flex: none; padding: 4px 10px; border: 0; border-radius: 999px; background: rgb(255 255 255 / 0.15); color: #fff; font: inherit; cursor: pointer; }
   .preview-only { margin: 0 20px 12px; padding: 8px 12px; border-radius: 8px; background: color-mix(in oklab, var(--accent) 10%, transparent); color: var(--muted); font-size: 12.5px; }
   .preview-only kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
   .remote-images-bar { display: flex; gap: 6px; align-items: center; padding: 7px 20px; color: var(--muted); font-size: 11.5px; }
