@@ -184,7 +184,15 @@
                   <button
                     type="button"
                     onclick={() => void saveAttachment(message.account_id, message.id, attachment.attachment_id, attachment.filename).then(onAttachmentSaved).catch(onError)}
-                  >📎 {attachment.filename} <small>{humanSize(attachment.size)}</small></button>
+                    class:thumb={attachment.mime_type.startsWith("image/")}
+                    title={`Save ${attachment.filename}`}
+                  >
+                    {#if attachment.mime_type.startsWith("image/")}
+                      <img src={`mach://attachment/${message.account_id}/${message.id}/${attachment.attachment_id}`} alt={attachment.filename} loading="lazy" />
+                    {:else}
+                      📎 {attachment.filename} <small>{humanSize(attachment.size)}</small>
+                    {/if}
+                  </button>
                 {/each}
               </div>
             {/if}
@@ -219,6 +227,8 @@
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 20px; }
   .attachments button { padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
   .attachments small { margin-left: 4px; color: var(--muted); }
+  .attachments button.thumb { padding: 0; border-radius: 8px; overflow: hidden; }
+  .attachments .thumb img { display: block; width: 140px; height: 140px; object-fit: cover; }
   .preview-only { margin: 0 20px 12px; padding: 8px 12px; border-radius: 8px; background: color-mix(in oklab, var(--accent) 10%, transparent); color: var(--muted); font-size: 12.5px; }
   .preview-only kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; }
   .remote-images-bar { display: flex; gap: 6px; align-items: center; padding: 7px 20px; color: var(--muted); font-size: 11.5px; }

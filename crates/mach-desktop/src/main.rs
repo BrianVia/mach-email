@@ -289,6 +289,9 @@ fn sniff_mime(bytes: &[u8]) -> &'static str {
         "image/gif"
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         "image/webp"
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"heic" | b"heix" | b"mif1" | b"msf1") {
+        // iPhone photos. WebKit on macOS renders HEIC.
+        "image/heic"
     } else if bytes.len() >= 4 && &bytes[..4] == b"<svg" {
         "image/svg+xml"
     } else {
