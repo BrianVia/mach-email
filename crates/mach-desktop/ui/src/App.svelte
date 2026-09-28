@@ -194,6 +194,12 @@
     return { ...next, selected: clamp(next.selected, 0, visibleInboxThreads(next).length - 1) };
   }
 
+  function accountFilterOf(v: AppView): string | null {
+    if (v.kind === "inbox") return v.account;
+    if (v.kind === "thread") return v.origin?.account ?? null;
+    return null;
+  }
+
   function inboxAccounts(inbox: InboxView): string[] {
     return status?.accounts.length ? status.accounts : [...new Set(inbox.threads.map((thread) => thread.account_id))];
   }
@@ -1153,6 +1159,9 @@
   {subtitle}
   accountEmail={status?.accounts.length === 1 ? status.accounts[0] : status?.email}
   accountLabel={status?.accounts.length === 1 ? accountLabel(status.accounts[0]) : status?.email}
+  accounts={(status?.accounts ?? []).map((email) => ({ email, label: accountLabel(email) }))}
+  accountFilter={accountFilterOf(view.kind === "palette" ? view.background : view)}
+  onAccountFilter={view.kind === "inbox" ? (email) => { if (view.kind === "inbox") view = selectInboxAccount(view, email); } : undefined}
   onAddAccount={() => void addAccountFromApp()}
   online={allAccountsSynced}
   {outbox}

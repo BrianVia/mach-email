@@ -10,6 +10,9 @@
     subtitle,
     accountEmail,
     accountLabel,
+    accounts,
+    accountFilter,
+    onAccountFilter,
     onAddAccount,
     online,
     outbox,
@@ -26,6 +29,10 @@
     subtitle: string;
     accountEmail?: string;
     accountLabel?: string;
+    accounts: { email: string; label: string }[];
+    accountFilter: string | null;
+    // Undefined when the current view has no inbox to filter.
+    onAccountFilter?: (email: string | null) => void;
     onAddAccount: () => void;
     online: boolean;
     outbox: OutboxSummary;
@@ -64,7 +71,30 @@
       <div class="subtitle" data-tauri-drag-region>{subtitle}</div>
     </div>
     <div class="account">
-      <span title={accountEmail}>{accountLabel}</span>
+      {#if accounts.length > 1}
+        <span class="account-picker">
+          <select
+            aria-label="Filter inbox by account"
+            value={accountFilter ?? ""}
+            disabled={!onAccountFilter}
+            onchange={(event) => {
+              onAccountFilter?.(event.currentTarget.value || null);
+              // App shortcuts listen on document; drop focus so j/k don't also move the select.
+              event.currentTarget.blur();
+            }}
+          >
+            <option value="">{accountLabel}</option>
+            {#each accounts as account}
+              <option value={account.email} title={account.email}>{account.label === account.email ? account.label : `${account.label} (${account.email})`}</option>
+            {/each}
+          </select><i aria-hidden="true">▾</i>
+        </span>
+        {#if accountFilter && onAccountFilter}
+          <button class="clear-account" type="button" aria-label="Show all accounts" title="Show all accounts" onclick={() => onAccountFilter(null)}>✕</button>
+        {/if}
+      {:else}
+        <span title={accountEmail}>{accountLabel}</span>
+      {/if}
       <button class="add-account" type="button" aria-label="Add account" title="Add account" onclick={onAddAccount}>+</button>
       <span class:online class="status-pill">
         <i></i>{online ? "Live" : "Offline"}
@@ -134,6 +164,11 @@
   .title { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 600; line-height: 17px; text-overflow: ellipsis; white-space: nowrap; }
   .subtitle { overflow: hidden; color: var(--muted); font-size: 11px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
   .account { display: flex; flex-shrink: 0; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+  .account-picker { position: relative; display: inline-flex; align-items: center; }
+  .account-picker select { appearance: none; padding: 0 12px 0 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+  .account-picker select:disabled { cursor: default; }
+  .account-picker i { position: absolute; right: 0; font-style: normal; pointer-events: none; }
+  .clear-account { padding: 0 2px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; }
   .add-account { padding: 0 3px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 15px; }
   .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; color: var(--muted); background: color-mix(in oklab, var(--muted) 14%, transparent); font-weight: 500; }
   .status-pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
