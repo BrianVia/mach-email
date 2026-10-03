@@ -1,9 +1,9 @@
-//! Jev (TypeSafe System One via Cloudflare AI) scores each new inbox thread so
-//! code can decide which ones deserve a desktop notification. Jev only scores;
-//! the threshold lives here. Any failure fails open (thread still notifies).
+//! Cloudflare's Clef decision model scores each new inbox thread so code can
+//! decide which ones deserve a desktop notification. Clef only scores; the
+//! threshold lives here. Any failure fails open (thread still notifies).
 
 use mach_core::store::ThreadSummary;
-use mach_core::user_config::JevConfig;
+use mach_core::user_config::TriageConfig;
 use std::sync::OnceLock;
 use tracing::{info, warn};
 
@@ -29,8 +29,8 @@ fn questions() -> serde_json::Value {
             "type": "noul",
             "instructions": "Would a busy professional want an immediate desktop notification for this email?",
             "criteria": {
-                "true": "A real person or time-sensitive matter that benefits from being seen now",
-                "false": "Newsletter, promotion, receipt, automated alert, or anything that can wait"
+                "true": "Written by a real person the recipient knows, including a teacher, school, coach, family member, or colleague, even if sent to a group; or an urgent security or time-sensitive matter",
+                "false": "Marketing, newsletter publication, receipt, shipping update, or routine automated notification"
             }
         },
         "needs_reply": {
@@ -64,13 +64,13 @@ fn state_for(thread: &ThreadSummary) -> serde_json::Value {
     })
 }
 
-/// Pull our four answers out of a Jev response, tolerating Cloudflare's
-/// `{ "result": {...} }` envelope or the bare TypeSafe shape.
-pub fn parse_verdict(body: &serde_json::Value) -> Option<Verdict> {
-    let answers = body
-        .get("result")
-        .unwrap_or(body)
-        .get("answers")?;
+/// Pull our answers out of the response. Workers AI nests them under one or
+/// more `result` envelopes depending on the model, so unwrap until found.
+pub fn parse_verdict(mut body: &serde_json::Value) -> Option<Verdict> {
+    while body.get("answers").is_none() {
+        body = body.get("result")?;
+    }
+    let answers = &body["answers"];
     let kind = answers.get("kind")?;
     Some(Verdict {
         notify: answers.get("notify")?.get("noul")?.as_f64()?,
@@ -90,34 +90,29 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
-pub async fn score(cfg: &JevConfig, thread: &ThreadSummary) -> anyhow::Result<Verdict> {
+pub async fn score(cfg: &TriageConfig, thread: &ThreadSummary) -> anyhow::Result<Verdict> {
     let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/ai/run",
+        "https://api.cloudflare.com/client/v4/accounts/{}/ai/run/@cf/cloudflare/clef",
         cfg.cloudflare_account_id
     );
-    let mut request = client()
+    let response = client()
         .post(&url)
         .bearer_auth(&cfg.cloudflare_api_token)
-        .json(&serde_json::json!({
-            "model": "typesafe/jev",
-            "input": { "state": state_for(thread), "questions": questions() },
-        }));
-    if let Some(gateway) = &cfg.gateway_id {
-        request = request.header("cf-aig-gateway-id", gateway);
-    }
-    let response = request.send().await?;
+        .json(&serde_json::json!({ "state": state_for(thread), "questions": questions() }))
+        .send()
+        .await?;
     let status = response.status();
     let body: serde_json::Value = response.json().await?;
     if !status.is_success() {
-        anyhow::bail!("jev http {status}: {body}");
+        anyhow::bail!("clef http {status}: {body}");
     }
-    parse_verdict(&body).ok_or_else(|| anyhow::anyhow!("unexpected jev response: {body}"))
+    parse_verdict(&body).ok_or_else(|| anyhow::anyhow!("unexpected clef response: {body}"))
 }
 
 /// Score every new thread. Log-only unless `cfg.gate` is set; then drop the
-/// threads Jev says are not worth a notification. Errors keep the thread.
+/// threads Clef says are not worth a notification. Errors keep the thread.
 pub async fn gate_new_threads(
-    cfg: Option<&JevConfig>,
+    cfg: Option<&TriageConfig>,
     threads: Vec<ThreadSummary>,
 ) -> Vec<ThreadSummary> {
     let Some(cfg) = cfg else { return threads };
@@ -128,7 +123,7 @@ pub async fn gate_new_threads(
             Ok(verdict) => {
                 let keep = verdict.worth_notifying();
                 info!(
-                    target: "mach::jev",
+                    target: "mach::triage",
                     thread = thread.id.as_str(),
                     from = thread.participants.first().map(String::as_str).unwrap_or(""),
                     subject = thread.subject,
@@ -138,14 +133,14 @@ pub async fn gate_new_threads(
                     kind_confidence = verdict.kind_confidence,
                     would_notify = keep,
                     gate = cfg.gate,
-                    "jev scored new thread"
+                    "clef scored new thread"
                 );
                 if keep || !cfg.gate {
                     kept.push(thread);
                 }
             }
             Err(error) => {
-                warn!(target: "mach::jev", thread = thread.id.as_str(), %error, "jev scoring failed; notifying anyway");
+                warn!(target: "mach::triage", thread = thread.id.as_str(), %error, "clef scoring failed; notifying anyway");
                 kept.push(thread);
             }
         }
@@ -159,7 +154,7 @@ mod tests {
 
     fn answers() -> serde_json::Value {
         serde_json::json!({
-            "model": "jev-1.13.0",
+            "model": "clef",
             "answers": {
                 "notify": { "type": "noul", "noul": 0.2 },
                 "needs_reply": { "type": "noul", "noul": 0.9 },
@@ -170,10 +165,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_bare_and_cloudflare_wrapped_responses() {
+    fn parses_bare_and_nested_cloudflare_responses() {
         let bare = parse_verdict(&answers()).unwrap();
         let wrapped = parse_verdict(&serde_json::json!({ "success": true, "result": answers() })).unwrap();
+        let double = parse_verdict(&serde_json::json!({ "result": { "state": "Completed", "result": answers() } })).unwrap();
         assert_eq!(bare, wrapped);
+        assert_eq!(bare, double);
         assert_eq!(bare.kind, "person");
         assert!(bare.worth_notifying(), "needs_reply alone should pass the gate");
         assert!(parse_verdict(&serde_json::json!({ "errors": [] })).is_none());

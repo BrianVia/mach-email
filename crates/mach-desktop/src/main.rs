@@ -10,7 +10,7 @@
 
 mod commands;
 mod debug_server;
-mod jev;
+mod triage;
 
 use std::collections::HashSet;
 use std::path::PathBuf;

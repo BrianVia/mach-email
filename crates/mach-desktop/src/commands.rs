@@ -207,7 +207,7 @@ pub(crate) async fn sync_account(
             } else {
                 Vec::new()
             };
-            let new_threads = crate::jev::gate_new_threads(state.user_config.jev.as_ref(), new_threads).await;
+            let new_threads = crate::triage::gate_new_threads(state.user_config.triage.as_ref(), new_threads).await;
             if seen_before && (tick_changed(&report) || !new_threads.is_empty()) {
                 emit_sync_event(
                     app,

@@ -14,20 +14,18 @@ pub struct UserConfig {
     pub signatures: BTreeMap<String, String>,
     #[serde(default)]
     pub snippets: BTreeMap<String, String>,
-    /// Optional Jev (TypeSafe) scoring of new inbox threads; see desktop `jev.rs`.
+    /// Optional Clef scoring of new inbox threads; see desktop `triage.rs`.
     #[serde(default)]
-    pub jev: Option<JevConfig>,
+    pub triage: Option<TriageConfig>,
 }
 
-/// `[jev]` section of config.toml. Calls typesafe/jev through Cloudflare AI.
+/// `[triage]` section of config.toml. Calls Cloudflare's Clef decision model.
 #[derive(Debug, Clone, Deserialize)]
-pub struct JevConfig {
+pub struct TriageConfig {
     pub cloudflare_account_id: String,
     pub cloudflare_api_token: String,
-    #[serde(default)]
-    pub gateway_id: Option<String>,
     /// `false` (default) = log-only: every new thread is scored and logged
-    /// but still notifies. `true` = only threads Jev flags notify.
+    /// but still notifies. `true` = only threads Clef flags notify.
     #[serde(default)]
     pub gate: bool,
 }
