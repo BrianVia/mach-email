@@ -1,10 +1,6 @@
 //! Minimal Gmail v1 HTTP client. Holds credentials, transparently refreshes
 //! the access token (proactively when expired, reactively on 401), and
 //! deserializes responses into typed structs.
-//!
-//! v0 surface: `get_profile`, `list_labels`, `list_threads_page`,
-//! `get_thread_metadata`. Mutating endpoints (modify, send, drafts) come
-//! with the outbox-drain follow-up.
 
 use std::{
     future::Future,
@@ -17,7 +13,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use reqwest::{header::RETRY_AFTER, Client, StatusCode};
+use reqwest::{header::RETRY_AFTER, Client, Method, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
@@ -78,6 +74,29 @@ async fn retry_rate_limit(
     );
     tokio::time::sleep(delay).await;
     true
+}
+
+/// A non-retryable HTTP failure from a mutating request, kept typed so
+/// callers can branch on the status (e.g. 404 for a draft deleted in Gmail).
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct HttpError {
+    pub status: StatusCode,
+    message: String,
+}
+
+pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HttpError>()
+        .is_some_and(|e| e.status == StatusCode::NOT_FOUND)
+}
+
+fn draft_body(raw_b64url: &str, thread_id: Option<&str>) -> serde_json::Value {
+    let mut message = serde_json::json!({ "raw": raw_b64url });
+    if let Some(tid) = thread_id {
+        message["threadId"] = serde_json::Value::String(tid.to_string());
+    }
+    serde_json::json!({ "message": message })
 }
 
 pub struct GmailClient {
@@ -353,29 +372,43 @@ impl GmailClient {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<T> {
+        self.send_json(Method::POST, url, Some(body)).await
+    }
+
+    async fn send_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<T> {
         let mut refreshed = false;
         let mut rate_attempt = 0;
         loop {
             let token = self.access_token().await?;
-            let resp = self
+            let mut req = self
                 .http
-                .post(url)
-                .bearer_auth(&token)
-                .json(body)
-                .send()
-                .await?;
+                .request(method.clone(), url)
+                .bearer_auth(&token);
+            if let Some(body) = body {
+                req = req.json(body);
+            }
+            let resp = req.send().await?;
             match resp.status() {
                 StatusCode::OK | StatusCode::NO_CONTENT => {
                     if resp.content_length().unwrap_or(0) == 0 {
                         // Empty body — synthesize null which deserializes
                         // happily into serde_json::Value::Null.
                         let null = serde_json::Value::Null;
-                        return serde_json::from_value(null).context("parsing empty POST response");
+                        return serde_json::from_value(null)
+                            .with_context(|| format!("parsing empty {method} response"));
                     }
-                    return resp.json().await.context("parsing POST response");
+                    return resp
+                        .json()
+                        .await
+                        .with_context(|| format!("parsing {method} response"));
                 }
                 StatusCode::UNAUTHORIZED if !refreshed => {
-                    warn!("got 401 on POST; forcing refresh + retry");
+                    warn!("got 401 on {method}; forcing refresh + retry");
                     self.refresh().await?;
                     refreshed = true;
                     continue;
@@ -391,9 +424,56 @@ impl GmailClient {
                         rate_attempt += 1;
                         continue;
                     }
-                    bail!("HTTP {s} from POST {url}: {body}");
+                    return Err(HttpError {
+                        status: s,
+                        message: format!("HTTP {s} from {method} {url}: {body}"),
+                    }
+                    .into());
                 }
             }
+        }
+    }
+
+    /// POST `drafts`. Returns the Gmail draft id.
+    pub async fn create_draft(&self, raw_b64url: &str, thread_id: Option<&str>) -> Result<String> {
+        let resp: serde_json::Value = self
+            .post_json_with_response(&format!("{BASE}/drafts"), &draft_body(raw_b64url, thread_id))
+            .await?;
+        resp["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("drafts.create response has no id: {resp}"))
+    }
+
+    /// PUT `drafts/{id}`, replacing the draft's message. A deleted draft
+    /// surfaces as an [`HttpError`] with status 404.
+    pub async fn update_draft(
+        &self,
+        draft_id: &str,
+        raw_b64url: &str,
+        thread_id: Option<&str>,
+    ) -> Result<()> {
+        self.send_json::<serde_json::Value>(
+            Method::PUT,
+            &format!("{BASE}/drafts/{draft_id}"),
+            Some(&draft_body(raw_b64url, thread_id)),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// DELETE `drafts/{id}`. Already-deleted drafts count as success.
+    pub async fn delete_draft(&self, draft_id: &str) -> Result<()> {
+        match self
+            .send_json::<serde_json::Value>(
+                Method::DELETE,
+                &format!("{BASE}/drafts/{draft_id}"),
+                None,
+            )
+            .await
+        {
+            Err(e) if is_not_found(&e) => Ok(()),
+            other => other.map(|_| ()),
         }
     }
 

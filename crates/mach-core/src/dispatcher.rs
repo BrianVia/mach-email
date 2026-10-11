@@ -407,22 +407,31 @@ impl Dispatcher {
             .find_draft(&self.scope, draft_id)
             .await?
             .ok_or_else(|| CoreError::NotFound("draft not found".into()))?;
+        // The UI saves on every composer close; only real edits sync to Gmail,
+        // so opening and closing a composer never creates an empty remote draft.
+        let mut changed = false;
         if let Some(to) = patch.to {
+            changed |= draft.to != to;
             draft.to = to;
         }
         if let Some(cc) = patch.cc {
+            changed |= draft.cc != cc;
             draft.cc = cc;
         }
         if let Some(bcc) = patch.bcc {
+            changed |= draft.bcc != bcc;
             draft.bcc = bcc;
         }
         if let Some(subject) = patch.subject {
+            changed |= draft.subject != subject;
             draft.subject = subject;
         }
         if let Some(body_md) = patch.body_md {
+            changed |= draft.body_md != body_md;
             draft.body_md = body_md;
         }
         if let Some(attachments) = patch.attachments {
+            changed |= draft.attachments != attachments;
             draft.attachments = attachments;
         }
         if let Some(message_id) = patch.in_reply_to_message_id {
@@ -433,6 +442,17 @@ impl Dispatcher {
         }
         draft.updated_at = chrono::Utc::now();
         self.store.save_draft_local(&draft).await?;
+        if changed {
+            self.store
+                .enqueue_outbox(
+                    &draft.account_id,
+                    &OpId::new(),
+                    &OutboxOpKind::SaveDraft {
+                        draft_id: draft.id.clone(),
+                    },
+                )
+                .await?;
+        }
         self.draft_outcome("save_draft", draft, None, String::new())
     }
 

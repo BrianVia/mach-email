@@ -249,11 +249,31 @@ impl MailStore for InMemoryStore {
     }
 
     async fn save_draft_local(&self, draft: &Draft) -> CoreResult<()> {
-        self.inner
+        let mut inner = self.inner.lock().unwrap();
+        let key = (draft.account_id.clone(), draft.id.clone());
+        let mut draft = draft.clone();
+        if draft.gmail_draft_id.is_none() {
+            draft.gmail_draft_id = inner.drafts.get(&key).and_then(|d| d.gmail_draft_id.clone());
+        }
+        inner.drafts.insert(key, draft);
+        Ok(())
+    }
+
+    async fn set_gmail_draft_id(
+        &self,
+        account: &AccountId,
+        id: &DraftId,
+        gmail_draft_id: &str,
+    ) -> CoreResult<()> {
+        if let Some(draft) = self
+            .inner
             .lock()
             .unwrap()
             .drafts
-            .insert((draft.account_id.clone(), draft.id.clone()), draft.clone());
+            .get_mut(&(account.clone(), id.clone()))
+        {
+            draft.gmail_draft_id = Some(gmail_draft_id.to_string());
+        }
         Ok(())
     }
 
@@ -475,7 +495,9 @@ impl MailStore for InMemoryStore {
             .outbox
             .iter()
             .filter(|op| {
-                scope_matches(scope, &op.account_id) && op.created_at.timestamp_millis() >= since_ms
+                scope_matches(scope, &op.account_id)
+                    && op.created_at.timestamp_millis() >= since_ms
+                    && !matches!(op.kind, OutboxOpKind::SaveDraft { .. })
             })
             .map(|op| {
                 ActivityEntry::from_outbox(
@@ -685,10 +707,49 @@ mod tests {
         assert!(matches!(
             store.outbox_snapshot().as_slice(),
             [OutboxOp {
+                kind: OutboxOpKind::SaveDraft { draft_id: saved_id },
+                ..
+            }, OutboxOp {
                 kind: OutboxOpKind::SendDraft { draft_id },
                 ..
-            }] if draft_id == &draft.id
+            }] if saved_id == &draft.id && draft_id == &draft.id
         ));
+    }
+
+    #[tokio::test]
+    async fn save_draft_enqueues_remote_sync_only_when_content_changes() {
+        let store = Arc::new(InMemoryStore::new());
+        let dispatcher = Dispatcher::with_scope(
+            store.clone(),
+            AccountScope::One(AccountId::new("test@example.com")),
+        );
+        let composed = dispatcher
+            .execute(Action::ComposeNew { account: None })
+            .await
+            .unwrap();
+        let draft: Draft = serde_json::from_value(composed.data.unwrap()["draft"].clone()).unwrap();
+        let save = || Action::SaveDraft {
+            draft_id: draft.id.clone(),
+            patch: DraftPatch {
+                subject: Some("Hello".into()),
+                ..DraftPatch::default()
+            },
+        };
+
+        dispatcher.execute(save()).await.unwrap();
+        dispatcher.execute(save()).await.unwrap();
+
+        let kinds: Vec<OutboxOpKind> = store
+            .outbox_snapshot()
+            .into_iter()
+            .map(|op| op.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [OutboxOpKind::SaveDraft {
+                draft_id: draft.id.clone()
+            }]
+        );
     }
 
     #[tokio::test]
@@ -774,10 +835,14 @@ mod tests {
         assert!(matches!(
             store.outbox_snapshot().as_slice(),
             [OutboxOp {
+                account_id: saved_account,
+                kind: OutboxOpKind::SaveDraft { .. },
+                ..
+            }, OutboxOp {
                 account_id,
                 kind: OutboxOpKind::SendDraft { draft_id },
                 ..
-            }] if account_id == &draft_account && draft_id == &draft.id
+            }] if saved_account == &draft_account && account_id == &draft_account && draft_id == &draft.id
         ));
     }
 
@@ -1013,8 +1078,9 @@ mod tests {
             .await
             .unwrap();
 
+        // Outbox row 1 is the SaveDraft; row 2 is the send.
         let error = dispatcher
-            .execute(Action::UndoActivity { outbox_id: 1 })
+            .execute(Action::UndoActivity { outbox_id: 2 })
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not undoable"));

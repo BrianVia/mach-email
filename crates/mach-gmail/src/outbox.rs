@@ -20,7 +20,7 @@ use mach_core::store::{MailStore, Message, OutboxOp, OutboxOpKind};
 use mach_store::SqliteStore;
 use tracing::{debug, info, warn};
 
-use crate::client::GmailClient;
+use crate::client::{is_not_found, GmailClient};
 
 pub struct OutboxWorker {
     account: AccountId,
@@ -110,30 +110,12 @@ impl OutboxWorker {
                 Ok(())
             }
             OutboxOpKind::SendDraft { draft_id } => {
-                // Look up the draft locally, build the MIME, send.
                 let draft = self
                     .store
                     .get_draft(&self.account, draft_id)
                     .await?
                     .ok_or_else(|| anyhow!("draft {draft_id} not found"))?;
-                let source = match &draft.in_reply_to_message_id {
-                    Some(message_id) => {
-                        let source = self
-                            .store
-                            .get_message(&AccountScope::One(self.account.clone()), message_id)
-                            .await?;
-                        if source.is_none() {
-                            warn!(
-                                draft_id = %draft_id,
-                                source_message_id = %message_id,
-                                "source message for draft is missing; sending without RFC threading headers"
-                            );
-                        }
-                        source
-                    }
-                    None => None,
-                };
-                let raw = build_mime_raw(&draft, source.as_ref())?;
+                let raw = self.draft_raw(&draft).await?;
                 let _sent_id = self
                     .client
                     .send_raw(&raw, draft.thread_id.as_ref().map(|t| t.as_str()))
@@ -142,14 +124,73 @@ impl OutboxWorker {
                 self.store
                     .complete_send(op.id, &self.account, draft_id)
                     .await?;
+                if let Some(gmail_id) = &draft.gmail_draft_id {
+                    // The message is already sent; a leftover Gmail draft is
+                    // cosmetic, so failing the op here would only re-send.
+                    if let Err(e) = self.client.delete_draft(gmail_id).await {
+                        warn!(account = %self.account, %draft_id, error = %format!("{e:#}"), "deleting synced Gmail draft after send failed");
+                    }
+                }
                 Ok(())
             }
-            OutboxOpKind::SaveDraft { .. } | OutboxOpKind::DeleteDraft { .. } => {
-                // v1: drafts only live locally. Remote draft sync is a v1.5
-                // item. Treat as no-op so the outbox doesn't pile up.
+            OutboxOpKind::SaveDraft { draft_id } => {
+                // Sent or deleted since this op was queued: nothing to sync.
+                let Some(draft) = self.store.get_draft(&self.account, draft_id).await? else {
+                    return Ok(());
+                };
+                let raw = self.draft_raw(&draft).await?;
+                let thread_id = draft.thread_id.as_ref().map(|t| t.as_str());
+                if let Some(gmail_id) = &draft.gmail_draft_id {
+                    match self.client.update_draft(gmail_id, &raw, thread_id).await {
+                        Err(e) if is_not_found(&e) => {
+                            debug!(%draft_id, %gmail_id, "Gmail draft gone; recreating");
+                        }
+                        other => return other.context("update_draft"),
+                    }
+                }
+                let gmail_id = self
+                    .client
+                    .create_draft(&raw, thread_id)
+                    .await
+                    .context("create_draft")?;
+                self.store
+                    .set_gmail_draft_id(&self.account, draft_id, &gmail_id)
+                    .await?;
+                Ok(())
+            }
+            OutboxOpKind::DeleteDraft { draft_id } => {
+                let draft = self.store.get_draft(&self.account, draft_id).await?;
+                if let Some(gmail_id) = draft.and_then(|d| d.gmail_draft_id) {
+                    self.client
+                        .delete_draft(&gmail_id)
+                        .await
+                        .context("delete_draft")?;
+                }
                 Ok(())
             }
         }
+    }
+
+    /// MIME for `draft`, threaded onto its source message when we have it.
+    async fn draft_raw(&self, draft: &mach_core::store::Draft) -> Result<String> {
+        let source = match &draft.in_reply_to_message_id {
+            Some(message_id) => {
+                let source = self
+                    .store
+                    .get_message(&AccountScope::One(self.account.clone()), message_id)
+                    .await?;
+                if source.is_none() {
+                    warn!(
+                        draft_id = %draft.id,
+                        source_message_id = %message_id,
+                        "source message for draft is missing; building without RFC threading headers"
+                    );
+                }
+                source
+            }
+            None => None,
+        };
+        build_mime_raw(draft, source.as_ref())
     }
 }
 

@@ -308,6 +308,12 @@ pub trait MailStore: Send + Sync {
     async fn get_draft(&self, account: &AccountId, id: &DraftId) -> CoreResult<Option<Draft>>;
     async fn save_draft_local(&self, draft: &Draft) -> CoreResult<()>;
     async fn delete_draft_local(&self, account: &AccountId, id: &DraftId) -> CoreResult<()>;
+    async fn set_gmail_draft_id(
+        &self,
+        account: &AccountId,
+        id: &DraftId,
+        gmail_draft_id: &str,
+    ) -> CoreResult<()>;
     async fn queue_draft_send(
         &self,
         account: &AccountId,

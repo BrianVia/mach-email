@@ -1427,7 +1427,9 @@ impl MailStore for SqliteStore {
                                      attachments_json, updated_at, state, calendar_reply_ics)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'draft', ?13)
                  ON CONFLICT(account_id, id) DO UPDATE SET
-                   gmail_draft_id         = excluded.gmail_draft_id,
+                   -- A stale in-memory draft must not erase the id the outbox
+                   -- worker stored meanwhile, or the next save duplicates it in Gmail.
+                   gmail_draft_id         = COALESCE(excluded.gmail_draft_id, drafts.gmail_draft_id),
                    thread_id              = excluded.thread_id,
                    in_reply_to_message_id = excluded.in_reply_to_message_id,
                    to_addrs               = excluded.to_addrs,
@@ -1473,6 +1475,29 @@ impl MailStore for SqliteStore {
             conn.execute(
                 "DELETE FROM drafts WHERE account_id = ?1 AND id = ?2",
                 params![account.as_str(), id.as_str()],
+            )
+            .map_err(map_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(map_err)?
+    }
+
+    async fn set_gmail_draft_id(
+        &self,
+        account: &AccountId,
+        id: &DraftId,
+        gmail_draft_id: &str,
+    ) -> CoreResult<()> {
+        let pool = self.pool.clone();
+        let account = account.clone();
+        let id = id.clone();
+        let gmail_draft_id = gmail_draft_id.to_string();
+        spawn_blocking(move || -> CoreResult<()> {
+            let conn = pool.get().map_err(map_err)?;
+            conn.execute(
+                "UPDATE drafts SET gmail_draft_id = ?3 WHERE account_id = ?1 AND id = ?2",
+                params![account.as_str(), id.as_str(), gmail_draft_id],
             )
             .map_err(map_err)?;
             Ok(())
@@ -1861,6 +1886,7 @@ impl MailStore for SqliteStore {
                             attempts, last_error, state, undone_by
                      FROM outbox
                      WHERE (?1 IS NULL OR account_id = ?1) AND created_at >= ?2
+                       AND op_kind != 'save_draft'
                      ORDER BY created_at DESC, id DESC LIMIT ?3",
                 )
                 .map_err(map_err)?;
@@ -2383,6 +2409,24 @@ mod tests {
             .unwrap();
         assert_eq!(state, "draft");
         assert_eq!(outbox_count, 0);
+    }
+
+    #[tokio::test]
+    async fn stale_local_save_keeps_gmail_draft_id() {
+        let store = SqliteStore::new(open_in_memory().unwrap());
+        let mut draft = draft("synced");
+        store.save_draft_local(&draft).await.unwrap();
+        store
+            .set_gmail_draft_id(&account(), &draft.id, "r-123")
+            .await
+            .unwrap();
+
+        draft.subject = "Edited".into();
+        store.save_draft_local(&draft).await.unwrap();
+
+        let saved = store.get_draft(&account(), &draft.id).await.unwrap().unwrap();
+        assert_eq!(saved.gmail_draft_id.as_deref(), Some("r-123"));
+        assert_eq!(saved.subject, "Edited");
     }
 
     #[tokio::test]
