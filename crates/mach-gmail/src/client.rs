@@ -392,16 +392,11 @@ impl GmailClient {
             let resp = req.send().await?;
             match resp.status() {
                 StatusCode::OK | StatusCode::NO_CONTENT => {
-                    if resp.content_length().unwrap_or(0) == 0 {
-                        // Empty body — synthesize null which deserializes
-                        // happily into serde_json::Value::Null.
-                        let null = serde_json::Value::Null;
-                        return serde_json::from_value(null)
-                            .with_context(|| format!("parsing empty {method} response"));
-                    }
-                    return resp
-                        .json()
-                        .await
+                    // Gzipped or chunked replies carry no Content-Length, so
+                    // only the body itself can say whether it is empty.
+                    let text = resp.text().await?;
+                    let value = if text.trim().is_empty() { "null" } else { &text };
+                    return serde_json::from_str(value)
                         .with_context(|| format!("parsing {method} response"));
                 }
                 StatusCode::UNAUTHORIZED if !refreshed => {
