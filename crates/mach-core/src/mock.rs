@@ -253,7 +253,10 @@ impl MailStore for InMemoryStore {
         let key = (draft.account_id.clone(), draft.id.clone());
         let mut draft = draft.clone();
         if draft.gmail_draft_id.is_none() {
-            draft.gmail_draft_id = inner.drafts.get(&key).and_then(|d| d.gmail_draft_id.clone());
+            draft.gmail_draft_id = inner
+                .drafts
+                .get(&key)
+                .and_then(|d| d.gmail_draft_id.clone());
         }
         inner.drafts.insert(key, draft);
         Ok(())

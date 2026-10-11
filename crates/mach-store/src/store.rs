@@ -2424,7 +2424,11 @@ mod tests {
         draft.subject = "Edited".into();
         store.save_draft_local(&draft).await.unwrap();
 
-        let saved = store.get_draft(&account(), &draft.id).await.unwrap().unwrap();
+        let saved = store
+            .get_draft(&account(), &draft.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(saved.gmail_draft_id.as_deref(), Some("r-123"));
         assert_eq!(saved.subject, "Edited");
     }

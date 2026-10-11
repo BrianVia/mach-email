@@ -385,10 +385,7 @@ impl GmailClient {
         let mut rate_attempt = 0;
         loop {
             let token = self.access_token().await?;
-            let mut req = self
-                .http
-                .request(method.clone(), url)
-                .bearer_auth(&token);
+            let mut req = self.http.request(method.clone(), url).bearer_auth(&token);
             if let Some(body) = body {
                 req = req.json(body);
             }
@@ -437,7 +434,10 @@ impl GmailClient {
     /// POST `drafts`. Returns the Gmail draft id.
     pub async fn create_draft(&self, raw_b64url: &str, thread_id: Option<&str>) -> Result<String> {
         let resp: serde_json::Value = self
-            .post_json_with_response(&format!("{BASE}/drafts"), &draft_body(raw_b64url, thread_id))
+            .post_json_with_response(
+                &format!("{BASE}/drafts"),
+                &draft_body(raw_b64url, thread_id),
+            )
             .await?;
         resp["id"]
             .as_str()
