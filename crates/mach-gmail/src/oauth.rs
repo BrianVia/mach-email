@@ -10,7 +10,7 @@ use oauth2::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tracing::{debug, warn};
+use tracing::debug;
 use url::Url;
 
 use crate::config::OAuthConfig;
@@ -46,7 +46,8 @@ const SCOPES: &[&str] = &[
 /// Google's consent screen with that port as the redirect → wait for the
 /// browser to GET `/?code=...&state=...` → exchange the code → fetch the
 /// account email so we can show the user what they linked.
-pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
+/// `login_hint` preselects that Google account, e.g. when re-signing in.
+pub async fn login(config: &OAuthConfig, login_hint: Option<&str>) -> Result<StoredCredentials> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("failed to bind loopback listener for OAuth redirect")?;
@@ -69,6 +70,9 @@ pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
     }
     if crate::config::pubsub_topic().is_some() {
         req = req.add_scope(Scope::new("https://www.googleapis.com/auth/pubsub".into()));
+    }
+    if let Some(hint) = login_hint {
+        req = req.add_extra_param("login_hint", hint);
     }
     let (auth_url, csrf_token) = req
         // `offline` is what makes Google issue a refresh_token; without it
@@ -169,13 +173,11 @@ pub async fn login(config: &OAuthConfig) -> Result<StoredCredentials> {
     let access_token = token.access_token().secret().clone();
     let expires_at = expires_at_from(token.expires_in());
 
-    let email = match fetch_email(&access_token).await {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(error = %e, "could not fetch account email; storing as 'unknown'");
-            "unknown".into()
-        }
-    };
+    // Google's consent screen lets people untick scopes; without Gmail access
+    // the profile lookup fails and there is no account to file this under.
+    let email = fetch_email(&access_token).await.context(
+        "could not read the account's Gmail address; sign in again and allow every permission Google asks for",
+    )?;
 
     Ok(login_credentials(
         email,

@@ -685,8 +685,12 @@ pub fn account_status(state: State<'_, AppState>) -> Result<serde_json::Value, S
 }
 
 #[tauri::command]
-pub async fn add_account(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
-    let credentials = mach_gmail::add_account(state.store.clone())
+pub async fn add_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    login_hint: Option<String>,
+) -> Result<String, String> {
+    let credentials = mach_gmail::add_account(state.store.clone(), login_hint.as_deref())
         .await
         .map_err(|error| format!("{error:#}"))?;
     state

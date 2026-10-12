@@ -601,16 +601,16 @@
     }
   }
 
-  async function addAccountFromApp() {
+  async function addAccountFromApp(loginHint?: string) {
     if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
     notice = "Finish signing in in your browser…";
     noticePath = null;
     try {
-      const email = await addAccount();
+      const email = await addAccount(loginHint);
       await refreshStatus();
       labels = await listLabels();
       await refreshInboxPreservingSelection();
-      showNotice(`Added ${accountLabel(email)}`);
+      showNotice(`${loginHint ? "Signed in again to" : "Added"} ${accountLabel(email)}`);
     } catch (error) {
       notice = null;
       showActionError(error);
@@ -1247,7 +1247,7 @@
   {#if bootError || actionError || notice || unsubscribeConfirm || status?.needs_reauth.length}
     <div class="errors">
       {#each status?.needs_reauth ?? [] as email}
-        <div class="notice reauth">Sign-in expired for {email}. Run mach auth login in a terminal.</div>
+        <button class="notice reauth" onclick={() => void addAccountFromApp(email)}>Sign-in expired for {email}. Click to sign in again.</button>
       {/each}
       {#if bootError}<div class="error">⚠ {bootError}</div>{/if}
       {#if actionError}<button class="error" onclick={() => (actionError = null)}>⚠ {actionError}</button>{/if}
@@ -1276,7 +1276,6 @@
   .error { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); background: color-mix(in oklab, var(--danger) 20%, var(--surface)); color: var(--danger); font-size: 14px; text-align: left; }
   button.error { cursor: pointer; }
   .notice { display: block; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); background: color-mix(in oklab, var(--accent) 18%, var(--surface)); color: var(--accent); font-size: 14px; text-align: left; cursor: pointer; }
-  .reauth { cursor: default; }
   .confirm { display: flex; align-items: center; gap: 12px; cursor: default; }
   .confirm button { padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: inherit; cursor: pointer; }
 </style>

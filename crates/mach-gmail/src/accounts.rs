@@ -7,9 +7,12 @@ use tracing::warn;
 
 use crate::{BootstrapStats, GmailClient, OAuthConfig, StoredCredentials};
 
-pub async fn add_account(store: Arc<SqliteStore>) -> Result<StoredCredentials> {
+pub async fn add_account(
+    store: Arc<SqliteStore>,
+    login_hint: Option<&str>,
+) -> Result<StoredCredentials> {
     let config = OAuthConfig::load().context("OAuth client credentials not configured")?;
-    let credentials = crate::oauth::login(&config).await?;
+    let credentials = crate::oauth::login(&config, login_hint).await?;
     crate::credentials::save(&credentials)?;
     config.persist()?;
     if crate::credentials::load_all()?.len() == 1 {

@@ -329,8 +329,8 @@ export async function fetchAccountStatus(): Promise<AccountStatus> {
   return invoke<AccountStatus>("account_status");
 }
 
-export async function addAccount(): Promise<string> {
-  return invoke<string>("add_account");
+export async function addAccount(loginHint?: string): Promise<string> {
+  return invoke<string>("add_account", { loginHint: loginHint ?? null });
 }
 
 export async function flushOutbox(): Promise<{

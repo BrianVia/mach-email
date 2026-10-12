@@ -4,7 +4,7 @@ use mach_gmail::credentials;
 
 pub async fn login() -> Result<()> {
     let store = crate::runtime::open_store().await?;
-    let creds = mach_gmail::add_account(store).await?;
+    let creds = mach_gmail::add_account(store, None).await?;
     println!("✓ Logged in as {}", creds.email);
     println!("  Access token expires {}", creds.expires_at.to_rfc3339());
     Ok(())

@@ -888,7 +888,7 @@ async fn execute_adapter_action(app: &mut App, action: &str) {
         let accounts = app.body_fetchers.clone();
         tokio::spawn(async move {
             let result = async {
-                let credentials = mach_gmail::add_account(store.clone())
+                let credentials = mach_gmail::add_account(store.clone(), None)
                     .await
                     .map_err(|error| format!("{error:#}"))?;
                 accounts
