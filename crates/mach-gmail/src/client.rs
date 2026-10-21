@@ -103,7 +103,16 @@ pub struct GmailClient {
     config: OAuthConfig,
     creds: Mutex<StoredCredentials>,
     http: Client,
+    /// Earliest instant the next request may start; see [`Self::pace`].
+    next_request_at: Mutex<tokio::time::Instant>,
 }
+
+/// Gmail allows 250 quota units per user per second and a thread fetch costs
+/// 10, so 40ms between requests keeps the costliest calls under the cap.
+/// Unpaced bursts kept an account rate-limited for days.
+/// ponytail: assumes every call costs 10 units; cheap calls are slowed too.
+/// Charge per-endpoint costs if sync throughput ever matters.
+const REQUEST_SPACING: std::time::Duration = std::time::Duration::from_millis(40);
 
 impl GmailClient {
     /// Construct from credentials already on disk. Errors if `mach auth login`
@@ -127,7 +136,18 @@ impl GmailClient {
             config,
             creds: Mutex::new(creds),
             http,
+            next_request_at: Mutex::new(tokio::time::Instant::now()),
         }))
+    }
+
+    async fn pace(&self) {
+        let start = {
+            let mut next = self.next_request_at.lock().await;
+            let start = (*next).max(tokio::time::Instant::now());
+            *next = start + REQUEST_SPACING;
+            start
+        };
+        tokio::time::sleep_until(start).await;
     }
 
     pub async fn email(&self) -> String {
@@ -181,6 +201,7 @@ impl GmailClient {
         let mut rate_attempt = 0;
         loop {
             let token = self.access_token().await?;
+            self.pace().await;
             let resp = self.http.get(url).bearer_auth(&token).send().await?;
             match resp.status() {
                 StatusCode::OK => return resp.json().await.context("parsing JSON response"),
@@ -215,6 +236,7 @@ impl GmailClient {
         let mut rate_attempt = 0;
         loop {
             let token = self.access_token().await?;
+            self.pace().await;
             let resp = self.http.get(url).bearer_auth(&token).send().await?;
             match resp.status() {
                 StatusCode::OK => {
@@ -389,6 +411,7 @@ impl GmailClient {
             if let Some(body) = body {
                 req = req.json(body);
             }
+            self.pace().await;
             let resp = req.send().await?;
             match resp.status() {
                 StatusCode::OK | StatusCode::NO_CONTENT => {
@@ -498,6 +521,7 @@ impl GmailClient {
         let mut rate_attempt = 0;
         loop {
             let token = self.access_token().await?;
+            self.pace().await;
             let resp = self.http.get(url).bearer_auth(&token).send().await?;
             match resp.status() {
                 StatusCode::OK => return resp.json().await.context("parsing JSON response"),
@@ -803,6 +827,24 @@ impl RemoteMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn requests_are_spaced_by_the_quota_interval() {
+        let client = GmailClient::from_credentials(
+            OAuthConfig { client_id: "client".into(), client_secret: "secret".into() },
+            StoredCredentials {
+                email: "pace@example.com".into(),
+                refresh_token: "r".into(),
+                access_token: "a".into(),
+                expires_at: chrono::Utc::now(),
+                needs_reauth: None,
+            },
+        )
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        futures::future::join_all((0..5).map(|_| client.pace())).await;
+        assert_eq!(started.elapsed(), REQUEST_SPACING * 4);
+    }
 
     #[test]
     fn decodes_pubsub_message_payload() {
