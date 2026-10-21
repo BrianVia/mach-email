@@ -32,6 +32,8 @@ pub struct AppState {
     pub default_keymap_toml: String,
     pub user_keymap_toml: Option<String>,
     pub synced_accounts: Arc<Mutex<HashSet<AccountId>>>,
+    /// Accounts with a sync tick in flight; see `commands::sync_account`.
+    pub syncing_accounts: Arc<Mutex<HashSet<AccountId>>>,
     pub user_config: UserConfig,
 }
 
@@ -132,6 +134,7 @@ async fn main() -> Result<()> {
         default_keymap_toml: mach_core::keymap::DEFAULT_KEYMAP_TOML.to_string(),
         user_keymap_toml: load_user_keymap_toml(),
         synced_accounts: Arc::new(Mutex::new(HashSet::new())),
+        syncing_accounts: Arc::new(Mutex::new(HashSet::new())),
         user_config,
     };
 
@@ -152,7 +155,15 @@ async fn main() -> Result<()> {
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    commands::sync_accounts(&app_handle, &body_fetchers).await;
+                    // One task per account so a slow mailbox never delays the
+                    // others; an account still mid-tick skips this round.
+                    for account in body_fetchers.accounts() {
+                        let app = app_handle.clone();
+                        let accounts = body_fetchers.clone();
+                        tokio::spawn(async move {
+                            let _ = commands::sync_account(&app, &accounts, &account).await;
+                        });
+                    }
                 }
             });
             if let (Some(subscription), Some(client)) = (

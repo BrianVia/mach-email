@@ -108,11 +108,12 @@ pub struct GmailClient {
 }
 
 /// Gmail allows 250 quota units per user per second and a thread fetch costs
-/// 10, so 40ms between requests keeps the costliest calls under the cap.
+/// 10. 100ms between requests uses at most 40% of that, leaving headroom for
+/// retries and other clients; 40ms sat exactly at the cap and still tripped it.
 /// Unpaced bursts kept an account rate-limited for days.
 /// ponytail: assumes every call costs 10 units; cheap calls are slowed too.
 /// Charge per-endpoint costs if sync throughput ever matters.
-const REQUEST_SPACING: std::time::Duration = std::time::Duration::from_millis(40);
+const REQUEST_SPACING: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl GmailClient {
     /// Construct from credentials already on disk. Errors if `mach auth login`

@@ -142,8 +142,14 @@ pub(crate) async fn sync_accounts(
     let mut failed = 0;
     let mut last_error = None;
 
-    for account in accounts.accounts() {
-        match sync_account(app, accounts, &account).await {
+    let results = futures::future::join_all(
+        accounts
+            .accounts()
+            .map(|account| async move { sync_account(app, accounts, &account).await }),
+    )
+    .await;
+    for result in results {
+        match result {
             Ok(true) => {
                 synced += 1;
             }
@@ -162,6 +168,32 @@ pub(crate) async fn sync_accounts(
     })
 }
 
+/// Marks an account as syncing until dropped, so overlapping ticks skip it
+/// instead of queueing behind the account's sync lock.
+struct InFlight {
+    set: Arc<std::sync::Mutex<HashSet<AccountId>>>,
+    account: AccountId,
+}
+
+impl InFlight {
+    fn claim(set: &Arc<std::sync::Mutex<HashSet<AccountId>>>, account: &AccountId) -> Option<Self> {
+        let fresh = set
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(account.clone());
+        fresh.then(|| Self { set: set.clone(), account: account.clone() })
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.account);
+    }
+}
+
 pub(crate) async fn sync_account(
     app: &AppHandle,
     accounts: &GmailAccountPool,
@@ -174,6 +206,9 @@ pub(crate) async fn sync_account(
         return Ok(false);
     }
     let state = app.state::<AppState>();
+    let Some(_in_flight) = InFlight::claim(&state.syncing_accounts, account) else {
+        return Ok(false);
+    };
     let email = account.as_str().to_string();
     let scope = AccountScope::One(account.clone());
     let before = state

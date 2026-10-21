@@ -707,6 +707,7 @@ pub async fn incremental_sync(
 
     touched_threads.extend(take_deferred(&account));
     let thread_ids: Vec<String> = touched_threads.into_iter().collect();
+    info!(%account, threads = thread_ids.len(), "refetching touched threads");
     let mut threads: Vec<RemoteThread> = Vec::with_capacity(thread_ids.len());
     let mut failures = Vec::new();
     let client_for_stream = client.clone();
