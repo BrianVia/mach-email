@@ -822,6 +822,7 @@ async fn gap_recover(
 
     Ok(IncrementalStats {
         events: 0,
+        threads_deferred: 0,
         echoes_suppressed: 0,
         threads_refetched: refetched,
         muted_archived: 0,
