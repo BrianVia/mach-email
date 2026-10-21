@@ -512,6 +512,8 @@ fn parse_address_list(raw: &str) -> Vec<String> {
 #[derive(Debug, Default, Clone)]
 pub struct IncrementalStats {
     pub events: u32,
+    /// Threads whose refetch failed; retried on the next incremental tick.
+    pub threads_deferred: u32,
     pub echoes_suppressed: u32,
     /// Distinct threads we re-fetched as a result of history events.
     pub threads_refetched: u32,
@@ -520,6 +522,33 @@ pub struct IncrementalStats {
     /// re-bootstrap on the last 7 days.
     pub gap_recovered: bool,
     pub new_cursor: u64,
+}
+
+/// Threads whose refetch failed, keyed by account, folded into the next
+/// incremental tick. Holding the cursor back instead made every tick refetch
+/// the whole growing backlog, which kept the account over Gmail's per-user
+/// quota indefinitely.
+/// ponytail: in-memory, so a restart drops the list; those threads stay stale
+/// until Gmail reports another change to them. Persist it if that bites.
+static DEFERRED_REFETCH: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<AccountId, HashSet<String>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn take_deferred(account: &AccountId) -> HashSet<String> {
+    DEFERRED_REFETCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(account)
+        .unwrap_or_default()
+}
+
+fn defer(account: &AccountId, thread_ids: impl IntoIterator<Item = String>) {
+    DEFERRED_REFETCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(account.clone())
+        .or_default()
+        .extend(thread_ids);
 }
 
 fn is_echo(record: &HistoryRecord, expected: &HashSet<(String, String, bool)>) -> bool {
@@ -676,6 +705,7 @@ pub async fn incremental_sync(
         .delete_messages(&account, deleted_messages.into_iter().collect())
         .await?;
 
+    touched_threads.extend(take_deferred(&account));
     let thread_ids: Vec<String> = touched_threads.into_iter().collect();
     let mut threads: Vec<RemoteThread> = Vec::with_capacity(thread_ids.len());
     let mut failures = Vec::new();
@@ -695,7 +725,7 @@ pub async fn incremental_sync(
             Ok(None) => store.delete_thread(&account, id).await?,
             Err(error) => {
                 warn!(%account, thread_id = id, error = %error, "thread refetch failed during incremental");
-                failures.push((id, error.to_string()));
+                failures.push(id);
             }
         }
     }
@@ -730,10 +760,9 @@ pub async fn incremental_sync(
     }
 
     if !failures.is_empty() {
-        anyhow::bail!(
-            "[{account}] incremental sync left {} thread(s) unresolved; cursor was not advanced",
-            failures.len(),
-        );
+        warn!(%account, count = failures.len(), "deferring failed thread refetches to the next tick");
+        stats.threads_deferred = failures.len() as u32;
+        defer(&account, failures);
     }
 
     store
@@ -804,6 +833,20 @@ async fn gap_recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_refetches_accumulate_per_account_and_drain_once() {
+        let a = AccountId::new("deferred-a@example.com");
+        let b = AccountId::new("deferred-b@example.com");
+        defer(&a, ["t1".to_string()]);
+        defer(&a, ["t2".to_string(), "t1".to_string()]);
+        defer(&b, ["t9".to_string()]);
+        let mut first: Vec<_> = take_deferred(&a).into_iter().collect();
+        first.sort();
+        assert_eq!(first, vec!["t1", "t2"]);
+        assert!(take_deferred(&a).is_empty());
+        assert_eq!(take_deferred(&b).into_iter().collect::<Vec<_>>(), vec!["t9"]);
+    }
 
     fn history(value: serde_json::Value) -> HistoryRecord {
         serde_json::from_value(value).unwrap()
