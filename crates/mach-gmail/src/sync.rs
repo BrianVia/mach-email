@@ -178,7 +178,8 @@ pub struct LoadOlderStats {
 
 pub(crate) struct HydratedThreads {
     pub(crate) threads: Vec<RemoteThread>,
-    pub(crate) failed: u32,
+    /// Thread ids whose metadata fetch failed.
+    pub(crate) failed: Vec<String>,
 }
 
 pub(crate) async fn fetch_and_upsert_threads(
@@ -188,19 +189,19 @@ pub(crate) async fn fetch_and_upsert_threads(
     ids: Vec<String>,
 ) -> Result<HydratedThreads> {
     let mut threads = Vec::with_capacity(ids.len());
-    let mut failed = 0;
+    let mut failed = Vec::new();
     let mut fetches = stream::iter(ids)
         .map(|id| {
             let client = client.clone();
-            async move { client.get_thread_metadata(&id).await }
+            async move { (client.get_thread_metadata(&id).await, id) }
         })
         .buffer_unordered(BOOTSTRAP_CONCURRENCY);
 
-    while let Some(result) = fetches.next().await {
+    while let Some((result, id)) = fetches.next().await {
         match result {
             Ok(thread) => threads.push(thread),
             Err(error) => {
-                failed += 1;
+                failed.push(id);
                 warn!(%error, "thread metadata fetch failed");
             }
         }
@@ -303,8 +304,8 @@ pub async fn load_older(
     }
 
     let hydrated = fetch_and_upsert_threads(client, store.clone(), account, ids).await?;
-    if hydrated.failed > 0 {
-        anyhow::bail!("load older left {} thread(s) unresolved", hydrated.failed);
+    if !hydrated.failed.is_empty() {
+        anyhow::bail!("load older left {} thread(s) unresolved", hydrated.failed.len());
     }
     let oldest_ms = hydrated
         .threads
@@ -389,7 +390,7 @@ pub async fn bootstrap(
     )
     .await?;
     let threads = hydrated.threads;
-    stats.failed_thread_fetches = hydrated.failed;
+    stats.failed_thread_fetches = hydrated.failed.len() as u32;
     info!(
         ok = threads.len(),
         failed = stats.failed_thread_fetches,
@@ -523,6 +524,10 @@ pub struct IncrementalStats {
     pub gap_recovered: bool,
     pub new_cursor: u64,
 }
+
+/// Past this many touched threads, incremental sync rebuilds the recent window
+/// with [`gap_recover`] instead of refetching each one.
+const MAX_INCREMENTAL_REFETCH: usize = 500;
 
 /// Threads whose refetch failed, keyed by account, folded into the next
 /// incremental tick. Holding the cursor back instead made every tick refetch
@@ -706,6 +711,13 @@ pub async fn incremental_sync(
         .await?;
 
     touched_threads.extend(take_deferred(&account));
+    if touched_threads.len() > MAX_INCREMENTAL_REFETCH {
+        // A long-stale cursor can touch thousands of threads; rebuilding the
+        // recent window costs a fraction of the quota. Older threads keep
+        // their cached labels until Gmail reports another change.
+        warn!(%account, threads = touched_threads.len(), "history backlog too large; rebuilding the last 7 days instead");
+        return gap_recover(client, store, &account).await;
+    }
     let thread_ids: Vec<String> = touched_threads.into_iter().collect();
     info!(%account, threads = thread_ids.len(), "refetching touched threads");
     let mut threads: Vec<RemoteThread> = Vec::with_capacity(thread_ids.len());
@@ -813,17 +825,16 @@ async fn gap_recover(
     )
     .await?;
     let refetched = hydrated.threads.len() as u32;
-    if hydrated.failed > 0 {
-        anyhow::bail!(
-            "gap recovery left {} thread(s) unresolved; cursor was not advanced",
-            hydrated.failed
-        );
+    let threads_deferred = hydrated.failed.len() as u32;
+    if threads_deferred > 0 {
+        warn!(%account, count = threads_deferred, "deferring failed gap-recovery fetches to the next tick");
+        defer(account, hydrated.failed);
     }
     store.set_history_cursor(account, new_cursor).await?;
 
     Ok(IncrementalStats {
         events: 0,
-        threads_deferred: 0,
+        threads_deferred,
         echoes_suppressed: 0,
         threads_refetched: refetched,
         muted_archived: 0,
