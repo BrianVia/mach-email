@@ -94,7 +94,6 @@
   let labels = $state<Label[]>([]);
   let syncOkByAccount = $state<Record<string, boolean>>({});
   let composerFields: ComposerFields = { to: "", cc: "", bcc: "", subject: "", body_md: "", attachments: [] };
-  let pendingNotificationThread: ThreadSummary | null = null;
   const notificationThreads = new Map<string, ThreadSummary>();
   let sendLaterOptions = $state<[string, string][]>([]);
 
@@ -330,7 +329,6 @@
     let granted = await isPermissionGranted();
     if (!granted) granted = await requestPermission() === "granted";
     if (!granted) return;
-    pendingNotificationThread = threads[0];
     for (const thread of threads) notificationThreads.set(thread.id, thread);
     for (const notification of batchNotifications(threads)) {
       sendNotification({
@@ -341,17 +339,10 @@
     }
   }
 
-  async function openNotifiedThread(thread = pendingNotificationThread) {
+  async function openNotifiedThread(thread: ThreadSummary | undefined) {
     if (!thread) return;
-    pendingNotificationThread = null;
     await getCurrentWindow().setFocus();
     await openThreadView(thread);
-  }
-
-  function handleNotificationFocus() {
-    void openNotifiedThread().catch((error) => {
-      console.warn("[mach] opening notification thread failed", error);
-    });
   }
 
   function handleSyncStatus(payload: SyncStatusPayload) {
@@ -1119,7 +1110,6 @@
       console.warn("[mach] notification action listener failed", error);
     });
     document.addEventListener("keydown", handleKey, true);
-    window.addEventListener("focus", handleNotificationFocus);
     window.focus();
     document.body.tabIndex = -1;
     document.body.focus();
@@ -1129,7 +1119,6 @@
       destroyed = true;
       for (const unlisten of unlisteners) unlisten();
       document.removeEventListener("keydown", handleKey, true);
-      window.removeEventListener("focus", handleNotificationFocus);
       if (actionErrorTimer !== undefined) window.clearTimeout(actionErrorTimer);
       if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
     };
