@@ -507,6 +507,9 @@ impl GmailAccountPool {
 impl BodyFetcher {
     async fn pull_updates(&self) -> Result<()> {
         let _guard = self.sync_lock.lock().await;
+        let Some(_lock) = crate::sync_lock::try_sync_lock(&self.account) else {
+            return Ok(());
+        };
         if let Err(error) =
             crate::sync::ensure_watch(&self.account, &self.client, &self.store).await
         {

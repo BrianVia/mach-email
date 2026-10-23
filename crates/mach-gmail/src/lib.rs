@@ -13,6 +13,7 @@ pub mod oauth;
 pub mod outbox;
 mod search;
 pub mod sync;
+mod sync_lock;
 mod unsubscribe;
 
 pub use accounts::{add_account, bootstrap_account};
@@ -28,4 +29,5 @@ pub use sync::{
     bootstrap, incremental_sync, load_older, should_renew, sync_account_tick, BootstrapStats,
     IncrementalStats, LoadOlderStats, TickReport,
 };
+pub use sync_lock::{try_sync_lock, SyncLock};
 pub use unsubscribe::one_click_unsubscribe;

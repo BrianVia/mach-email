@@ -46,6 +46,14 @@ impl OutboxWorker {
     /// Drain up to `max` pending ops. Returns stats. Idempotent: marking
     /// an op `done` is a SQL UPDATE so duplicate calls are harmless.
     pub async fn drain_once(&self, max: u32) -> Result<DrainStats> {
+        let Some(_lock) = crate::sync_lock::try_sync_lock(&self.account) else {
+            return Ok(DrainStats::default());
+        };
+        self.drain_unlocked(max).await
+    }
+
+    /// For callers already holding the account's sync lock.
+    pub(crate) async fn drain_unlocked(&self, max: u32) -> Result<DrainStats> {
         let pending = self
             .store
             .drain_pending_outbox(&self.account, max)

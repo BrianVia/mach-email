@@ -84,6 +84,9 @@ pub async fn sync_account_tick(
     client: Arc<GmailClient>,
     store: Arc<SqliteStore>,
 ) -> Result<TickReport> {
+    let Some(_lock) = crate::sync_lock::try_sync_lock(account) else {
+        return Ok(TickReport::default());
+    };
     let now_ms = Utc::now().timestamp_millis();
     if let Err(error) = ensure_watch(account, &client, &store).await {
         warn!(%account, %error, "Gmail watch renewal failed; polling remains active");
@@ -135,7 +138,7 @@ pub async fn sync_account_tick(
     }
 
     let outbox = OutboxWorker::new(account.clone(), client.clone(), store.clone());
-    let outbox = outbox.drain_once(200).await?;
+    let outbox = outbox.drain_unlocked(200).await?;
     let incremental = if store.get_history_cursor(account).await?.is_some() {
         Some(incremental_sync(client, store.clone()).await?)
     } else {

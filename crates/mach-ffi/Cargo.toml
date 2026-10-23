@@ -1,0 +1,39 @@
+[package]
+name = "mach-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "UniFFI bridge exposing the mach engine to the native macOS app"
+
+[lib]
+crate-type = ["staticlib", "lib"]
+name = "mach_ffi"
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi-bindgen-swift.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+mach-core.workspace = true
+mach-store.workspace = true
+mach-gmail.workspace = true
+uniffi = "=0.32.2"
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+directories.workspace = true
+chrono.workspace = true
+dotenvy.workspace = true
+toml.workspace = true
+uuid.workspace = true
