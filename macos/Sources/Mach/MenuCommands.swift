@@ -11,6 +11,9 @@ struct MenuCommands: Commands {
     private var model: AppModel? { delegate.model }
 
     var body: some Commands {
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit Mach") { if let model { model.quit() } else { NSApp.terminate(nil) } }.keyboardShortcut("q")
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Message") { perform("compose_new") }.keyboardShortcut("n")
             Button("Add Account…") { Task { await model?.addAccount(loginHint: nil) } }

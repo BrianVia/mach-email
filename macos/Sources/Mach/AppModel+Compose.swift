@@ -244,6 +244,22 @@ extension AppModel {
 
     var hasUnsavedDraft: Bool { composer != nil || pendingDraftSaves > 0 }
 
+    /// AppKit refuses to quit while the composer sheet is up, so quitting
+    /// closes it first; the route change autosaves, and
+    /// applicationShouldTerminate waits for the save.
+    func quit() {
+        composer?.snippet = nil
+        escapeComposer()
+        Task {
+            var waits = 0
+            while waits < 20, NSApp.windows.contains(where: { $0.attachedSheet != nil }) {
+                waits += 1
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            NSApp.terminate(nil)
+        }
+    }
+
     /// Quit: saves the open composer and waits for every autosave.
     func saveDraftsBeforeQuit() async {
         if let composer { autosave(composer) }

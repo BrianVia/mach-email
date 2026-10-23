@@ -75,7 +75,7 @@ extension DebugServer {
                                     "opened_thread_id": model.reader.map { $0.thread.id as Any } ?? NSNull()]]
         case "quit":
             // A real quit, unlike pkill, lets AppKit save window state.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.model.quit() }
             return ["ok": true]
         default: break
         }
