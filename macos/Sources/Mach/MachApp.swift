@@ -17,7 +17,7 @@ struct MachApp: App {
                     .frame(minWidth: 600, minHeight: 400)
             }
         }
-        .commands { MenuCommands(model: delegate.model) }
+        .commands { MenuCommands(delegate: delegate) }
         SwiftUI.Settings { SettingsView() }
     }
 }

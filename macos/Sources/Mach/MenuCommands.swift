@@ -6,7 +6,9 @@ import SwiftUI
 /// ⌘N, ⌥⌘N, ⌘K) is consumed by the key monitor before the menu sees it, so it
 /// never fires twice; the others are chords the keymap leaves unbound.
 struct MenuCommands: Commands {
-    let model: AppModel?
+    let delegate: AppDelegate
+    /// Read when an item runs: SwiftUI builds the menus once, before the engine has started.
+    private var model: AppModel? { delegate.model }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
