@@ -493,7 +493,12 @@ final class AppModel {
         loadingOlder = true
         defer { loadingOlder = false }
         let label = list.label
-        let stats = try await engine.loadOlder(label: label, before: oldest)
+        let stats: LoadOlderStats
+        do {
+            stats = try await engine.loadOlder(label: label, before: oldest)
+        } catch {
+            return show("Couldn't load older mail: \(error)", isError: true)
+        }
         let limit = list.limit + 200
         let threads = try await engine.listThreads(label: label, limit: limit)
         if list.label == label {

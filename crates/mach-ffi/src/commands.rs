@@ -457,7 +457,7 @@ pub(crate) async fn load_older(core: &Core, label: String, before_ms: i64) -> Ou
         .await
     {
         Ok(stats) => Out::ok(stats),
-        Err(error) => Out::err(error),
+        Err(error) => Out::err(format!("{error:#}")),
     }
 }
 
