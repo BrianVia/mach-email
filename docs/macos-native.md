@@ -36,7 +36,7 @@ crates/mach-ffi/           Rust cdylib/staticlib exported to Swift with UniFFI
   set) with `/state`, `/key`, `/action`, and `/snapshot` (PNG of the app's own
   window, no screen-recording permission needed). This is how agents verify UI
   over SSH, since `screencapture` cannot run from an SSH session.
-- **Bundle.** `Mach.app`, bundle id `com.via.mach.native` during development.
+- **Bundle.** `Mach.app`, bundle id `com.via.mach` (the Tauri app used the same id; it replaced it on 2026-10-23).
   It shares the Rust data directory (`~/Library/Application Support/com.via.mach`).
 
 ## Parity checklist
