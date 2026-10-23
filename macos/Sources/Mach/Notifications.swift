@@ -115,8 +115,8 @@ struct NotificationsHint: View {
     let model: AppModel
 
     var body: some View {
-        SystemBanner(symbol: "bell.slash", text: "Notifications for new mail are off for Mach.") {
-            Button("Turn On in System Settings…") { model.dismissNotificationsHint(openSettings: true) }
+        SystemBanner(symbol: "bell.slash", text: "Turn on notifications in System Settings to hear about new mail.") {
+            Button("Open Settings") { model.dismissNotificationsHint(openSettings: true) }
             Button("Not Now", systemImage: "xmark") { model.dismissNotificationsHint(openSettings: false) }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
