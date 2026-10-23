@@ -75,6 +75,40 @@ final class Engine: Sendable {
         try Bridge.decode(Out<FlushReport>.self, await core.flushOutbox()).get()
     }
 
+    /// compose_new, reply, forward, and save_draft return the draft they wrote.
+    func dispatchDraft(_ action: KeyAction) async throws -> Draft {
+        let json = try await core.dispatchAction(actionJson: String(decoding: action.json, as: UTF8.self))
+        guard let draft = try Bridge.decode(DraftOutcome.self, json).data?.draft else {
+            throw EngineFailure(message: "\(action.kind) returned no draft")
+        }
+        return draft
+    }
+
+    func openDraft(_ id: String) async throws -> Draft {
+        try Bridge.decode(Out<Draft>.self, await core.openDraft(draftId: id)).get()
+    }
+
+    func listScheduled() async throws -> [ScheduledSend] {
+        try Bridge.decode(Out<[ScheduledSend]>.self, await core.listScheduled()).get()
+    }
+
+    func stageAttachment(name: String, bytes: Data) throws -> DraftAttachment {
+        try Bridge.decode(DraftAttachment.self, core.stageAttachment(name: name, bytes: bytes))
+    }
+
+    /// Plain decoder: the bridge's snake_case strategy would rewrite snippet names.
+    func snippets() throws -> [String: String] {
+        try JSONDecoder().decode([String: String].self, from: Data(core.snippets().utf8))
+    }
+
+    /// ("Tomorrow morning", date) pairs; the bridge sends them as two-element arrays.
+    func sendLaterPresets() throws -> [SendLaterPreset] {
+        try Bridge.decode([[String]].self, core.sendLaterPresets()).compactMap { pair in
+            guard pair.count == 2, let date = Bridge.parseDate(pair[1]) else { return nil }
+            return SendLaterPreset(label: pair[0], at: date)
+        }
+    }
+
     func attachment(account: String, messageId: String, attachmentId: String) async throws -> (data: Data, mime: String) {
         let result = try await core.attachment(account: account, messageId: messageId, attachmentId: attachmentId)
         return (result.bytes, result.mime)
@@ -145,10 +179,12 @@ struct KeyContext: Encodable, Sendable {
     var selection: [String] = []
     var currentThread: String?
     var currentMessage: String?
+    var currentDraft: String?
 
     enum CodingKeys: String, CodingKey {
         case selection
         case currentThread = "current_thread"
         case currentMessage = "current_message"
+        case currentDraft = "current_draft"
     }
 }

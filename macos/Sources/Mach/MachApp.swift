@@ -50,10 +50,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    /// Text fields keep their keys; Esc still reaches the keymap.
+    /// Text fields keep their keys; Esc and command chords (the composer's
+    /// cmd+s and cmd+enter) still reach the keymap, which passes unbound ones on.
     private static func shouldIntercept(_ event: NSEvent) -> Bool {
         guard let editor = event.window?.firstResponder as? NSTextView, editor.isEditable else { return true }
-        return event.keyCode == 53
+        return event.keyCode == 53 || !event.modifierFlags.isDisjoint(with: [.command, .control])
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

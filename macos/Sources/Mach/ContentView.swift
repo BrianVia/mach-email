@@ -21,16 +21,19 @@ struct ContentView: View {
         }
         .overlay(alignment: .bottom) { Banner(model: model) }
         .frame(minWidth: 960, minHeight: 600)
+        .sheet(item: Binding(get: { model.composer }, set: { if $0 == nil { model.escapeComposer() } })) { composer in
+            ComposerSheet(model: model, composer: composer)
+        }
     }
 
     @ViewBuilder private var detail: some View {
-        switch model.route {
+        switch model.composer?.background ?? model.route {
         case .thread(let reader):
             ReaderView(model: model, state: reader)
         case .activity:
             ContentUnavailableView("Activity", systemImage: "clock.arrow.circlepath", description: Text("Recent changes will appear here."))
-        case .scheduled:
-            ContentUnavailableView("Scheduled", systemImage: "clock", description: Text("Messages scheduled to send will appear here."))
+        case .scheduled(let state):
+            ScheduledView(model: model, state: state)
         default:
             ContentUnavailableView {
                 Label("No Thread Open", systemImage: "envelope")

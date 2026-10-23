@@ -756,6 +756,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discard_draft_cancels_schedule_and_queues_gmail_delete() {
+        let store = Arc::new(InMemoryStore::new());
+        let account = AccountId::new("test@example.com");
+        let scope = AccountScope::One(account.clone());
+        let dispatcher = Dispatcher::with_scope(store.clone(), scope.clone());
+        let composed = dispatcher
+            .execute(Action::ComposeNew { account: None })
+            .await
+            .unwrap();
+        let draft: Draft = serde_json::from_value(composed.data.unwrap()["draft"].clone()).unwrap();
+        store
+            .schedule_send(&account, &draft.id, Utc::now() + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+
+        let outcome = dispatcher
+            .execute(Action::DiscardDraft {
+                draft_id: draft.id.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.changed_drafts, [draft.id.clone()]);
+        assert!(store.list_scheduled(&scope).await.unwrap().is_empty());
+        let kinds: Vec<OutboxOpKind> = store.outbox_snapshot().into_iter().map(|op| op.kind).collect();
+        assert_eq!(kinds, [OutboxOpKind::DeleteDraft { draft_id: draft.id.clone() }]);
+        assert!(store.get_draft(&account, &draft.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn compose_new_uses_configured_default_for_all_accounts_scope() {
         let store = Arc::new(InMemoryStore::new());
         let missing_default = Dispatcher::new(store.clone())
