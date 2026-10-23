@@ -5,10 +5,7 @@ import Foundation
 extension AppModel {
     static let debugReaderActions = [
         "select_message", "open_image", "save_attachment", "activate_notice", "copy_markdown",
-        "block_remote_images", "show_images", "always_show_sender", "unsubscribe", "unsubscribe_cancel",
-        // Replaces the confirm's target so the confirm path can run against a URL
-        // that never reaches a real sender.
-        "unsubscribe_inject", "unsubscribe_confirm",
+        "block_remote_images", "show_images", "always_show_sender", "unsubscribe", "unsubscribe_cancel", "open_link",
     ]
 
     /// Returns an error message, or nil on success.
@@ -44,16 +41,10 @@ extension AppModel {
         case "unsubscribe":
             do { try await beginUnsubscribe(messageId: message.id) } catch { return String(describing: error) }
         case "unsubscribe_cancel": cancelUnsubscribe()
-        case "unsubscribe_inject":
-            guard let url = object["url"] as? String, url.hasPrefix("http://127.0.0.1:") else {
-                return "unsubscribe_inject takes a loopback url, e.g. http://127.0.0.1:7373/noop"
-            }
-            reader?.unsubscribe = UnsubscribeConfirm(sender: message.from, accountId: message.accountId, target: .https(url: url, oneClick: true))
-        case "unsubscribe_confirm":
-            guard case .https(let url, true) = state.unsubscribe?.target, url.hasPrefix("http://127.0.0.1:") else {
-                return "unsubscribe_confirm only runs an injected loopback target"
-            }
-            await confirmUnsubscribe()
+        case "open_link":
+            // What a click on a link in the body does, e.g. a mailto: opens the composer.
+            guard let url = (object["url"] as? String).flatMap(URL.init(string:)) else { return "open_link takes a url" }
+            openLink(url)
         default: return "unknown reader action \(name)"
         }
         return nil
@@ -80,6 +71,7 @@ extension AppModel {
             "block_remote_images": settings?.blockRemoteImages ?? false,
             "remote_blocked": state.messages.filter(blocksRemoteImages).map { ["id": $0.id, "images": EmailHTML.remoteImageCount($0.bodyHtml ?? "")] },
             "remote_image_allow": remoteImageAllow.sorted(),
+            "adaptive_bodies": state.messages.filter { EmailHTML.followsAppearance($0.bodyHtml ?? "") }.map(\.id),
             "invite_replies": state.inviteReplies.mapValues(\.rawValue),
             "notice_path": notice?.path ?? NSNull(),
         ]

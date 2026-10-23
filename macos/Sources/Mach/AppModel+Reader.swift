@@ -21,8 +21,9 @@ enum InviteReply: String {
 /// Reader behavior ported from Thread.svelte and App.svelte: the image viewer,
 /// attachments, remote images, unsubscribe, invites, and Copy as Markdown.
 extension AppModel {
-    /// nil lets the keymap resolve the chord. The image viewer owns the
-    /// keyboard while it is open, and the unsubscribe alert gets its own keys.
+    /// nil lets the keymap resolve the chord. The image viewer owns the plain
+    /// keys while it is open, so j or e cannot act on the thread behind it;
+    /// command chords (⌘Q, ⌘W, ⌘K) pass through. The unsubscribe alert gets its own keys.
     func handleReaderKey(_ chord: String) -> Bool? {
         guard let reader else { return nil }
         if reader.unsubscribe != nil { return false }
@@ -32,6 +33,7 @@ extension AppModel {
             case "right", "l": stepViewer(by: 1)
             case "left", "h": stepViewer(by: -1)
             case "ctrl+s": saveViewedImage()
+            case let chord where chord.hasPrefix("ctrl+"): return nil
             default: break
             }
             return true
@@ -108,12 +110,43 @@ extension AppModel {
         remoteImageAllow.insert(email.lowercased())
     }
 
+    // MARK: Links
+
+    /// Every link in a message body lands here. Other schemes (file:, custom
+    /// app schemes) are dropped rather than handed to the system.
+    func openLink(_ url: URL) {
+        switch url.scheme?.lowercased() {
+        case "mailto": Task { await composeMailto(url) }
+        case "http", "https": NSWorkspace.shared.open(url)
+        default: break
+        }
+    }
+
+    private func composeMailto(_ url: URL) async {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        func field(_ name: String) -> String? {
+            parts.queryItems?.first { $0.name.lowercased() == name }?.value
+        }
+        do {
+            try await runCompose(KeyAction(["kind": "compose_new"]))
+            guard let composer else { return }
+            composer.to = [parts.path, field("to")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+            if let cc = field("cc") { composer.cc = cc }
+            if let bcc = field("bcc") { composer.bcc = bcc }
+            if let subject = field("subject") { composer.subject = subject }
+            if let body = field("body") { composer.body = body + composer.body }
+        } catch {
+            show(error)
+        }
+    }
+
     // MARK: Unsubscribe
 
     func beginUnsubscribe(messageId: String) async throws {
         guard let state = reader, let message = state.messages.first(where: { $0.id == messageId }) else {
             throw EngineFailure(message: "unsubscribe message not found")
         }
+        // The engine orders targets one-click POST, then mailto, then a plain page.
         guard let target = try await engine.unsubscribeTargets(messageId: messageId).first else {
             show("No unsubscribe method advertised")
             return

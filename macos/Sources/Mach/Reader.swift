@@ -54,6 +54,10 @@ struct ReaderView: View {
         } message: { confirm in
             Text(Self.unsubscribeDetail(confirm.target))
         }
+        .environment(\.openURL, OpenURLAction { url in
+            model.openLink(url)
+            return .handled
+        })
         .id(state.thread.id)
     }
 
