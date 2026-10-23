@@ -42,9 +42,13 @@ pub fn unsubscribe_targets(headers: &MessageHeaders) -> Vec<UnsubscribeTarget> {
         })
         .collect();
     targets.sort_by_key(|target| match target {
-        UnsubscribeTarget::Https { one_click: true, .. } => 0,
+        UnsubscribeTarget::Https {
+            one_click: true, ..
+        } => 0,
         UnsubscribeTarget::Mailto { .. } => 1,
-        UnsubscribeTarget::Https { one_click: false, .. } => 2,
+        UnsubscribeTarget::Https {
+            one_click: false, ..
+        } => 2,
     });
     targets
 }
@@ -118,7 +122,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            unsubscribe_targets(&headers("<https://example.com/u>, <mailto:leave@example.com>", None)),
+            unsubscribe_targets(&headers(
+                "<https://example.com/u>, <mailto:leave@example.com>",
+                None
+            )),
             [
                 mailto,
                 UnsubscribeTarget::Https {
