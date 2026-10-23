@@ -94,3 +94,8 @@ System
 6. Comments only for a non-obvious why. No new dependencies without a reason in
    the report.
 7. Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+8. Use your own Linux worktree (`git worktree add ../mach-<unit>-wt -b macos/<unit> origin/main`),
+   never the shared checkout at `~/Development/Personal/mach-email`.
+9. Remote shell steps that replace an installed app run under `set -euo pipefail`,
+   never chain with `;`, and check the new bundle exists before deleting the old one.
+   On 2026-10-23 a failed checkout followed by `;` deleted the owner's daily app.
