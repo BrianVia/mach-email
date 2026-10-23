@@ -50,6 +50,8 @@ enum KeyChord {
     /// Synthesizes the keyDown a real keyboard would send, for the debug server.
     static func event(key: String, modifiers held: Set<String>, window: NSWindow?) -> NSEvent? {
         let special = specials.first { $0.name == key }
+        // "Escape" once arrived as an "e" keyCode and archived a real thread.
+        guard special != nil || key.count == 1 else { return nil }
         var chars = special?.chars ?? key
         if held.contains("shift"), special == nil { chars = chars.uppercased() }
         let flags: [(String, NSEvent.ModifierFlags)] = [("cmd", .command), ("ctrl", .control), ("alt", .option), ("shift", .shift)]
