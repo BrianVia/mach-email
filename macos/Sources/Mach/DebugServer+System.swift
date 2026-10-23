@@ -72,7 +72,7 @@ extension DebugServer {
             // The same userInfo a posted banner carries, minus the click.
             await model.openFromNotification(object.compactMapValues { $0 as? String })
             return ["state_after": ["route": model.route.name, "label": model.list.label, "split": model.split.rawValue,
-                                    "opened_thread_id": model.reader?.thread.id ?? NSNull()]]
+                                    "opened_thread_id": model.reader.map { $0.thread.id as Any } ?? NSNull()]]
         case "quit":
             // A real quit, unlike pkill, lets AppKit save window state.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
