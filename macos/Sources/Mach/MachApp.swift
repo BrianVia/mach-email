@@ -105,6 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    /// SwiftUI restores the frame saved under the window's autosave name but
+    /// does not write it on resize or quit, so save it on the way out.
+    func applicationWillTerminate(_ notification: Notification) {
+        for window in NSApp.windows where !window.frameAutosaveName.isEmpty {
+            window.saveFrame(usingName: window.frameAutosaveName)
+        }
+    }
+
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter, willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
