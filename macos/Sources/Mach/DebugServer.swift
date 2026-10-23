@@ -200,7 +200,7 @@ final class DebugServer {
                         let modifiers: [(NSEvent.ModifierFlags, String)] = [(.control, "⌃"), (.option, "⌥"), (.shift, "⇧"), (.command, "⌘")]
                         let key = item.keyEquivalent.isEmpty
                             ? "" : modifiers.filter { item.keyEquivalentModifierMask.contains($0.0) }.map(\.1).joined() + item.keyEquivalent.uppercased()
-                        return ["title": item.title, "key": key, "enabled": item.isEnabled]
+                        return ["title": item.title, "key": key, "raw": item.keyEquivalent, "mask": item.keyEquivalentModifierMask.rawValue, "enabled": item.isEnabled]
                     },
                 ] as [String: Any]
             },
