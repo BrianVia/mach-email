@@ -170,6 +170,8 @@ final class AppModel {
             let people = reader.thread.participants
             return people.prefix(2).joined(separator: ", ") + (people.count > 2 ? " +\(people.count - 2)" : "")
         }
+        if let search { return "\(search.results.count.formatted()) results" }
+        if case .activity(let activity) = route { return "\(activity.entries.count) recent changes" }
         let count = visibleThreads.count.formatted()
         return "\(count) threads" + (list.account.map { " · only \(accountLabel($0))" } ?? "")
     }
@@ -414,6 +416,7 @@ final class AppModel {
     }
 
     func syncNow() async throws {
+        engine.log("info", "sync now requested")
         show("Syncing all accounts…")
         let report = try await engine.syncNow()
         if reader != nil { await refetchOpenThread() }

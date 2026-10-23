@@ -64,6 +64,17 @@ extension AppModel {
         "respond_to_invite shift+t": "Maybe Attend Invite", "respond_to_invite shift+d": "Decline Invite",
     ]
 
+    /// Navigation first and removals last, so Return on an empty query never
+    /// archives or trashes.
+    private static func paletteGroup(_ name: String) -> Int {
+        switch name {
+        case "search", "open_label", "show_activity": 0
+        case "compose_new", "reply", "forward": 1
+        case "archive", "trash", "mute", "unsubscribe", "respond_to_invite": 3
+        default: 2
+        }
+    }
+
     /// What the Tauri palette lists: every binding in the current mode (the
     /// shortest chord wins per title), then the commands that have no key.
     func paletteCommands() -> [PaletteCommand] {
@@ -82,7 +93,10 @@ extension AppModel {
             byTitle[command.title] = command
             order.append(command.title)
         }
-        for binding in engine.keymapBindings(mode: mode) where !["select_next", "select_prev", "quit"].contains(binding.name) {
+        let bindings = engine.keymapBindings(mode: mode).enumerated()
+            .sorted { (Self.paletteGroup($0.element.name), $0.offset) < (Self.paletteGroup($1.element.name), $1.offset) }
+            .map(\.element)
+        for binding in bindings where !["select_next", "select_prev", "quit"].contains(binding.name) {
             var title = Self.chordTitles["\(binding.name) \(binding.chord)"] ?? Self.paletteTitles[binding.name]
             if binding.name == "open_label",
                 case .action(let action) = engine.resolveKey(mode: mode, chord: binding.chord, context: keyContext),
