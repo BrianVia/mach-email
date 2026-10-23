@@ -1,11 +1,14 @@
-# Debugging the desktop app (for agents)
+# Debugging the macOS app (for agents)
 
-See [docs/agent-debugging.md](docs/agent-debugging.md) for the full sidecar and WebKit inspector guide.
+The desktop app is the native SwiftUI app in `macos/` (bundle id `com.via.mach`).
+See [docs/agent-debugging.md](docs/agent-debugging.md) for the full guide and
+[docs/macos-native.md](docs/macos-native.md) for the standing orders.
 
 ```sh
-tail -f ~/.local/share/mach/desktop.log
-MACH_DEBUG_PORT=7365 ~/.local/bin/mach-desktop
-curl http://127.0.0.1:7365/state
-curl -X POST http://127.0.0.1:7365/key -d '{"key":"Escape","ctrl":false,"shift":false,"alt":false,"meta":false}'
-curl -X POST http://127.0.0.1:7365/eval -d '{"js":"document.title"}'
+tail -f ~/Library/Application\ Support/com.via.mach/native.log
+MACH_DEBUG_PORT=7366 ~/Applications/Mach-dev/Mach.app/Contents/MacOS/Mach
+curl 127.0.0.1:7366/state
+curl -X POST -H 'X-Mach-Debug: 1' 127.0.0.1:7366/key -d '{"key":"esc"}'
+curl -X POST -H 'X-Mach-Debug: 1' 127.0.0.1:7366/action -d '{"name":"open_thread"}'
+curl -o mach.png 127.0.0.1:7366/snapshot
 ```

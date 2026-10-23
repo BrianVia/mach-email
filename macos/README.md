@@ -1,8 +1,9 @@
 # Mach for macOS
 
 Native SwiftUI shell for mach. See [docs/macos-native.md](../docs/macos-native.md)
-for the architecture and the parity checklist. The app runs on the Rust engine
-through `crates/mach-ffi` and shares the Tauri app's data directory.
+for the architecture and the feature inventory. The app runs on the Rust engine
+through `crates/mach-ffi`; its data and `native.log` live in
+`~/Library/Application Support/com.via.mach`.
 
 Code map: `Models.swift` mirrors the bridge's JSON, `Engine.swift` wraps
 `MachEngine` with typed async calls and an event stream, `AppModel.swift` holds
@@ -19,6 +20,8 @@ macos/scripts/build-app.sh            # macos/build/Mach.app, ad-hoc signed
 macos/scripts/build-app.sh --install  # also copies it to ~/Applications/Mach-dev/
 open ~/Applications/Mach-dev/Mach.app
 ```
+
+`cd macos && swift test` runs the Swift unit tests once `Generated/` exists.
 
 The build treats warnings as errors. Ad-hoc signing (`codesign -s -`) works over
 SSH, where the login keychain is locked.

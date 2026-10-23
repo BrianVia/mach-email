@@ -1,8 +1,8 @@
 # mach
 
 `mach` is a local-first, keyboard-driven Gmail client inspired by Superhuman.
-It provides a terminal UI, JSON CLI, Tauri desktop application, and MCP
-server over one Rust core.
+It provides a terminal UI, JSON CLI, native macOS app, and MCP server over
+one Rust core.
 
 The application is currently best treated as a personal read-and-triage
 client. Unified multi-account inbox browsing, per-account filtering, hybrid search,
@@ -21,7 +21,8 @@ and an always-on sync daemon are not yet complete.
 - `mach-tui`: Ratatui interface
 - `mach-cli`: `mach` command and composition root
 - `mach-mcp`: JSON-RPC MCP server over stdio
-- `mach-desktop`: Tauri 2 backend and SolidJS frontend
+- `mach-ffi`: UniFFI bridge from the engine to the macOS app
+- `macos/`: native SwiftUI app (`Mach.app`)
 
 Mail data is cached in the platform application-data directory. Mutations
 update SQLite optimistically and atomically enqueue a durable Gmail operation.
@@ -35,19 +36,8 @@ directory so background activity cannot corrupt the alternate terminal screen.
 ## Prerequisites
 
 - Stable Rust with `rustfmt` and `clippy`
-- Bun 1.x for the desktop frontend
 - A Google Cloud desktop OAuth client with the Gmail API enabled
-
-Tauri requires native WebKit dependencies on Linux. On Debian or Ubuntu:
-
-```sh
-sudo apt update
-sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-```
-
-See the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
-for other platforms.
+- For the macOS app: macOS 15 or later on Apple silicon and Xcode 16 or later
 
 ## Setup
 
@@ -96,18 +86,34 @@ cargo run -p mach-cli -- do '{"kind":"search","query":"invoice","limit":10}'
 cargo run -p mach-cli -- mcp
 ```
 
-Desktop development:
+## macOS app
+
+`macos/` is a SwiftUI app on the same Rust engine, built with SwiftPM (no
+Xcode project). It shares the CLI's accounts and cache, so sign in with
+`mach auth login` first or from the app's account menu.
 
 ```sh
-cd crates/mach-desktop/ui
-bun install --frozen-lockfile
-cd ..
-cargo tauri dev
+bash macos/scripts/build-app.sh            # macos/build/Mach.app, ad-hoc signed
+bash macos/scripts/build-app.sh --install  # also copies it to ~/Applications/Mach-dev/
 ```
+
+To install a build as the everyday app, quit Mach and copy it over the old one:
+
+```sh
+ditto macos/build/Mach.app /Applications/Mach.app
+```
+
+Tagged releases (`v*`) attach `Mach-<version>-macos-arm64.zip` and `mach` CLI
+binaries for Apple silicon and x86_64 Linux to a draft GitHub release.
+
+The app logs to `~/Library/Application Support/com.via.mach/native.log`.
+Launch the binary with `MACH_DEBUG_PORT` set to get a loopback debug server
+for scripted checks; see [docs/agent-debugging.md](docs/agent-debugging.md)
+and [macos/README.md](macos/README.md).
 
 ## Push notifications (optional)
 
-The desktop app and TUI can use Gmail push notifications while retaining the
+The macOS app and TUI can use Gmail push notifications while retaining the
 60-second poll as a fallback. Create the Pub/Sub resources in the Google Cloud
 project that owns your OAuth client:
 
@@ -126,21 +132,16 @@ mach auth login
 Enabling push adds the Google Pub/Sub OAuth scope, so every Gmail account must
 run `mach auth login` again after setting `MACH_PUBSUB_TOPIC`.
 
-The desktop build hook runs the frontend build automatically.
-
 ## Validation
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --exclude mach-desktop --all-targets -- -D warnings
-cargo test --workspace --exclude mach-desktop --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 
-cd crates/mach-desktop/ui
-bun install --frozen-lockfile
-bun test
-bun run build
-cd ../../..
-cargo check -p mach-desktop
+# On macOS
+bash macos/scripts/build-app.sh
+(cd macos && swift test)
 ```
 
 Tests that contact Gmail are intentionally not run automatically. Before using
@@ -152,8 +153,9 @@ and preserve a copy of the local SQLite database.
 OAuth credentials are stored as one file per account under `accounts/` in the
 platform application-data directory with mode `0600` on Unix. A historical
 single `credentials.json` is migrated automatically. Email bodies and metadata
-are cached locally in SQLite. The desktop renderer sanitizes HTML and blocks
-remote images by default so opening a message does not notify tracking servers.
+are cached locally in SQLite. The macOS app renders HTML with JavaScript off
+and loads remote images by default, with a per-sender setting to block them.
+The TUI never loads remote images.
 
 ## License
 

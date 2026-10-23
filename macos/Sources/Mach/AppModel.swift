@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import Observation
 
-/// Gmail's inbox categories folded into four tabs, like ui/src/lib/split.ts.
+/// Gmail's inbox categories folded into four tabs.
 enum Split: String, CaseIterable, Identifiable {
     case important, other, updates, newsletters
 
@@ -131,7 +131,7 @@ final class AppModel {
         didSet { UserDefaults.standard.set(split.rawValue, forKey: "mach.inboxSplit") }
     }
     var labels: [MailLabel] = []
-    /// Lowercased sender addresses whose remote images always load, like the Tauri app's `mach.remoteImageAllow`.
+    /// Lowercased sender addresses whose remote images always load.
     var remoteImageAllow = Set(UserDefaults.standard.stringArray(forKey: "mach.remoteImageAllow") ?? []) {
         didSet { UserDefaults.standard.set(remoteImageAllow.sorted(), forKey: "mach.remoteImageAllow") }
     }

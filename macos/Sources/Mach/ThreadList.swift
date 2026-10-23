@@ -136,7 +136,7 @@ enum Sender {
         return "?"
     }
 
-    /// Stable per-sender hue (FNV-1a), like ui/src/lib/avatar.ts.
+    /// Stable per-sender hue (FNV-1a).
     static func color(_ seed: String) -> Color {
         var hash: UInt32 = 2_166_136_261
         for byte in seed.utf8 {

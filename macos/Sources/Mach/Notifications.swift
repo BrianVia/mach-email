@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
-/// One banner to post for a `mail-synced` event, as ui/src/lib/notify.ts batches them.
+/// One banner to post for a `mail-synced` event.
 struct NewMailNotification: Equatable {
     var title: String
     var body: String?

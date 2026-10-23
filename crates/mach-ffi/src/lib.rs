@@ -1,7 +1,6 @@
-//! UniFFI bridge for the native macOS app. [`MachEngine`] does what
-//! `crates/mach-desktop/src/main.rs` does before `tauri::Builder` and owns the
-//! tokio runtime that runs the sync loop. Every Tauri command has a method of
-//! the same name returning the JSON the Tauri command returns to JS.
+//! UniFFI bridge for the native macOS app. [`MachEngine`] opens the store and
+//! Gmail accounts and owns the tokio runtime that runs the sync loop. Each
+//! method returns its result as a JSON string that Swift decodes.
 
 mod commands;
 
@@ -36,8 +35,7 @@ impl EngineError {
     }
 }
 
-/// Receives the events the Tauri app emits to its window: `mail-synced` and
-/// `sync-status`, with the same JSON payloads.
+/// Receives the engine's events, `mail-synced` and `sync-status`, as JSON payloads.
 #[uniffi::export(callback_interface)]
 pub trait EngineListener: Send + Sync {
     fn on_event(&self, name: String, payload_json: String);
@@ -254,7 +252,7 @@ impl MachEngine {
     }
 
     /// Bytes for `mach://attachment/<account>/<message_id>/<attachment_id>`,
-    /// cached on disk like the Tauri URI handler.
+    /// cached on disk.
     pub async fn attachment(
         &self,
         account: String,
@@ -291,8 +289,7 @@ impl MachEngine {
     /// Resolves an accumulated chord (`"g"`, `"g i"`) in `mode` against the
     /// merged keymap. `context_json` is
     /// `{"selection":[..],"current_thread":..,"current_message":..,"current_draft":..}`
-    /// (every field optional). Returns the JSON of the desktop's `Resolution`
-    /// type in `ui/src/lib/keymap.ts`:
+    /// (every field optional). Returns a keymap resolution as JSON:
     /// `{"kind":"action","action":{..}}`,
     /// `{"kind":"prefix","continuations":[{"next":"i","action_name":"open_label"}]}`,
     /// or `{"kind":"unbound"}`.
@@ -301,7 +298,7 @@ impl MachEngine {
     }
 
     /// `[{"chord":"e","name":"archive"},..]` for `mode`, sorted by chord, like
-    /// the desktop keymap's `bindings(mode)` that feeds the command palette.
+    /// the keymap's `bindings(mode)` that feeds the command palette.
     pub fn keymap_bindings(&self, mode: String) -> String {
         let bindings = parse_mode(&mode)
             .map(|mode| self.core.keymap.bindings_for(mode))
@@ -449,8 +446,7 @@ async fn sync_loop(core: Arc<Core>) {
     }
 }
 
-/// Logs to `native.log` next to the database, truncated per launch. A
-/// separate file from the Tauri app's `desktop.log` so both can run at once.
+/// Logs to `native.log` next to the database, truncated per launch.
 fn init_logging() {
     let file = directories::ProjectDirs::from("com", "via", "mach").and_then(|dirs| {
         std::fs::create_dir_all(dirs.data_dir()).ok()?;
@@ -496,7 +492,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_key_matches_the_desktop_resolution_json() {
+    fn resolve_key_returns_resolution_json() {
         let keymap = Keymap::default_keymap();
         let ctx = r#"{"selection":["t1"]}"#;
 

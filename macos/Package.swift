@@ -19,5 +19,6 @@ let package = Package(
                 .linkedFramework("CoreFoundation"),
             ]),
         .executableTarget(name: "Mach", dependencies: ["MachBridge"], path: "Sources/Mach"),
+        .testTarget(name: "MachTests", dependencies: ["Mach"]),
     ]
 )

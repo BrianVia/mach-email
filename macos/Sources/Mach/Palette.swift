@@ -92,8 +92,8 @@ extension AppModel {
         return name == label ? label.capitalized : name
     }
 
-    /// What the Tauri palette lists: every binding in the current mode (the
-    /// shortest chord wins per title), then the commands that have no key.
+    /// Every binding in the current mode (the shortest chord wins per title),
+    /// then the commands that have no key.
     func paletteCommands() -> [PaletteCommand] {
         let mode = route.mode
         var byTitle: [String: PaletteCommand] = [:]

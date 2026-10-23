@@ -10,7 +10,6 @@
 **/node_modules/
 **/dist/
 **/*.tsbuildinfo
-crates/mach-desktop/gen/schemas/linux-schema.json
 macos/.build/
 macos/build/
 macos/Generated/

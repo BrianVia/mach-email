@@ -2,8 +2,7 @@ import AppKit
 import Foundation
 import Observation
 
-// Codable mirrors of `Draft`, `DraftAttachment`, and `ScheduledSend` in
-// crates/mach-desktop/ui/src/lib/ipc.ts.
+// Codable mirrors of the engine's `Draft`, `DraftAttachment`, and `ScheduledSend` JSON.
 
 struct DraftAttachment: Codable, Sendable, Hashable {
     var path: String
@@ -47,7 +46,7 @@ struct SendLaterPreset: Sendable, Hashable {
     var at: Date
 }
 
-/// A `;name` being typed in the body, as ui/src/lib/snippet.ts detects it.
+/// A `;name` being typed in the body, at a line start or after whitespace.
 /// Offsets are UTF-16, the unit NSTextView ranges use.
 struct SnippetToken: Equatable {
     var start: Int

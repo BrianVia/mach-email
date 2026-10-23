@@ -1,7 +1,6 @@
 import AppKit
 
-/// Translates NSEvents to the keymap's chord strings the way
-/// ui/src/lib/keymap.ts `keyEventToChord` does: cmd and ctrl both become
+/// Translates NSEvents to the keymap's chord strings: cmd and ctrl both become
 /// "ctrl", shift is spelled out only for letters, and "?" is "shift+/" as
 /// config/default-keymap.toml writes it.
 @MainActor

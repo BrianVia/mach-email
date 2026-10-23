@@ -1,6 +1,6 @@
 import Foundation
 
-// Codable mirrors of crates/mach-desktop/ui/src/lib/ipc.ts. Every bridge
+// Codable mirrors of the bridge's JSON. Every bridge
 // payload decodes through `Bridge.decoder`; fields the native UI does not use
 // yet (calendar, drafts) are left out and ignored by the decoder.
 
@@ -185,7 +185,7 @@ struct ActivityEntry: Codable, Sendable, Identifiable, Hashable {
     var state: String
     var undone: Bool
 
-    /// Only label changes and trash can be reversed, as in the Tauri Activity view.
+    /// Only label changes and trash can be reversed, as the engine records them.
     var undoable: Bool { !undone && (kind == "modify_labels" || kind == "trash") }
 }
 

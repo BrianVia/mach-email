@@ -1,6 +1,6 @@
-//! Ported from `crates/mach-desktop/src/commands.rs`, with Tauri's
-//! `AppHandle`/`State`/`emit` replaced by [`Core`] and its listener. Each
-//! function returns the value the matching Tauri command hands to JS.
+//! The engine operations behind [`crate::MachEngine`]. Each function returns
+//! the value the bridge serializes to JSON for Swift; events go through
+//! [`Core`]'s listener.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -614,4 +614,36 @@ pub(crate) async fn add_account(core: &Core, login_hint: Option<String>) -> Resu
         },
     );
     Ok(email)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn thread(id: &str) -> ThreadSummary {
+        ThreadSummary {
+            account_id: AccountId::new("me@example.com"),
+            id: ThreadId::new(id),
+            subject: String::new(),
+            snippet: String::new(),
+            participants: Vec::new(),
+            last_message_at: Utc::now(),
+            message_count: 1,
+            unread: true,
+            starred: false,
+            label_ids: vec![LabelId::new("INBOX")],
+        }
+    }
+
+    #[test]
+    fn finds_only_new_thread_summaries() {
+        let before = HashSet::from([ThreadId::new("existing")]);
+        let after = vec![thread("new"), thread("existing")];
+
+        let found = new_thread_ids(&before, &after);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, ThreadId::new("new"));
+    }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Port of ui/src/lib/markdown.ts `threadToMarkdown`.
+/// A thread as Markdown for pasting into an agent (`ctrl+shift+c`).
 enum ThreadMarkdown {
     static func render(_ thread: ThreadSummary, _ messages: [Message]) -> String {
         let heading = thread.subject.isEmpty ? "(no subject)" : thread.subject

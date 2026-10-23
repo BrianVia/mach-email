@@ -63,8 +63,7 @@ enum EmailHTML {
             """
     }
 
-    /// `<img>` tags with an http(s) or protocol-relative source, counted the
-    /// way ui/src/lib/html.ts counts the images it blocks.
+    /// `<img>` tags with an http(s) or protocol-relative source.
     static func remoteImageCount(_ html: String) -> Int {
         html.matches(of: /(?i)<img\b[^>]*?\ssrc\s*=\s*["']?\s*(https?:)?\/\//).count
     }
