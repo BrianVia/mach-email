@@ -45,7 +45,7 @@ struct Sidebar: View {
             }
         } set: { item in
             switch item {
-            case .activity: model.route = .activity
+            case .activity: Task { do { try await model.openActivity() } catch { model.show(error) } }
             case .label(let id): Task { do { try await model.openLabel(id) } catch { model.show(error) } }
             case nil: break
             }

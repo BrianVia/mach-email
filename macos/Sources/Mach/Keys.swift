@@ -42,6 +42,11 @@ enum KeyChord {
         return (parts + [key]).joined(separator: "+")
     }
 
+    /// ANSI key codes, so synthesized events match menu key equivalents the way real keys do.
+    private static let letterCodes: [Character: UInt16] = Dictionary(uniqueKeysWithValues: zip(
+        "asdfhgzxcv bqweryt123465=97-80]ou[ip lj'k;\\,/nm.", (0...47).map(UInt16.init)
+    ).filter { $0.0 != " " })
+
     /// Synthesizes the keyDown a real keyboard would send, for the debug server.
     static func event(key: String, modifiers held: Set<String>, window: NSWindow?) -> NSEvent? {
         let special = specials.first { $0.name == key }
@@ -53,6 +58,6 @@ enum KeyChord {
             modifierFlags: NSEvent.ModifierFlags(flags.filter { held.contains($0.0) }.map(\.1)),
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window?.windowNumber ?? 0,
             context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false,
-            keyCode: special?.code ?? 0)
+            keyCode: special?.code ?? key.lowercased().first.flatMap { letterCodes[$0] } ?? 0)
     }
 }

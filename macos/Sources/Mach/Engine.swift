@@ -153,6 +153,19 @@ final class Engine: Sendable {
         }
     }
 
+    func search(_ query: String, limit: Int) async throws -> [ThreadSummary] {
+        try Bridge.decode(Out<[ThreadSummary]>.self, await core.search(query: query, limit: UInt32(limit))).get()
+    }
+
+    func listActivity(limit: Int) async throws -> [ActivityEntry] {
+        try Bridge.decode(Out<[ActivityEntry]>.self, await core.listActivity(sinceMs: 0, limit: UInt32(limit))).get()
+    }
+
+    /// Every binding in `mode`, sorted by chord, for the command palette.
+    func keymapBindings(mode: KeyMode) -> [KeyBinding] {
+        (try? Bridge.decode([KeyBinding].self, core.keymapBindings(mode: mode.rawValue))) ?? []
+    }
+
     func resolveKey(mode: KeyMode, chord: String, context: KeyContext) -> KeyResolution {
         let contextJson = (try? JSONEncoder().encode(context)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
         let json = core.resolveKey(mode: mode.rawValue, chordSequence: chord, contextJson: contextJson)

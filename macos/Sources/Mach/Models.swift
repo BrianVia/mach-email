@@ -150,6 +150,25 @@ struct SyncStatusPayload: Codable, Sendable {
     var error: String?
 }
 
+struct ActivityEntry: Codable, Sendable, Identifiable, Hashable {
+    var id: Int64
+    var accountId: String
+    var at: Date
+    var kind: String
+    var threadIds: [String]
+    var summary: String
+    var state: String
+    var undone: Bool
+
+    /// Only label changes and trash can be reversed, as in the Tauri Activity view.
+    var undoable: Bool { !undone && (kind == "modify_labels" || kind == "trash") }
+}
+
+struct KeyBinding: Codable, Sendable, Hashable {
+    var chord: String
+    var name: String
+}
+
 enum EngineEvent: Sendable {
     case mailSynced(MailSyncedPayload)
     case syncStatus(SyncStatusPayload)
@@ -196,6 +215,7 @@ struct KeyAction: Sendable {
         var read: Bool?
         var messageId: String?
         var response: String?
+        var outboxId: Int64?
     }
 
     let json: Data

@@ -8,9 +8,11 @@ struct ContentView: View {
             Sidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
         } content: {
-            ThreadList(model: model)
-                .safeAreaInset(edge: .top, spacing: 0) { SystemBanners(model: model) }
-                .navigationSplitViewColumnWidth(min: 320, ideal: 400)
+            Group {
+                if let search = model.search { SearchView(model: model, state: search) } else { ThreadList(model: model) }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) { SystemBanners(model: model) }
+            .navigationSplitViewColumnWidth(min: 320, ideal: 400)
         } detail: {
             detail
         }
@@ -21,6 +23,14 @@ struct ContentView: View {
             if let viewer = model.reader?.viewer { ImageViewerView(model: model, viewer: viewer) }
         }
         .overlay(alignment: .bottom) { Banner(model: model) }
+        .overlay(alignment: .top) {
+            if let palette = model.palette {
+                Color.black.opacity(0.08)
+                    .ignoresSafeArea()
+                    .onTapGesture { model.palette = nil }
+                    .overlay(alignment: .top) { PaletteView(model: model, state: palette).padding(.top, 72) }
+            }
+        }
         .frame(minWidth: 960, minHeight: 600)
         .sheet(item: Binding(get: { model.composer }, set: { if $0 == nil { model.escapeComposer() } })) { composer in
             ComposerSheet(model: model, composer: composer)
@@ -31,8 +41,8 @@ struct ContentView: View {
         switch model.composer?.background ?? model.route {
         case .thread(let reader):
             ReaderView(model: model, state: reader)
-        case .activity:
-            ContentUnavailableView("Activity", systemImage: "clock.arrow.circlepath", description: Text("Recent changes will appear here."))
+        case .activity(let state):
+            ActivityView(model: model, state: state)
         case .scheduled(let state):
             ScheduledView(model: model, state: state)
         default:

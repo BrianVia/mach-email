@@ -51,10 +51,10 @@ struct ReaderState {
 enum Route {
     case list
     case thread(ReaderState)
-    // Owned by later agents; nothing routes to these two yet.
-    case search, palette
     case composer(ComposerModel)
-    case activity, scheduled(ScheduledState)
+    case search
+    case activity(ActivityState)
+    case scheduled(ScheduledState)
 
     var name: String {
         switch self {
@@ -62,7 +62,6 @@ enum Route {
         case .thread: "thread"
         case .composer: "composer"
         case .search: "search"
-        case .palette: "palette"
         case .activity: "activity"
         case .scheduled: "scheduled"
         }
@@ -107,7 +106,19 @@ final class AppModel {
     private static let removingActions: Set<String> = ["archive", "trash", "mute"]
 
     let engine: Engine
-    var route: Route = .list
+    var route: Route = .list {
+        // A search lives while its results, a thread opened from them, or a
+        // composer over either is on screen.
+        didSet {
+            switch route {
+            case .search, .thread, .composer: break
+            default: search = nil
+            }
+        }
+    }
+    var search: SearchState?
+    /// The command palette floats over whatever route is showing.
+    var palette: PaletteState?
     var list = ListState()
     var split: Split = Split(rawValue: UserDefaults.standard.string(forKey: "mach.inboxSplit") ?? "") ?? .important {
         didSet { UserDefaults.standard.set(split.rawValue, forKey: "mach.inboxSplit") }
@@ -161,6 +172,7 @@ final class AppModel {
         switch composer?.background ?? route {
         case .thread(let reader): reader.thread.subject.isEmpty ? "(no subject)" : reader.thread.subject
         case .activity: "Activity"
+        case .search: "Search"
         case .scheduled: "Scheduled"
         default: labelName(list.label)
         }
@@ -172,6 +184,8 @@ final class AppModel {
             let people = reader.thread.participants
             return people.prefix(2).joined(separator: ", ") + (people.count > 2 ? " +\(people.count - 2)" : "")
         }
+        if let search { return "\(search.results.count.formatted()) results" }
+        if case .activity(let activity) = route { return "\(activity.entries.count) recent changes" }
         let count = visibleThreads.count.formatted()
         return "\(count) threads" + (list.account.map { " · only \(accountLabel($0))" } ?? "")
     }
@@ -286,6 +300,10 @@ final class AppModel {
         if let reader {
             return KeyContext(selection: [reader.thread.id], currentThread: reader.thread.id, currentMessage: reader.currentMessage?.id)
         }
+        if case .search = route {
+            let selected = search?.selectedThread?.id
+            return KeyContext(selection: selected.map { [$0] } ?? [], currentThread: selected)
+        }
         let selected = visibleThreads.first { $0.id == list.selection }?.id
         return KeyContext(selection: selected.map { [$0] } ?? [], currentThread: selected)
     }
@@ -304,7 +322,9 @@ final class AppModel {
             case "back_to_list" where composer != nil: escapeComposer()
             case "back_to_list": backToList()
             case "open_label": if let label = fields.labelId { try await openLabel(label) }
-            case "show_activity": route = .activity
+            case "show_activity": try await openActivity()
+            case "undo_activity": if let id = fields.outboxId { try await undoActivity(id) }
+            case "search": openSearch()
             case "inbox_split_important", "inbox_split_other", "inbox_split_updates", "inbox_split_newsletters":
                 if list.label == "INBOX", let next = Split(rawValue: String(action.kind.dropFirst("inbox_split_".count))) {
                     selectSplit(next)
@@ -396,6 +416,10 @@ final class AppModel {
 
     func backToList() {
         if case .list = route { return }
+        if search != nil, case .thread = route {
+            route = .search
+            return
+        }
         route = .list
         Task { await refreshList() }
     }
@@ -413,6 +437,7 @@ final class AppModel {
     }
 
     func syncNow() async throws {
+        engine.log("info", "sync now requested")
         show("Syncing all accounts…")
         let report = try await engine.syncNow()
         if reader != nil { await refetchOpenThread() }

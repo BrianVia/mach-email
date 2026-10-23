@@ -15,15 +15,7 @@ struct MachApp: App {
                     .frame(minWidth: 600, minHeight: 400)
             }
         }
-        .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Add Account…") {
-                    guard case .success(let model) = delegate.boot else { return }
-                    Task { await model.addAccount(loginHint: nil) }
-                }
-                .keyboardShortcut("n")
-            }
-        }
+        .commands { MenuCommands(model: try? delegate.boot.get()) }
         SwiftUI.Settings { SettingsView() }
     }
 }
@@ -59,7 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard case .success(let model) = boot else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [model] event in
-            Self.shouldIntercept(event) && KeyChord.chord(for: event).map(model.handleKey) == true ? nil : event
+            guard let chord = KeyChord.chord(for: event) else { return event }
+            if let consumed = model.handleRouteKey(chord) { return consumed ? nil : event }
+            return Self.shouldIntercept(event) && model.handleKey(chord) ? nil : event
         }
         if let port = Self.debugPort { debugServer = DebugServer(port: port, model: model) }
         Task { await model.listen() }
