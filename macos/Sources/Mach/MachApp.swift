@@ -123,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// but never hold the quit longer than a few seconds.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model, model.hasUnsavedDraft else { return .terminateNow }
+        model.engine.log("info", "quit waits for the open draft to save")
         terminating = true
         Task {
             await model.saveDraftsBeforeQuit()
