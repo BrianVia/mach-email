@@ -3,7 +3,7 @@ import AppKit
 /// Debug-only hooks for notifications, sign-in, and window state. None of
 /// them talk to Gmail or change account files.
 extension DebugServer {
-    static let systemActionNames = ["simulate_mail_synced", "fake_reauth", "notifications_hint", "about", "window"]
+    static let systemActionNames = ["simulate_mail_synced", "fake_reauth", "notifications_hint", "about", "window", "quit"]
 
     private var mainWindow: NSWindow? { NSApp.windows.first { $0.canBecomeMain } }
 
@@ -68,6 +68,10 @@ extension DebugServer {
                 split.setPosition(width, ofDividerAt: 0)
             }
             try? await Task.sleep(for: .milliseconds(300))
+        case "quit":
+            // A real quit, unlike pkill, lets AppKit save window state.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
+            return ["ok": true]
         default: break
         }
         return ["system": systemState()]

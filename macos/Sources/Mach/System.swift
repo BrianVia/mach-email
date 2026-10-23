@@ -76,6 +76,7 @@ struct SystemBanners: View {
     }
 }
 
+@MainActor
 enum WindowStateKeeper {
     static func splitView(in view: NSView?) -> NSSplitView? {
         guard let view else { return nil }

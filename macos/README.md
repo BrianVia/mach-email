@@ -50,6 +50,7 @@ curl -X POST 127.0.0.1:7366/action -d '{"name":"fake_reauth","email":"someone@ex
 curl -X POST 127.0.0.1:7366/action -d '{"name":"notifications_hint","reset":true}'
 curl -X POST 127.0.0.1:7366/action -d '{"name":"about","png":"/tmp/about.png"}'  # opens the About panel and saves its PNG; {"close":true} closes it
 curl -X POST 127.0.0.1:7366/action -d '{"name":"window","frame":[100,100,1200,800],"sidebar":240}'
+curl -X POST 127.0.0.1:7366/action -d '{"name":"quit"}'                      # NSApp.terminate, so window state is saved
 ```
 
 Keys go through the same keymap path as the keyboard (`config/default-keymap.toml`
