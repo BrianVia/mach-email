@@ -46,9 +46,10 @@ struct ReaderState {
 enum Route {
     case list
     case thread(ReaderState)
-    // Owned by later agents; nothing routes to the first three yet.
-    case composer, search, palette
-    case activity, scheduled
+    // Owned by later agents; nothing routes to these two yet.
+    case search, palette
+    case composer(ComposerModel)
+    case activity, scheduled(ScheduledState)
 
     var name: String {
         switch self {
@@ -145,7 +146,7 @@ final class AppModel {
     }
 
     var title: String {
-        switch route {
+        switch composer?.background ?? route {
         case .thread(let reader): reader.thread.subject.isEmpty ? "(no subject)" : reader.thread.subject
         case .activity: "Activity"
         case .scheduled: "Scheduled"
@@ -154,7 +155,8 @@ final class AppModel {
     }
 
     var subtitle: String {
-        if case .thread(let reader) = route {
+        if case .scheduled(let state) = route { return "\(state.sends.count) scheduled" }
+        if case .thread(let reader) = composer?.background ?? route {
             let people = reader.thread.participants
             return people.prefix(2).joined(separator: ", ") + (people.count > 2 ? " +\(people.count - 2)" : "")
         }
@@ -265,6 +267,8 @@ final class AppModel {
     }
 
     var keyContext: KeyContext {
+        if let composer { return KeyContext(currentDraft: composer.draft.id) }
+        if scheduled != nil { return KeyContext() }
         if let reader {
             return KeyContext(selection: [reader.thread.id], currentThread: reader.thread.id, currentMessage: reader.currentMessage?.id)
         }
@@ -277,11 +281,13 @@ final class AppModel {
     func run(_ action: KeyAction) async {
         let fields = action.fields
         do {
+            if try await runInScheduled(action) { return }
             switch action.kind {
             case "quit": return
             case "select_next": moveSelection(by: 1)
             case "select_prev": moveSelection(by: -1)
             case "open_thread": if let id = fields.id { try await openThread(id) }
+            case "back_to_list" where composer != nil: escapeComposer()
             case "back_to_list": backToList()
             case "open_label": if let label = fields.labelId { try await openLabel(label) }
             case "show_activity": route = .activity
@@ -291,6 +297,7 @@ final class AppModel {
                 }
             case "load_older": try await loadOlder()
             case "refresh": try await syncNow()
+            case "compose_new", "reply", "forward", "save_draft", "send_draft": try await runCompose(action)
             case let kind where Self.removingActions.contains(kind): try await remove(action)
             case let kind where Self.engineActions.contains(kind): try await mutate(action)
             default:
@@ -325,10 +332,7 @@ final class AppModel {
     }
 
     func openLabel(_ label: String) async throws {
-        if label == "SCHEDULED" {
-            route = .scheduled
-            return
-        }
+        if label == "SCHEDULED" { return try await openScheduled() }
         let threads = try await engine.listThreads(label: label, limit: Self.initialListLimit)
         list = ListState(label: label, account: list.account, threads: threads)
         list.selection = visibleThreads.first?.id

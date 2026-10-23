@@ -110,8 +110,10 @@ final class DebugServer {
         }
     }
 
+    /// The composer sheet when one is attached, so keys and snapshots reach it.
     private var window: NSWindow? {
-        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first { $0.isVisible && $0.canBecomeMain }
+        let base = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first { $0.isVisible && $0.canBecomeMain }
+        return base?.attachedSheet ?? base
     }
 
     private func state() async -> [String: Any] {
@@ -164,6 +166,8 @@ final class DebugServer {
             "outbox": ["pending": model.outbox.pending, "failed": model.outbox.failed],
             "last_mail_synced_at": model.lastMailSyncedAt.map { $0.formatted(.iso8601) } ?? NSNull(),
             "notice": model.notice?.text ?? NSNull(),
+            "composer": model.composerDebugState,
+            "scheduled": model.scheduledDebugState,
             "chord_buffer": model.chordBuffer,
             "window_title": window?.title ?? NSNull(),
             "appearance": NSApp.effectiveAppearance.name.rawValue,
@@ -200,6 +204,7 @@ final class DebugServer {
         "inbox_split_important", "inbox_split_other", "inbox_split_updates", "inbox_split_newsletters",
         "star", "unstar", "mark_read", "mark_unread", "archive", "trash", "mute", "show_activity",
         "retry_outbox", "account", "appearance",
+        "compose_new", "reply", "reply_all", "forward", "save_draft", "compose_fields", "attach", "close_composer", "discard_draft",
     ]
 
     private func action(_ body: Data) async -> Response {
@@ -221,6 +226,14 @@ final class DebugServer {
         case "retry_outbox":
             await model.retryFailedChanges()
             return .json(await state())
+        case "compose_fields", "attach", "close_composer", "discard_draft":
+            do { try await model.debugCompose(name, object) } catch { return .error(400, String(describing: error)) }
+            try? await Task.sleep(for: .milliseconds(300))
+            return .json(await state())
+        case "reply", "reply_all", "forward":
+            object["message_id"] = object["message_id"] ?? context.currentMessage
+            if name != "forward" { object["all"] = name == "reply_all" }
+        case "save_draft": object["draft_id"] = context.currentDraft
         case "unstar": object["starred"] = false
         case "star": object["starred"] = object["starred"] ?? true
         case "mark_unread": object["read"] = false
@@ -228,7 +241,7 @@ final class DebugServer {
         case "open_thread": object["id"] = object["id"] ?? context.currentThread
         default: break
         }
-        object["kind"] = ["unstar": "star", "mark_unread": "mark_read"][name] ?? name
+        object["kind"] = ["unstar": "star", "mark_unread": "mark_read", "reply_all": "reply"][name] ?? name
         if ["star", "mark_read", "archive", "trash", "mute"].contains(object["kind"] as? String), object["thread_ids"] == nil {
             object["thread_ids"] = context.selection
         }
