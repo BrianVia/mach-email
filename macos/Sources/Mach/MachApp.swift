@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @ObservationIgnored private var booting: Task<AppModel, Error>?
     @ObservationIgnored private var debugServer: DebugServer?
     @ObservationIgnored private var keyMonitor: Any?
-    @ObservationIgnored private var terminating = false
+    @ObservationIgnored private var quitAfterSave = false
 
     var model: AppModel? { if case .ready(let model) = boot { model } else { nil } }
 
@@ -123,28 +123,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    /// ⌘Q and closing the window save an open or still-saving draft first,
-    /// but never hold the quit longer than a few seconds.
+    /// ⌘Q and closing the window save an open or still-saving draft first.
+    /// The first request is cancelled and repeated once the save finishes, or
+    /// after a few seconds: `.terminateLater` parks the run loop in a mode
+    /// where main-actor tasks never run, so the save could not finish.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model, model.hasUnsavedDraft else { return .terminateNow }
+        guard !quitAfterSave, let model, model.hasUnsavedDraft else { return .terminateNow }
         model.engine.log("info", "quit waits for the open draft to save")
-        terminating = true
+        quitAfterSave = true
         Task {
             await model.saveDraftsBeforeQuit()
-            finishTerminating()
+            NSApp.terminate(nil)
         }
         Task {
             try? await Task.sleep(for: .seconds(3))
-            if terminating { model.engine.log("warn", "quit before the draft finished saving") }
-            finishTerminating()
+            model.engine.log("warn", "quit before the draft finished saving")
+            NSApp.terminate(nil)
         }
-        return .terminateLater
-    }
-
-    private func finishTerminating() {
-        guard terminating else { return }
-        terminating = false
-        NSApp.reply(toApplicationShouldTerminate: true)
+        return .terminateCancel
     }
 
     /// SwiftUI restores the frame saved under the window's autosave name but
