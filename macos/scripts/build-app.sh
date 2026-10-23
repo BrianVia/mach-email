@@ -3,8 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# RUST BRIDGE HOOK: build crates/mach-ffi into Generated/MachFFI.xcframework here.
-# Package.swift links it automatically once that directory exists.
+# Rebuild the Rust bridge when it is missing or older than any engine source.
+stamp=Generated/mach_ffi.swift
+if [[ ! -f "$stamp" ]] || [[ -n "$(find ../crates ../config ../Cargo.lock \( -name '*.rs' -o -name '*.toml' -o -name Cargo.lock \) -newer "$stamp" -print -quit)" ]]; then
+  bash scripts/build-ffi.sh
+fi
 
 swift build -c release -Xswiftc -warnings-as-errors
 bin="$(swift build -c release --show-bin-path)/Mach"

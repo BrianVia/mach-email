@@ -1,6 +1,7 @@
 import AppKit
 import Network
 import UserNotifications
+import WebKit
 
 /// Loopback HTTP server that lets an agent see and drive the app over SSH.
 /// Everything runs on the main queue so handlers can touch AppKit directly.
@@ -101,9 +102,9 @@ final class DebugServer {
         switch (request.method, request.path) {
         case ("GET", "/health"): return .json(["ok": true])
         case ("GET", "/state"): return .json(await state())
-        case ("GET", "/snapshot"): return snapshot()
+        case ("GET", "/snapshot"): return await snapshot()
         case ("POST", "/key"): return await key(request.body)
-        case ("POST", "/action"): return action(request.body)
+        case ("POST", "/action"): return await action(request.body)
         case ("POST", "/notify"): return await notify(request.body)
         default: return .error(404, "no route \(request.method) \(request.path)")
         }
@@ -130,15 +131,42 @@ final class DebugServer {
             @unknown default: "unknown"
             }
         }
+        let visible = model.visibleThreads
+        let reader = model.reader
         return [
-            "view": model.view,
-            "selected_label_id": model.selectedLabelId ?? NSNull(),
-            "selected_thread_id": model.selectedThreadId ?? NSNull(),
-            "opened_thread_id": model.openedThreadId ?? NSNull(),
-            "thread_ids": model.threads.map(\.id),
-            "account": model.account?.email ?? NSNull(),
-            "last_error": model.lastError ?? NSNull(),
+            "route": model.route.name,
+            "label": model.list.label,
+            "account_filter": model.list.account ?? NSNull(),
+            "split": model.split.rawValue,
+            "selected_thread_id": model.list.selection ?? NSNull(),
+            "selected_index": visible.firstIndex { $0.id == model.list.selection } ?? NSNull(),
+            "opened_thread_id": reader?.thread.id ?? NSNull(),
+            "opened_thread": reader.map { reader in
+                [
+                    "subject": reader.thread.subject,
+                    "starred": reader.thread.starred,
+                    "unread": reader.thread.unread,
+                    "message_count": reader.messages.count,
+                    "selected_message": reader.selectedMessage,
+                    "html_messages": reader.messages.filter { !($0.bodyHtml ?? "").isEmpty }.count,
+                    "fetched_full": reader.messages.allSatisfy(\.fetchedFull),
+                ] as [String: Any]
+            } ?? NSNull(),
+            "thread_count": visible.count,
+            "loaded_thread_count": model.list.threads.count,
+            "visible_threads": visible.prefix(12).map {
+                ["id": $0.id, "subject": $0.subject, "unread": $0.unread, "starred": $0.starred, "account": $0.accountId]
+            },
+            "labels": model.labels.count,
+            "accounts": model.accounts,
+            "online": model.online,
+            "sync_ok": model.syncOkByAccount,
+            "outbox": ["pending": model.outbox.pending, "failed": model.outbox.failed],
+            "last_mail_synced_at": model.lastMailSyncedAt.map { $0.formatted(.iso8601) } ?? NSNull(),
+            "notice": model.notice?.text ?? NSNull(),
+            "chord_buffer": model.chordBuffer,
             "window_title": window?.title ?? NSNull(),
+            "appearance": NSApp.effectiveAppearance.name.rawValue,
             "app_active": NSApp.isActive,
             "notifications": [
                 "authorization": authorization,
@@ -165,13 +193,51 @@ final class DebugServer {
         return .json(await state())
     }
 
-    private func action(_ body: Data) -> Response {
-        let name = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["name"] as? String
-        guard let name, let action = AppModel.Action(rawValue: name) else {
-            return .error(400, "unknown action; known: \(AppModel.Action.allCases.map(\.rawValue))")
+    /// Keymap action names (with their usual fields filled from the current
+    /// selection) plus a few debug-only names.
+    static let actionNames = [
+        "select_next", "select_prev", "open_thread", "back_to_list", "open_label", "load_older", "refresh",
+        "inbox_split_important", "inbox_split_other", "inbox_split_updates", "inbox_split_newsletters",
+        "star", "unstar", "mark_read", "mark_unread", "archive", "trash", "mute", "show_activity",
+        "retry_outbox", "account", "appearance",
+    ]
+
+    private func action(_ body: Data) async -> Response {
+        guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+            let name = object.removeValue(forKey: "name") as? String, Self.actionNames.contains(name)
+        else {
+            return .error(400, "unknown action; known: \(Self.actionNames)")
         }
-        model.perform(action)
-        return .json(["ok": true, "action": name])
+        let context = model.keyContext
+        switch name {
+        case "appearance":
+            let value = object["value"] as? String
+            NSApp.appearance = value == "dark" ? NSAppearance(named: .darkAqua) : value == "light" ? NSAppearance(named: .aqua) : nil
+            try? await Task.sleep(for: .milliseconds(300))
+            return .json(["ok": true, "appearance": NSApp.effectiveAppearance.name.rawValue])
+        case "account":
+            model.selectAccount(object["account"] as? String)
+            return .json(await state())
+        case "retry_outbox":
+            await model.retryFailedChanges()
+            return .json(await state())
+        case "unstar": object["starred"] = false
+        case "star": object["starred"] = object["starred"] ?? true
+        case "mark_unread": object["read"] = false
+        case "mark_read": object["read"] = object["read"] ?? true
+        case "open_thread": object["id"] = object["id"] ?? context.currentThread
+        default: break
+        }
+        object["kind"] = ["unstar": "star", "mark_unread": "mark_read"][name] ?? name
+        if ["star", "mark_read", "archive", "trash", "mute"].contains(object["kind"] as? String), object["thread_ids"] == nil {
+            object["thread_ids"] = context.selection
+        }
+        do {
+            await model.run(try KeyAction(object))
+        } catch {
+            return .error(400, "bad action: \(error)")
+        }
+        return .json(await state())
     }
 
     private func notify(_ body: Data) async -> Response {
@@ -192,13 +258,36 @@ final class DebugServer {
         }
     }
 
-    private func snapshot() -> Response {
+    /// WKWebView draws out of process, so `cacheDisplay` leaves it blank;
+    /// each visible web view's own snapshot is drawn over its frame.
+    private func snapshot() async -> Response {
         // The frame view (contentView's superview) includes the title bar and toolbar.
         guard let view = window?.contentView?.superview ?? window?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             return .error(404, "no window")
         }
         view.cacheDisplay(in: view.bounds, to: rep)
+        var overlays: [(NSImage, NSRect, NSRect)] = []
+        for webView in Self.webViews(in: view) where !webView.visibleRect.isEmpty {
+            guard let image = try? await webView.takeSnapshot(configuration: nil) else { continue }
+            overlays.append((image, webView.convert(webView.bounds, to: view), webView.convert(webView.visibleRect, to: view)))
+        }
+        if !overlays.isEmpty, let context = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            for (image, frame, visible) in overlays {
+                NSGraphicsContext.saveGraphicsState()
+                visible.clip()
+                image.draw(in: frame)
+                NSGraphicsContext.restoreGraphicsState()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        }
         guard let png = rep.representation(using: .png, properties: [:]) else { return .error(500, "png encoding failed") }
         return Response(contentType: "image/png", body: png)
+    }
+
+    private static func webViews(in view: NSView) -> [WKWebView] {
+        if let webView = view as? WKWebView { return [webView] }
+        return view.subviews.flatMap(webViews)
     }
 }

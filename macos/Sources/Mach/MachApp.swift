@@ -8,14 +8,19 @@ struct MachApp: App {
 
     var body: some Scene {
         Window("Mach", id: "main") {
-            ContentView(model: delegate.model)
+            switch delegate.boot {
+            case .success(let model): ContentView(model: model)
+            case .failure(let error):
+                ContentUnavailableView("Mach couldn't start", systemImage: "exclamationmark.triangle", description: Text(String(describing: error)))
+                    .frame(minWidth: 600, minHeight: 400)
+            }
         }
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
-    let model = AppModel(engine: PreviewEngine())
+    let boot: Result<AppModel, Error> = Result { AppModel(engine: try Engine()) }
     private var debugServer: DebugServer?
     private var keyMonitor: Any?
 
@@ -26,11 +31,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard case .success(let model) = boot else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [model] event in
-            model.handleKey(KeyChord.name(of: event)) ? nil : event
+            Self.shouldIntercept(event) && KeyChord.chord(for: event).map(model.handleKey) == true ? nil : event
         }
         let port = ProcessInfo.processInfo.environment["MACH_DEBUG_PORT"].flatMap(UInt16.init) ?? 7366
         debugServer = DebugServer(port: port, model: model)
+        Task { await model.listen() }
         Task {
             await model.load()
             do {
@@ -38,9 +45,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     .requestAuthorization(options: [.alert, .sound, .badge])
             } catch {
                 model.notificationsAllowed = false
-                model.lastError = "notification authorization: \(error)"
+                model.engine.log("warn", "notification authorization: \(error)")
             }
         }
+    }
+
+    /// Text fields keep their keys; Esc still reaches the keymap.
+    private static func shouldIntercept(_ event: NSEvent) -> Bool {
+        guard let editor = event.window?.firstResponder as? NSTextView, editor.isEditable else { return true }
+        return event.keyCode == 53
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -56,8 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     ) async {
         guard let threadId = response.notification.request.content.userInfo["thread_id"] as? String else { return }
         await MainActor.run {
-            model.openThread(threadId)
+            guard case .success(let model) = boot else { return }
             NSApp.activate()
+            Task { do { try await model.openThread(threadId) } catch { model.show(error) } }
         }
     }
 }
