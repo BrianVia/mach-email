@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.notificationsAllowed = try await UNUserNotificationCenter.current()
                     .requestAuthorization(options: [.alert, .sound, .badge])
             } catch {
+                model.notificationsAllowed = false
                 model.lastError = "notification authorization: \(error)"
             }
         }
