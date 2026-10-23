@@ -9,7 +9,10 @@ pub async fn one_click_unsubscribe(url: &str) -> Result<()> {
     {
         bail!("one-click unsubscribe requires an HTTPS URL");
     }
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("building unsubscribe client")?
         .post(url)
         .header(
             reqwest::header::CONTENT_TYPE,

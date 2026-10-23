@@ -10,25 +10,44 @@ final class DebugServer {
     private struct Request {
         let method: String
         let path: String
+        /// Lowercased names.
+        let headers: [String: String]
         let body: Data
 
-        /// Returns nil until `buffer` holds the full headers and body.
-        init?(parsing buffer: Data) {
-            guard let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)),
-                let head = String(data: buffer[..<headerEnd.lowerBound], encoding: .utf8)
-            else { return nil }
+        enum Parse {
+            case incomplete
+            case malformed(Int, String)
+            case request(Request)
+        }
+
+        static func parse(_ buffer: Data) -> Parse {
+            guard let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else {
+                return buffer.count > maxRequestBytes ? .malformed(413, "request too large") : .incomplete
+            }
+            guard let head = String(data: buffer[..<headerEnd.lowerBound], encoding: .utf8) else { return .malformed(400, "headers are not UTF-8") }
             let lines = head.components(separatedBy: "\r\n")
             let requestLine = lines[0].split(separator: " ")
-            guard requestLine.count >= 2 else { return nil }
-            let length = lines.dropFirst()
-                .first { $0.lowercased().hasPrefix("content-length:") }
-                .flatMap { Int($0.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) } ?? 0
-            guard buffer.count - headerEnd.upperBound >= length else { return nil }
-            method = String(requestLine[0])
-            path = String(requestLine[1])
-            body = buffer[headerEnd.upperBound..<headerEnd.upperBound + length]
+            guard requestLine.count >= 2 else { return .malformed(400, "bad request line") }
+            var headers: [String: String] = [:]
+            for line in lines.dropFirst() {
+                guard let colon = line.firstIndex(of: ":") else { return .malformed(400, "bad header line") }
+                headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+            var length = 0
+            if let value = headers["content-length"] {
+                guard let parsed = Int(value), parsed >= 0 else { return .malformed(400, "bad Content-Length") }
+                length = parsed
+            }
+            guard length <= maxRequestBytes else { return .malformed(413, "request too large") }
+            // Every index comes from the buffer itself, and a body still in flight waits for the next read.
+            let start = headerEnd.upperBound
+            guard buffer.endIndex - start >= length else { return .incomplete }
+            return .request(Request(
+                method: String(requestLine[0]), path: String(requestLine[1]), headers: headers, body: Data(buffer[start..<start + length])))
         }
     }
+
+    private nonisolated static let maxRequestBytes = 1 << 20
 
     private struct Response {
         var status = 200
@@ -56,12 +75,15 @@ final class DebugServer {
 
     let model: AppModel
     private let listener: NWListener
+    private let port: UInt16
 
     init?(port: UInt16, model: AppModel) {
         self.model = model
+        self.port = port
+        guard let endpointPort = NWEndpoint.Port(rawValue: port) else { return nil }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!)
+        params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: endpointPort)
         guard let listener = try? NWListener(using: params) else { return nil }
         self.listener = listener
         listener.newConnectionHandler = { [weak self] connection in
@@ -81,11 +103,14 @@ final class DebugServer {
             MainActor.assumeIsolated {
                 guard let self else { return connection.cancel() }
                 let buffer = buffer + (data ?? Data())
-                if let request = Request(parsing: buffer) {
+                switch Request.parse(buffer) {
+                case .request(let request):
                     Task { self.send(await self.route(request), on: connection) }
-                } else if isComplete || error != nil {
+                case .malformed(let status, let message):
+                    self.send(.error(status, message), on: connection)
+                case .incomplete where isComplete || error != nil:
                     connection.cancel()
-                } else {
+                case .incomplete:
                     self.receive(on: connection, buffer: buffer)
                 }
             }
@@ -98,7 +123,24 @@ final class DebugServer {
         connection.send(content: Data(head.utf8) + response.body, completion: .contentProcessed { _ in connection.cancel() })
     }
 
+    /// Web pages can reach loopback too. A page's fetch carries Origin or
+    /// Sec-Fetch-Site, a DNS-rebound page carries its own Host, and a custom
+    /// header on a cross-origin POST forces a CORS preflight this server never answers.
+    private func rejection(_ request: Request) -> Response? {
+        guard ["127.0.0.1:\(port)", "localhost:\(port)"].contains(request.headers["host"] ?? "") else {
+            return .error(403, "Host must be 127.0.0.1:\(port) or localhost:\(port)")
+        }
+        if request.headers["origin"] != nil || request.headers["sec-fetch-site"] != nil {
+            return .error(403, "browser requests are refused")
+        }
+        if request.method != "GET", request.headers["x-mach-debug"] != "1" {
+            return .error(403, "POST requires the header X-Mach-Debug: 1")
+        }
+        return nil
+    }
+
     private func route(_ request: Request) async -> Response {
+        if let rejection = rejection(request) { return rejection }
         switch (request.method, request.path) {
         case ("GET", "/health"): return .json(["ok": true])
         case ("GET", "/state"): return .json(await state())
@@ -248,6 +290,11 @@ final class DebugServer {
         "compose_new", "reply", "reply_all", "forward", "save_draft", "compose_fields", "attach", "close_composer", "discard_draft",
     ] + AppModel.debugReaderActions + systemActionNames
 
+    /// Whole menus or single items the `menu` action may perform. The Message
+    /// menu (archive, trash, mute), Retry Failed Changes (resends mail), Edit's
+    /// mail undo, and the app menu (quit) are left out.
+    static let menuAllowList: Set<String> = ["View", "Mailbox > Sync Now", "Mailbox > Load Older Mail", "File > New Message"]
+
     private func action(_ body: Data) async -> Response {
         guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
             let name = object.removeValue(forKey: "name") as? String, Self.actionNames.contains(name)
@@ -286,6 +333,11 @@ final class DebugServer {
         case "menu":
             // Performs the real NSMenuItem, e.g. {"path": ["Mailbox", "Sync Now"]}.
             guard let path = object["path"] as? [String], path.count == 2,
+                Self.menuAllowList.contains(path[0]) || Self.menuAllowList.contains(path.joined(separator: " > "))
+            else {
+                return .error(403, "menu takes only navigation and sync items: \(Self.menuAllowList.sorted())")
+            }
+            guard
                 let menu = NSApp.mainMenu?.items.first(where: { $0.title == path[0] })?.submenu,
                 let index = menu.items.firstIndex(where: { $0.title == path[1] })
             else {

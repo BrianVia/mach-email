@@ -99,14 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    /// Off unless MACH_DEBUG_PORT is set; debug builds default to 7366.
+    /// Off unless MACH_DEBUG_PORT is set, in every build.
     private static var debugPort: UInt16? {
-        if let port = ProcessInfo.processInfo.environment["MACH_DEBUG_PORT"] { return UInt16(port) }
-        #if DEBUG
-        return 7366
-        #else
-        return nil
-        #endif
+        ProcessInfo.processInfo.environment["MACH_DEBUG_PORT"].flatMap { UInt16($0) }
     }
 
     /// The user may have changed the permission in System Settings meanwhile.

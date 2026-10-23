@@ -32,8 +32,8 @@ crates/mach-ffi/           Rust cdylib/staticlib exported to Swift with UniFFI
 - **Keyboard.** The keymap stays `config/default-keymap.toml` plus the user's
   override, resolved by `mach_core::keymap` through the bridge, so chords and
   contexts behave identically.
-- **Debug server.** The app listens on `127.0.0.1:$MACH_DEBUG_PORT` (default
-  7366) with `/state`, `/key`, `/action`, and `/snapshot` (PNG of the app's own
+- **Debug server.** The app listens on `127.0.0.1:$MACH_DEBUG_PORT` (only when
+  set) with `/state`, `/key`, `/action`, and `/snapshot` (PNG of the app's own
   window, no screen-recording permission needed). This is how agents verify UI
   over SSH, since `screencapture` cannot run from an SSH session.
 - **Bundle.** `Mach.app`, bundle id `com.via.mach.native` during development.

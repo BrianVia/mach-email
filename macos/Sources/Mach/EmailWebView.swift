@@ -5,33 +5,61 @@ import WebKit
 /// linkified plain text.
 enum EmailHTML {
     static let attachmentScheme = "mach"
+    static let linkSchemes: Set<String> = ["http", "https", "mailto"]
 
     static func attachmentURL(account: String, messageId: String, attachmentId: String) -> String {
         let parts = [account, messageId, attachmentId].map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? $0 }
         return "\(attachmentScheme)://attachment/\(parts.joined(separator: "/"))"
     }
 
-    /// Wraps the message body in a light, readable page and points `cid:`
-    /// images at the attachment scheme handler.
+    /// Whether a body follows the app's light or dark appearance. Designed
+    /// mail paints its own backgrounds and assumes white paper unless it ships
+    /// dark-mode rules; simple mail with no colors of its own takes the card's.
+    static func followsAppearance(_ html: String) -> Bool {
+        if html.contains(/(?i)prefers-color-scheme\s*:\s*dark/) { return true }
+        return !html.contains(/(?i)bgcolor\s*=|background[\w-]*\s*:|(^|[^\w-])color\s*[:=]/)
+    }
+
+    /// Wraps the message body in a readable page and points `cid:` images at
+    /// the attachment scheme handler.
     static func document(for message: Message) -> String {
         var inline: [String: String] = [:]
         for image in message.inlineImages {
             inline[image.contentId.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "<> "))] = image.attachmentId
         }
-        let body = (message.bodyHtml ?? "").replacing(/(?i)cid:([^"'\s>)]+)/) { match in
+        let html = message.bodyHtml ?? ""
+        let body = html.replacing(/(?i)cid:([^"'\s>)]+)/) { match in
             guard let attachmentId = inline[String(match.1).lowercased()] else { return String(match.0) }
             return attachmentURL(account: message.accountId, messageId: message.id, attachmentId: attachmentId)
         }
+        // The web view draws no background of its own, so an adaptive body shows the card behind it.
+        let page = followsAppearance(html)
+            ? """
+                <meta name="color-scheme" content="light dark">
+                <style>
+                html, body { background: transparent; }
+                @media (prefers-color-scheme: dark) {
+                  body { color: rgba(255, 255, 255, 0.86); }
+                  a { color: #6cb4ff; }
+                  blockquote { border-left-color: #48484a !important; color: #a1a1a6 !important; }
+                }
+                </style>
+                """
+            : """
+                <meta name="color-scheme" content="light">
+                <style>html, body { background: #fff; }</style>
+                """
         return """
             <!doctype html><html><head><meta charset="utf-8">
-            <meta name="color-scheme" content="light">
             <style>
-            html, body { height: auto !important; margin: 0; background: #fff; }
+            html, body { height: auto !important; margin: 0; }
             body { padding: 16px; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; color: #1d1d1f; overflow-wrap: anywhere; }
             img { max-width: 100%; }
             pre { white-space: pre-wrap; }
             blockquote { margin-left: 0.5em; padding-left: 0.8em; border-left: 3px solid #d2d2d7; color: #555; }
-            </style></head><body>\(body)</body></html>
+            </style>
+            \(page)
+            </head><body>\(body)</body></html>
             """
     }
 
@@ -45,7 +73,7 @@ enum EmailHTML {
         var attributed = AttributedString(text)
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return attributed }
         for match in detector.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-            guard let url = match.url, let range = Range(match.range, in: text),
+            guard let url = match.url, linkSchemes.contains(url.scheme?.lowercased() ?? ""), let range = Range(match.range, in: text),
                 let attributedRange = Range(range, in: attributed)
             else { continue }
             attributed[attributedRange].link = url
@@ -54,8 +82,9 @@ enum EmailHTML {
     }
 }
 
-/// An HTML email body. JavaScript is off, links open in the default browser,
-/// every other navigation is refused, and the view grows to fit its content
+/// An HTML email body. JavaScript is off, link clicks go to the environment's
+/// `openURL` (the reader routes them through `AppModel.openLink`), every other
+/// navigation is refused, and the view grows to fit its content
 /// so the reader's ScrollView does the scrolling.
 struct EmailWebView: View {
     let html: String
@@ -81,25 +110,31 @@ private struct WebViewRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> FittingWebView {
         let config = WKWebViewConfiguration()
+        // Cookies set by remote images would otherwise follow the user across every message.
+        config.websiteDataStore = .nonPersistent()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.setURLSchemeHandler(AttachmentSchemeHandler(engine: engine), forURLScheme: EmailHTML.attachmentScheme)
         let view = FittingWebView(frame: .zero, configuration: config)
+        view.setValue(false, forKey: "drawsBackground")
         view.navigationDelegate = context.coordinator
         view.onWidthChange = { [weak coordinator = context.coordinator, weak view] in
             if let view { coordinator?.measure(view) }
         }
+        context.coordinator.openURL = context.environment.openURL
         context.coordinator.load(html, blockRemote: blockRemote, in: view)
         return view
     }
 
     func updateNSView(_ view: FittingWebView, context: Context) {
         context.coordinator.height = $height
+        context.coordinator.openURL = context.environment.openURL
         context.coordinator.load(html, blockRemote: blockRemote, in: view)
     }
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         var height: Binding<CGFloat>
+        var openURL: OpenURLAction?
         private var loaded: (html: String, blockRemote: Bool)?
 
         init(height: Binding<CGFloat>) { self.height = height }
@@ -130,7 +165,7 @@ private struct WebViewRepresentable: NSViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
             guard let url = action.request.url else { return .cancel }
             if action.navigationType == .linkActivated {
-                if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }
+                if EmailHTML.linkSchemes.contains(url.scheme?.lowercased() ?? "") { openURL?(url) }
                 return .cancel
             }
             return url.absoluteString == "about:blank" ? .allow : .cancel
