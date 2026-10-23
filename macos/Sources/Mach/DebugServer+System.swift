@@ -35,7 +35,7 @@ extension DebugServer {
             // In memory only; the next account-status refresh drops it.
             if let email = object["email"] as? String {
                 model.status?.needsReauth.append(email)
-            } else if let status = try? model.engine.accountStatus() {
+            } else if let status = try? await model.engine.accountStatus() {
                 model.status = status
             }
         case "notifications_hint":

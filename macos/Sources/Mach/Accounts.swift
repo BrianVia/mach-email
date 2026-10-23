@@ -12,7 +12,7 @@ extension AppModel {
         notice = Notice(text: "Finish signing in in your browser…")
         do {
             let email = try await engine.addAccount(loginHint: loginHint)
-            status = try engine.accountStatus()
+            status = try await engine.accountStatus()
             labels = try await engine.listLabels()
             await refreshList()
             show("\(loginHint == nil ? "Added" : "Signed in again to") \(accountLabel(email))")

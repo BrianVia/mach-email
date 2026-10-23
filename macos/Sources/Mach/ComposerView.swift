@@ -36,12 +36,12 @@ struct ComposerSheet: View {
         .defaultFocus($focus, composer.to.isEmpty ? .to : nil)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
-            case .success(let urls): model.attach(urls, to: composer)
+            case .success(let urls): Task { await model.attach(urls, to: composer) }
             case .failure(let error): model.show(error)
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            model.attach(urls.filter(\.isFileURL), to: composer)
+            Task { await model.attach(urls.filter(\.isFileURL), to: composer) }
             return true
         } isTargeted: { dropTargeted = $0 }
         .overlay {
@@ -237,6 +237,15 @@ private struct ComposerBodyEditor: NSViewRepresentable {
             guard let text = notification.object as? NSTextView else { return }
             composer.body = text.string
             composer.updateSnippet(cursor: text.selectedRange().location)
+        }
+
+        /// A click or arrow that moves the caret off a `;name` closes the picker.
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let text = notification.object as? NSTextView else { return }
+            let token = SnippetToken.detect(in: text.string, cursor: text.selectedRange().location)
+            guard composer.snippet != token else { return }
+            composer.snippet = token
+            composer.snippetSelection = 0
         }
 
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {

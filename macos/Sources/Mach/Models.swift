@@ -132,11 +132,36 @@ struct ActionOutcome: Codable, Sendable {
     var message: String
 }
 
-struct Settings: Codable, Sendable {
+/// settings.toml. Each field decodes on its own, so one bad value falls back
+/// to that field's default instead of dropping `block_remote_images`.
+struct Settings: Decodable, Sendable {
     enum AfterArchive: String, Codable, Sendable { case next, list }
     var afterArchive: AfterArchive?
     var blockRemoteImages: Bool?
     var accountLabels: [String: String]?
+    /// Why settings.toml was not fully read, for a notice.
+    var problem: String?
+
+    private enum Key: String, CodingKey { case afterArchive, blockRemoteImages, accountLabels, settingsError }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        var invalid: [String] = []
+        func field<T: Decodable>(_ key: Key, _ name: String) -> T? {
+            do { return try container.decodeIfPresent(T.self, forKey: key) } catch {
+                invalid.append(name)
+                return nil
+            }
+        }
+        afterArchive = field(.afterArchive, "after_archive")
+        blockRemoteImages = field(.blockRemoteImages, "block_remote_images")
+        accountLabels = field(.accountLabels, "accounts")
+        if let error = try? container.decodeIfPresent(String.self, forKey: .settingsError) {
+            problem = "settings.toml couldn't be read, using defaults: \(error)"
+        } else if !invalid.isEmpty {
+            problem = "settings.toml: ignored invalid \(invalid.joined(separator: ", ")), using the default"
+        }
+    }
 }
 
 struct MailSyncedPayload: Codable, Sendable {

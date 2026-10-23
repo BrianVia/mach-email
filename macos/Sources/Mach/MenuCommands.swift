@@ -3,16 +3,16 @@ import SwiftUI
 
 /// The menu bar. Items build the same actions the keymap does and go
 /// through `AppModel.run`. A shortcut whose chord the keymap binds (⌘R,
-/// ⌘N, ⌘K) is consumed by the key monitor before the menu sees it, so it
+/// ⌘N, ⌥⌘N, ⌘K) is consumed by the key monitor before the menu sees it, so it
 /// never fires twice; the others are chords the keymap leaves unbound.
 struct MenuCommands: Commands {
     let model: AppModel?
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Message") { perform("compose_new") }
+            Button("New Message") { perform("compose_new") }.keyboardShortcut("n")
             Button("Add Account…") { Task { await model?.addAccount(loginHint: nil) } }
-                .keyboardShortcut("n")
+                .keyboardShortcut("n", modifiers: [.command, .option])
         }
         CommandGroup(replacing: .undoRedo) {
             Button("Undo") { undoOrRedo("undo") }.keyboardShortcut("z")

@@ -31,8 +31,15 @@ final class Engine: Sendable {
         core = try MachEngine.start(listener: Listener { continuation.yield($0) })
     }
 
-    func accountStatus() throws -> AccountStatus { try Bridge.decode(AccountStatus.self, core.accountStatus()) }
-    func settings() throws -> Settings { try Bridge.decode(Settings.self, core.settings()) }
+    /// Reads credentials from disk, so it runs off the main actor.
+    func accountStatus() async throws -> AccountStatus {
+        try await Task.detached { [core] in try Bridge.decode(AccountStatus.self, core.accountStatus()) }.value
+    }
+
+    /// Reads settings.toml, so it runs off the main actor.
+    func settings() async throws -> Settings {
+        try await Task.detached { [core] in try Bridge.decode(Settings.self, core.settings()) }.value
+    }
 
     /// Opens Google sign-in in the browser and returns the signed-in address.
     /// The engine gives up after three minutes without a redirect.
@@ -98,8 +105,11 @@ final class Engine: Sendable {
         try Bridge.decode(Out<[ScheduledSend]>.self, await core.listScheduled()).get()
     }
 
-    func stageAttachment(name: String, bytes: Data) throws -> DraftAttachment {
-        try Bridge.decode(DraftAttachment.self, core.stageAttachment(name: name, bytes: bytes))
+    /// Reads and copies the file off the main actor.
+    func stageAttachment(file: URL) async throws -> DraftAttachment {
+        try await Task.detached { [core] in
+            try Bridge.decode(DraftAttachment.self, core.stageAttachment(name: file.lastPathComponent, bytes: Data(contentsOf: file)))
+        }.value
     }
 
     /// Plain decoder: the bridge's snake_case strategy would rewrite snippet names.

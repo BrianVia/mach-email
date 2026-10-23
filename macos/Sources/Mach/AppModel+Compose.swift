@@ -81,6 +81,8 @@ final class ComposerModel: Identifiable {
     let presets: [SendLaterPreset]
     var snippet: SnippetToken?
     var snippetSelection = 0
+    /// Sent, scheduled, or discarded: leaving it must not save it again.
+    @ObservationIgnored var finished = false
     /// Set by the body editor so snippet insertion goes through the text
     /// system, which keeps undo and places the cursor.
     @ObservationIgnored weak var bodyView: NSTextView?
@@ -123,7 +125,12 @@ final class ComposerModel: Identifiable {
         guard let token = snippet, matches.indices.contains(index ?? snippetSelection) else { return }
         let value = matches[index ?? snippetSelection].value
         if let view = bodyView {
+            // The caret may have left the token since it was typed.
             let cursor = view.selectedRange().location
+            guard let current = SnippetToken.detect(in: view.string, cursor: cursor), current.start == token.start, cursor > token.start else {
+                snippet = nil
+                return
+            }
             view.insertText(value, replacementRange: NSRange(location: token.start, length: cursor - token.start))
             view.window?.makeFirstResponder(view)
         } else {
@@ -211,8 +218,8 @@ extension AppModel {
         return draft
     }
 
-    /// Esc: dismisses the snippet picker first, then closes and autosaves
-    /// like closeComposer in App.svelte.
+    /// Esc: dismisses the snippet picker first, then closes, and the route
+    /// setter autosaves like closeComposer in App.svelte.
     func escapeComposer() {
         guard let composer else { return }
         if composer.snippet != nil {
@@ -220,26 +227,57 @@ extension AppModel {
             return
         }
         leave(composer)
-        Task {
+    }
+
+    /// Saves a composer that lost the screen. Saves run one at a time so a
+    /// quit can wait for all of them.
+    func autosave(_ composer: ComposerModel) {
+        guard !composer.finished else { return }
+        let previous = draftSaves
+        pendingDraftSaves += 1
+        draftSaves = Task {
+            await previous?.value
             do { try await saveDraft(composer) } catch { show(error) }
+            pendingDraftSaves -= 1
         }
     }
 
-    private func leave(_ composer: ComposerModel) {
+    var hasUnsavedDraft: Bool { composer != nil || pendingDraftSaves > 0 }
+
+    /// Quit: saves the open composer and waits for every autosave.
+    func saveDraftsBeforeQuit() async {
+        if let composer { autosave(composer) }
+        await draftSaves?.value
+    }
+
+    private func leave(_ composer: ComposerModel, finished: Bool = false) {
         guard self.composer === composer else { return }
+        composer.finished = finished
         route = composer.background
         Task {
-            if case .scheduled = route { await reloadScheduled() } else if case .list = route { await refreshList() }
+            switch route {
+            case .scheduled: await reloadScheduled()
+            case .list: await refreshList()
+            case .thread: await reloadOpenThread()
+            default: break
+            }
         }
     }
 
     func send(_ composer: ComposerModel) async throws {
         let draft = try await saveDraft(composer)
-        _ = try await engine.dispatch(KeyAction(["kind": "send_draft", "draft_id": draft.id]))
-        leave(composer)
+        composer.finished = true
+        do {
+            _ = try await engine.dispatch(KeyAction(["kind": "send_draft", "draft_id": draft.id]))
+        } catch {
+            composer.finished = false
+            throw error
+        }
+        leave(composer, finished: true)
         show("Sending…")
         let report = try await engine.flushOutbox()
         await refreshOutbox()
+        await reloadOpenThread()
         if report.failed > 0 {
             show(report.lastError ?? "\(report.failed) outbox operation(s) failed", isError: true)
         } else {
@@ -251,7 +289,7 @@ extension AppModel {
         do {
             let draft = try await saveDraft(composer)
             _ = try await engine.dispatch(KeyAction(["kind": "send_later", "draft_id": draft.id, "at": date.formatted(.iso8601)]))
-            leave(composer)
+            leave(composer, finished: true)
             show("Scheduled for \(date.formatted(date: .abbreviated, time: .shortened))")
         } catch {
             show(error)
@@ -261,7 +299,7 @@ extension AppModel {
     func discard(_ composer: ComposerModel) async {
         do {
             _ = try await engine.dispatch(KeyAction(["kind": "discard_draft", "draft_id": composer.draft.id]))
-            leave(composer)
+            leave(composer, finished: true)
             show("Draft discarded")
             _ = try? await engine.flushOutbox()
             await refreshOutbox()
@@ -270,12 +308,12 @@ extension AppModel {
         }
     }
 
-    func attach(_ urls: [URL], to composer: ComposerModel) {
+    func attach(_ urls: [URL], to composer: ComposerModel) async {
         for url in urls {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
-                composer.attachments.append(try engine.stageAttachment(name: url.lastPathComponent, bytes: Data(contentsOf: url)))
+                composer.attachments.append(try await engine.stageAttachment(file: url))
             } catch {
                 show("Couldn't attach \(url.lastPathComponent): \(error.localizedDescription)", isError: true)
             }
@@ -381,9 +419,14 @@ extension AppModel {
             if let value = object["bcc"] as? String { composer.bcc = value }
             if let value = object["subject"] as? String { composer.subject = value }
             if let value = object["body"] as? String { composer.body = value }
+            // Moves the body's caret, as a click would, to test snippet insertion.
+            if let caret = object["caret"] as? Int, let view = composer.bodyView {
+                view.window?.makeFirstResponder(view)
+                view.setSelectedRange(NSRange(location: caret, length: 0))
+            }
         case "attach":
             guard let path = object["path"] as? String else { throw EngineFailure(message: "attach needs path") }
-            attach([URL(fileURLWithPath: path)], to: composer)
+            await attach([URL(fileURLWithPath: path)], to: composer)
         case "close_composer": escapeComposer()
         case "discard_draft": await discard(composer)
         default: throw EngineFailure(message: "unknown composer action \(name)")

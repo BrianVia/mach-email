@@ -67,6 +67,8 @@ enum Route {
         }
     }
 
+    var threadId: String? { if case .thread(let reader) = self { reader.thread.id } else { nil } }
+
     var mode: KeyMode {
         switch self {
         case .thread: .reading
@@ -106,10 +108,15 @@ final class AppModel {
     private static let removingActions: Set<String> = ["archive", "trash", "mute"]
 
     let engine: Engine
+    /// Every navigation goes through this setter, so a composer that loses
+    /// the screen to a menu item, a notification, or a keymap action is saved
+    /// like Esc saves it.
     var route: Route = .list {
-        // A search lives while its results, a thread opened from them, or a
-        // composer over either is on screen.
         didSet {
+            if case .composer(let outgoing) = oldValue, composer !== outgoing { autosave(outgoing) }
+            if oldValue.name != route.name || oldValue.threadId != route.threadId { navigation += 1 }
+            // A search lives while its results, a thread opened from them, or a
+            // composer over either is on screen.
             switch route {
             case .search, .thread, .composer: break
             default: search = nil
@@ -140,6 +147,12 @@ final class AppModel {
     var notificationsAllowed: Bool?
     var system = SystemState()
     private var noticeGeneration = 0
+    /// Bumped by each navigation, so an open whose await finishes after a
+    /// newer one started drops its result.
+    @ObservationIgnored var navigation = 0
+    @ObservationIgnored var draftSaves: Task<Void, Never>?
+    @ObservationIgnored var pendingDraftSaves = 0
+    @ObservationIgnored private var loadingOlder = false
 
     init(engine: Engine) {
         self.engine = engine
@@ -213,8 +226,10 @@ final class AppModel {
 
     func load() async {
         do {
-            status = try engine.accountStatus()
-            settings = try? engine.settings()
+            status = try await engine.accountStatus()
+            let settings = try await engine.settings()
+            self.settings = settings
+            if let problem = settings.problem { show(problem, isError: true) }
             labels = try await engine.listLabels()
             list.threads = try await engine.listThreads(label: list.label, limit: list.limit)
             list.selection = visibleThreads.first?.id
@@ -232,10 +247,11 @@ final class AppModel {
                 engine.log("info", "mail-synced \(payload.account) new=\(payload.newThreads.count)")
                 if let next = try? await engine.listLabels() { labels = next }
                 await refreshList()
+                await reloadOpenThread()
                 await notifyNewMail(payload.newThreads)
             case .syncStatus(let payload):
                 syncOkByAccount[payload.account] = payload.ok
-                if !payload.ok, let next = try? engine.accountStatus() { status = next }
+                if !payload.ok, let next = try? await engine.accountStatus() { status = next }
                 await refreshOutbox()
             }
         }
@@ -371,15 +387,22 @@ final class AppModel {
 
     func openLabel(_ label: String) async throws {
         if label == "SCHEDULED" { return try await openScheduled() }
+        navigation += 1
+        let request = navigation
         let threads = try await engine.listThreads(label: label, limit: Self.initialListLimit)
+        guard navigation == request else { return }
         list = ListState(label: label, account: list.account, threads: threads)
         list.selection = visibleThreads.first?.id
         route = .list
     }
 
     func openThread(_ id: String) async throws {
-        list.selection = id
+        navigation += 1
+        let request = navigation
         let cached = try await engine.openThread(id, fetch: false)
+        guard navigation == request else { return }
+        if list.threads.contains(where: { $0.id == id }) { list.selection = id }
+        if let index = search?.results.firstIndex(where: { $0.id == id }) { search?.selected = index }
         // The newest message is the one a reply or unsubscribe targets.
         route = .thread(ReaderState(thread: cached.thread, messages: cached.messages, selectedMessage: max(cached.messages.count - 1, 0)))
         if cached.thread.unread {
@@ -388,7 +411,7 @@ final class AppModel {
                 _ = try? await engine.dispatch(KeyAction(["kind": "mark_read", "thread_ids": [id], "read": true]))
             }
         }
-        if let next = visibleThreads.drop(while: { $0.id != id }).dropFirst().first {
+        if let next = (search?.results ?? visibleThreads).drop(while: { $0.id != id }).dropFirst().first {
             Task { _ = try? await engine.openThread(next.id, fetch: true) }
         }
         guard cached.messages.contains(where: { !$0.fetchedFull }) else { return }
@@ -414,6 +437,30 @@ final class AppModel {
         }
     }
 
+    /// Re-reads the open thread from the store after a sync or a send and
+    /// keeps the selected message selected.
+    func reloadOpenThread() async {
+        guard let id = reader?.thread.id, let cached = try? await engine.openThread(id, fetch: false) else { return }
+        guard let state = reader, state.thread.id == id,
+            cached.thread != state.thread || cached.messages.map(\.id) != state.messages.map(\.id)
+        else { return }
+        apply(cached, to: id)
+        guard cached.messages.contains(where: { !$0.fetchedFull }), let full = try? await engine.openThread(id, fetch: true) else { return }
+        apply(full, to: id)
+    }
+
+    private func apply(_ detail: ThreadDetail, to id: String) {
+        guard var state = reader, state.thread.id == id else { return }
+        let selected = state.currentMessage?.id
+        let known = Dictionary(state.messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        state.thread = detail.thread
+        state.messages = detail.messages.map { message in
+            message.fetchedFull ? message : known[message.id].flatMap { $0.fetchedFull ? $0 : nil } ?? message
+        }
+        state.selectedMessage = state.messages.firstIndex { $0.id == selected } ?? max(state.messages.count - 1, 0)
+        reader = state
+    }
+
     func backToList() {
         if case .list = route { return }
         if search != nil, case .thread = route {
@@ -425,8 +472,14 @@ final class AppModel {
     }
 
     func loadOlder() async throws {
-        guard let oldest = list.threads.last?.lastMessageAt else { return }
+        guard !loadingOlder else { return }
+        guard let oldest = list.threads.last?.lastMessageAt else { return show("No older mail") }
+        loadingOlder = true
+        defer { loadingOlder = false }
         let label = list.label
+        // Gmail can take minutes here, so the notice stays up until it answers.
+        show(nil)
+        notice = Notice(text: "Loading older mail…")
         let stats = try await engine.loadOlder(label: label, before: oldest)
         let limit = list.limit + 200
         let threads = try await engine.listThreads(label: label, limit: limit)
@@ -469,20 +522,26 @@ final class AppModel {
     private func remove(_ action: KeyAction) async throws {
         let removed = Set(action.fields.threadIds ?? [])
         guard !removed.isEmpty else { return }
-        let visibleBefore = visibleThreads
-        let index = visibleBefore.firstIndex { removed.contains($0.id) } ?? 0
+        let index = visibleThreads.firstIndex { removed.contains($0.id) } ?? 0
         Task {
             do { _ = try await engine.dispatch(action) } catch { show(error) }
             await refreshOutbox()
         }
+        show(Self.notice(for: action, count: removed.count))
         list.threads.removeAll { removed.contains($0.id) }
         let visible = visibleThreads
         list.selection = visible.isEmpty ? nil : visible[min(index, visible.count - 1)].id
+        if var results = search {
+            let index = results.results.firstIndex { removed.contains($0.id) } ?? results.selected
+            results.results.removeAll { removed.contains($0.id) }
+            results.selected = min(index, max(results.results.count - 1, 0))
+            search = results
+        }
         guard reader != nil else { return }
-        if settings?.afterArchive != .list, let next = list.selection {
+        if settings?.afterArchive != .list, let next = search.map({ $0.selectedThread?.id }) ?? list.selection {
             try await openThread(next)
         } else {
-            route = .list
+            route = search == nil ? .list : .search
         }
     }
 
@@ -496,7 +555,7 @@ final class AppModel {
         default: break
         }
         let outcome = try await engine.dispatch(action)
-        if !outcome.message.isEmpty { show(outcome.message) }
+        show(outcome.message.hasPrefix("nothing to") ? "Nothing to \(action.kind)" : Self.notice(for: action, count: outcome.changedThreads.count))
         await refreshList()
         await refreshOutbox()
     }
@@ -508,6 +567,30 @@ final class AppModel {
         if var state = reader, ids.contains(state.thread.id) {
             change(&state.thread)
             reader = state
+        }
+        if var results = search {
+            for index in results.results.indices where ids.contains(results.results[index].id) {
+                change(&results.results[index])
+            }
+            search = results
+        }
+    }
+
+    /// The notice a finished mail action shows, e.g. "Archived" or "Starred 3 conversations".
+    static func notice(for action: KeyAction, count: Int) -> String {
+        let some = count > 1 ? " \(count) conversations" : ""
+        let fields = action.fields
+        switch action.kind {
+        case "archive": return "Archived\(some)"
+        case "trash": return "Moved\(some) to Trash"
+        case "mute": return "Muted\(some)"
+        case "star": return fields.starred == false ? "Unstarred\(some)" : "Starred\(some)"
+        case "mark_read": return "Marked\(some) as \(fields.read == false ? "unread" : "read")"
+        case "add_label": return count > 1 ? "Label added to\(some)" : "Label added"
+        case "remove_label": return count > 1 ? "Label removed from\(some)" : "Label removed"
+        case "undo": return "Undone"
+        case "redo": return "Redone"
+        default: return action.kind.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }
 

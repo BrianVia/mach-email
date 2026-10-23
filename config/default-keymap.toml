@@ -76,7 +76,8 @@
 "z"        = "undo"
 "shift+z"  = "redo"
 "ctrl+r"   = "refresh"
-"ctrl+n"   = "add_account"
+"ctrl+n"   = "compose_new"                # ⌘N in the desktop apps, like Mail
+"ctrl+alt+n" = "add_account"
 "q"        = "quit"
 
 # ─────────────────────────────────────────────────────────────────────
@@ -84,7 +85,7 @@
 # ─────────────────────────────────────────────────────────────────────
 [reading]
 "ctrl+r"   = "refresh"
-"j"        = "select_next"      # next thread in the list-behind
+"j"        = "select_next"      # next message in the open thread
 "k"        = "select_prev"
 "esc"      = "back_to_list"
 "e"        = { kind = "archive",   thread_ids = "$selection" }

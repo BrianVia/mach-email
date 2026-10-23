@@ -551,7 +551,7 @@ pub(crate) fn settings(core: &Core) -> serde_json::Value {
                 }),
                 Err(error) => {
                     warn!(error = %error, "parsing settings.toml failed");
-                    serde_json::json!({})
+                    serde_json::json!({ "settings_error": error.message() })
                 }
             },
         );
