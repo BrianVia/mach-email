@@ -9,7 +9,12 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
         } content: {
             Group {
-                if let search = model.search { SearchView(model: model, state: search) } else { ThreadList(model: model) }
+                switch model.composer?.background ?? model.route {
+                case .activity(let state): ActivityView(model: model, state: state)
+                case .scheduled(let state): ScheduledView(model: model, state: state)
+                default:
+                    if let search = model.search { SearchView(model: model, state: search) } else { ThreadList(model: model) }
+                }
             }
             .safeAreaInset(edge: .top, spacing: 0) { SystemBanners(model: model) }
             .navigationSplitViewColumnWidth(min: 320, ideal: 400)
@@ -25,7 +30,9 @@ struct ContentView: View {
         .overlay(alignment: .bottom) { Banner(model: model) }
         .overlay(alignment: .top) {
             if let palette = model.palette {
-                Color.black.opacity(0.08)
+                // Clear like Spotlight's: the window stays readable, a click outside closes.
+                Color.clear
+                    .contentShape(Rectangle())
                     .ignoresSafeArea()
                     .onTapGesture { model.palette = nil }
                     .overlay(alignment: .top) { PaletteView(model: model, state: palette).padding(.top, 72) }
@@ -42,9 +49,9 @@ struct ContentView: View {
         case .thread(let reader):
             ReaderView(model: model, state: reader)
         case .activity(let state):
-            ActivityView(model: model, state: state)
+            ActivityDetail(model: model, entry: state.selectedEntry)
         case .scheduled(let state):
-            ScheduledView(model: model, state: state)
+            ScheduledDetail(model: model, send: state.selected)
         default:
             ContentUnavailableView {
                 Label("No Thread Open", systemImage: "envelope")
@@ -137,40 +144,82 @@ private struct StatusPill: View {
     }
 }
 
-/// The transient notice and the chord hint, stacked at the bottom of the window.
+/// The chord hint and the transient notice, stacked at the bottom of the window like HUDs.
 private struct Banner: View {
     let model: AppModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            if !model.chordBuffer.isEmpty {
-                HStack(spacing: 12) {
-                    Text(model.chordBuffer).font(.system(.body, design: .monospaced)).bold()
-                    Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                    ForEach(model.continuations, id: \.self) { next in
-                        HStack(spacing: 4) {
-                            Text(next.next).font(.system(.callout, design: .monospaced)).padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
-                            Text(next.actionName.replacingOccurrences(of: "_", with: " ")).font(.callout).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(.regularMaterial, in: Capsule())
-            }
-            if let notice = model.notice {
-                Label(notice.text, systemImage: notice.isError ? "exclamationmark.triangle.fill" : notice.path != nil ? "folder" : "info.circle")
-                    .foregroundStyle(notice.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
-                    .lineLimit(2)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(.regularMaterial, in: Capsule())
-                    .onTapGesture { model.activateNotice() }
-                    .help(notice.path == nil ? "" : "Show in Finder")
-            }
+        VStack(spacing: 10) {
+            if !model.chordBuffer.isEmpty { ChordHint(model: model) }
+            if let notice = model.notice { Toast(notice: notice) { model.activateNotice() } }
         }
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .padding(.horizontal, 16)
         .padding(.bottom, 16)
         .animation(.snappy(duration: 0.2), value: model.notice)
         .animation(.snappy(duration: 0.2), value: model.chordBuffer)
+    }
+}
+
+/// What each key after a prefix does: "I Inbox", "S Starred", "V Activity".
+private struct ChordHint: View {
+    let model: AppModel
+
+    var body: some View {
+        let items = model.continuations.map { (next: $0.next, title: title($0)) }
+        let columns = min(items.count, 4)
+        VStack(alignment: .leading, spacing: 10) {
+            KeyCapsView(chord: model.chordBuffer).font(.headline).foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 6) {
+                ForEach(Array(stride(from: 0, to: items.count, by: max(columns, 1))), id: \.self) { start in
+                    GridRow {
+                        ForEach(items[start..<min(start + columns, items.count)], id: \.next) { item in
+                            HStack(spacing: 6) {
+                                KeyCapsView(chord: item.next).foregroundStyle(.secondary)
+                                Text(item.title).lineLimit(1)
+                            }
+                        }
+                    }
+                }
+            }
+            .font(.callout)
+        }
+        .padding(14)
+        .hudBackground(cornerRadius: 12)
+    }
+
+    private func title(_ continuation: Continuation) -> String {
+        let chord = "\(model.chordBuffer) \(continuation.next)"
+        if let place = model.destination(of: chord, mode: model.route.mode) { return place }
+        if continuation.actionName == "show_activity" { return "Activity" }
+        return model.actionTitle(name: continuation.actionName, chord: chord)
+    }
+}
+
+private struct Toast: View {
+    let notice: Notice
+    let activate: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: notice.isError ? "exclamationmark.triangle.fill" : notice.path != nil ? "folder" : "checkmark.circle")
+                .foregroundStyle(notice.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                .imageScale(.large)
+            Text(notice.text).lineLimit(2)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .hudBackground(cornerRadius: 10)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: activate)
+        .help(notice.path == nil ? "" : "Show in Finder")
+    }
+}
+
+extension View {
+    /// Material panel with a hairline edge and a soft shadow, like the system volume HUD.
+    func hudBackground(cornerRadius: CGFloat) -> some View {
+        background(.regularMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+            .overlay(RoundedRectangle(cornerRadius: cornerRadius).strokeBorder(.separator))
+            .shadow(color: .black.opacity(0.15), radius: 12, y: 4)
     }
 }

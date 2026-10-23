@@ -15,12 +15,9 @@ struct ComposerSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            titleBar
             Divider()
-            field("To", text: $composer.to, focus: .to)
-            field("Cc", text: $composer.cc, focus: .cc)
-            field("Bcc", text: $composer.bcc, focus: .bcc)
-            field("Subject", text: $composer.subject, focus: .subject)
+            headers
             ComposerBodyEditor(composer: composer, focusOnAppear: !composer.to.isEmpty)
                 .overlay(alignment: .bottom) {
                     if !composer.snippetMatches.isEmpty { SnippetPicker(composer: composer) }
@@ -51,33 +48,51 @@ struct ComposerSheet: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(composer.title).font(.headline)
-            Spacer()
-            Text("From").foregroundStyle(.secondary)
-            Text(model.accountLabel(composer.draft.accountId))
-                .help(composer.draft.accountId)
+    private var titleBar: some View {
+        Text(composer.title)
+            .font(.headline)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(.bar)
+    }
+
+    /// Mail's header block: labels right-aligned in one column sized to the
+    /// longest, fields filling the rest, a hairline under each row.
+    private var headers: some View {
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 8, verticalSpacing: 0) {
+            if model.accounts.count > 1 {
+                headerRow("From") {
+                    // The engine can't move a draft between accounts, so From is shown, not picked.
+                    Text(model.accountLabel(composer.draft.accountId))
+                        + Text(model.accountLabel(composer.draft.accountId) == composer.draft.accountId ? "" : "  \(composer.draft.accountId)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            headerRow("To") { field("To", text: $composer.to, focus: .to) }
+            headerRow("Cc") { field("Cc", text: $composer.cc, focus: .cc) }
+            headerRow("Bcc") { field("Bcc", text: $composer.bcc, focus: .bcc) }
+            headerRow("Subject") { field("Subject", text: $composer.subject, focus: .subject) }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+    }
+
+    @ViewBuilder private func headerRow(_ label: String, @ViewBuilder content: () -> some View) -> some View {
+        GridRow {
+            Text("\(label):")
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 7)
+        Divider()
     }
 
     private func field(_ label: String, text: Binding<String>, focus field: Field) -> some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(label):")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 58, alignment: .trailing)
-                TextField("", text: text)
-                    .textFieldStyle(.plain)
-                    .accessibilityLabel(label)
-                    .focused($focus, equals: field)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 7)
-            Divider().padding(.leading, 16)
-        }
+        TextField("", text: text)
+            .textFieldStyle(.plain)
+            .accessibilityLabel(label)
+            .focused($focus, equals: field)
     }
 
     private var attachments: some View {
@@ -114,9 +129,7 @@ struct ComposerSheet: View {
             Button("Discard", systemImage: "trash") { Task { await model.discard(composer) } }
                 .help("Delete this draft here and in Gmail")
             Spacer()
-            Text("⌘S Save · Esc Close")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            hints
             Menu("Send Later") {
                 ForEach(composer.presets, id: \.self) { preset in
                     Button("\(preset.label) · \(preset.at.formatted(date: .abbreviated, time: .shortened))") {
@@ -133,11 +146,32 @@ struct ComposerSheet: View {
             } label: {
                 Label("Send", systemImage: "paperplane.fill")
             }
+            // Prominent, but not bound to Return: Return in the To field must never send.
             .buttonStyle(.borderedProminent)
-            .help("Send (⌘↩)")
+            .help("Send (\(sendChord.map { KeyCaps.of($0).joined(separator: " ") } ?? "⌘↩"))")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private static let hintTitles = ["save_draft": "Save", "send_draft": "Send", "back_to_list": "Close"]
+
+    private var bindings: [KeyBinding] { model.engine.keymapBindings(mode: .composing) }
+    private var sendChord: String? { bindings.first { $0.name == "send_draft" }?.chord }
+
+    /// The composing keymap's own chords, so a remapped key shows its new caps.
+    private var hints: some View {
+        HStack(spacing: 10) {
+            ForEach(bindings.filter { Self.hintTitles[$0.name] != nil }, id: \.self) { binding in
+                HStack(spacing: 4) {
+                    KeyCapsView(chord: binding.chord)
+                    Text(Self.hintTitles[binding.name]!)
+                }
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     private var laterPicker: some View {
@@ -203,7 +237,7 @@ private struct ComposerBodyEditor: NSViewRepresentable {
         let text = scroll.documentView as! NSTextView
         text.delegate = context.coordinator
         text.font = .systemFont(ofSize: NSFont.systemFontSize + 1)
-        text.textContainerInset = NSSize(width: 11, height: 10)
+        text.textContainerInset = NSSize(width: 11, height: 14)
         text.isRichText = false
         text.allowsUndo = true
         text.drawsBackground = false
