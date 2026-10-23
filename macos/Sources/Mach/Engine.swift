@@ -98,7 +98,11 @@ final class Engine: Sendable {
     }
 
     func unsubscribePost(url: String) async throws {
-        do { _ = try await core.unsubscribePost(url: url) } catch EngineError.Failed(let message) { throw EngineFailure(message: message) }
+        do {
+            _ = try await core.unsubscribePost(url: url)
+        } catch EngineError.Failed(let message) {
+            throw EngineFailure(message: message)
+        }
     }
 
     func unsubscribeMailto(account: String, to: String, subject: String) async throws {
