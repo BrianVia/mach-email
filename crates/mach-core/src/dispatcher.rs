@@ -223,6 +223,7 @@ impl Dispatcher {
             Action::CancelSendLater { send_later_id } => {
                 self.cancel_send_later(&send_later_id).await
             }
+            Action::DiscardDraft { draft_id } => self.discard_draft(&draft_id).await,
             Action::Search { query, limit } => self.search(&query, limit).await,
             Action::Refresh => Ok(ActionOutcome::empty("refresh")),
             Action::Undo => return self.do_undo(history).await,
@@ -504,6 +505,36 @@ impl Dispatcher {
             None,
             "scheduled send cancelled".into(),
         )
+    }
+
+    /// The local row stays until the outbox worker has deleted the Gmail
+    /// copy, because the worker needs its `gmail_draft_id`, which a queued
+    /// `SaveDraft` may not have written yet.
+    async fn discard_draft(&self, draft_id: &DraftId) -> CoreResult<ActionOutcome> {
+        let draft = self
+            .store
+            .find_draft(&self.scope, draft_id)
+            .await?
+            .ok_or_else(|| CoreError::NotFound("draft not found".into()))?;
+        let scope = AccountScope::One(draft.account_id.clone());
+        for send in self.store.list_scheduled(&scope).await? {
+            if send.draft_id == draft.id {
+                self.store
+                    .cancel_scheduled(&draft.account_id, &send.send_later_id)
+                    .await?;
+            }
+        }
+        let op_id = OpId::new();
+        self.store
+            .enqueue_outbox(
+                &draft.account_id,
+                &op_id,
+                &OutboxOpKind::DeleteDraft {
+                    draft_id: draft.id.clone(),
+                },
+            )
+            .await?;
+        self.draft_changed_outcome("discard_draft", draft.id, Some(op_id), "draft discarded".into())
     }
 
     fn draft_outcome(

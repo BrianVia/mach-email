@@ -146,6 +146,10 @@ pub enum Action {
     CancelSendLater {
         send_later_id: String,
     },
+    /// Cancels the draft's scheduled sends and deletes it locally and in Gmail.
+    DiscardDraft {
+        draft_id: DraftId,
+    },
 
     // --- Discovery ---
     Search {
@@ -193,6 +197,7 @@ impl Action {
             Action::SendDraft { .. } => "send_draft",
             Action::SendLater { .. } => "send_later",
             Action::CancelSendLater { .. } => "cancel_send_later",
+            Action::DiscardDraft { .. } => "discard_draft",
             Action::Search { .. } => "search",
             Action::OpenLabel { .. } => "open_label",
             Action::ShowActivity => "show_activity",
@@ -222,6 +227,7 @@ impl Action {
                 | Action::SendLater { .. }
                 | Action::UndoActivity { .. }
                 | Action::CancelSendLater { .. }
+                | Action::DiscardDraft { .. }
         )
     }
 

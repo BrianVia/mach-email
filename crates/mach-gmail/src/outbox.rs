@@ -174,6 +174,7 @@ impl OutboxWorker {
                         .await
                         .context("delete_draft")?;
                 }
+                self.store.delete_draft_local(&self.account, draft_id).await?;
                 Ok(())
             }
         }
