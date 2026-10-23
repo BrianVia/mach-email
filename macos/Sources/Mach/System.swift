@@ -76,24 +76,7 @@ struct SystemBanners: View {
     }
 }
 
-/// Saves the main window's frame and the sidebar's width under fixed names
-/// so AppKit restores both on the next launch.
-struct WindowStateKeeper: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { Probe() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class Probe: NSView {
-        override func viewDidMoveToWindow() {
-            guard let window else { return }
-            window.setFrameAutosaveName("Mach Main Window")
-            // The split view exists once SwiftUI has laid out the columns.
-            DispatchQueue.main.async {
-                guard let split = WindowStateKeeper.splitView(in: window.contentView) else { return }
-                split.autosaveName = "Mach Main Split"
-            }
-        }
-    }
-
+enum WindowStateKeeper {
     static func splitView(in view: NSView?) -> NSSplitView? {
         guard let view else { return nil }
         if let split = view as? NSSplitView { return split }

@@ -8,15 +8,12 @@ struct MachApp: App {
 
     var body: some Scene {
         Window("Mach", id: "main") {
-            Group {
-                switch delegate.boot {
-                case .success(let model): ContentView(model: model)
-                case .failure(let error):
-                    ContentUnavailableView("Mach couldn't start", systemImage: "exclamationmark.triangle", description: Text(String(describing: error)))
-                        .frame(minWidth: 600, minHeight: 400)
-                }
+            switch delegate.boot {
+            case .success(let model): ContentView(model: model)
+            case .failure(let error):
+                ContentUnavailableView("Mach couldn't start", systemImage: "exclamationmark.triangle", description: Text(String(describing: error)))
+                    .frame(minWidth: 600, minHeight: 400)
             }
-            .background(WindowStateKeeper())
         }
         .commands {
             CommandGroup(replacing: .newItem) {

@@ -48,7 +48,7 @@ curl -X POST 127.0.0.1:7366/notify -d '{"title":"Ada","body":"Hi","thread_id":"i
 curl -X POST 127.0.0.1:7366/action -d '{"name":"simulate_mail_synced","count":4}'  # new-mail path with the newest inbox rows; replies with the decision
 curl -X POST 127.0.0.1:7366/action -d '{"name":"fake_reauth","email":"someone@example.com"}'  # in-memory banner; omit email to clear
 curl -X POST 127.0.0.1:7366/action -d '{"name":"notifications_hint","reset":true}'
-curl -X POST 127.0.0.1:7366/action -d '{"name":"about"}'                     # {"close":true} closes it
+curl -X POST 127.0.0.1:7366/action -d '{"name":"about","png":"/tmp/about.png"}'  # opens the About panel and saves its PNG; {"close":true} closes it
 curl -X POST 127.0.0.1:7366/action -d '{"name":"window","frame":[100,100,1200,800],"sidebar":240}'
 ```
 

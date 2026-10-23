@@ -45,12 +45,20 @@ extension DebugServer {
             }
         case "about":
             if object["close"] as? Bool == true {
-                NSApp.windows.first { $0.isVisible && !$0.canBecomeMain && $0.className.contains("About") }?.close()
+                NSApp.windows.first { $0.isVisible && !$0.canBecomeMain }?.close()
             } else {
                 NSApp.activate()
                 NSApp.orderFrontStandardAboutPanel(nil)
             }
             try? await Task.sleep(for: .milliseconds(300))
+            // /snapshot draws the main window; the panel is never key over SSH.
+            if let path = object["png"] as? String,
+                let view = NSApp.windows.first(where: { $0.isVisible && !$0.canBecomeMain })?.contentView?.superview,
+                let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+            {
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
             return ["windows": NSApp.windows.filter(\.isVisible).map { "\($0.className) \($0.title)" }]
         case "window":
             if let frame = object["frame"] as? [Double], frame.count == 4 {
