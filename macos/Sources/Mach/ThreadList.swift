@@ -126,7 +126,8 @@ enum Sender {
     }
 
     static func initials(_ raw: String) -> String {
-        let name = raw.replacing(/<[^>]+>/, with: "").trimmingCharacters(in: .whitespaces.union(.init(charactersIn: "\"")))
+        // Quotes and other punctuation never make an initial: `"Clark, Ada"` is CA, not "C.
+        let name = raw.replacing(/<[^>]+>/, with: "").filter { !"\"'“”‘’()[]".contains($0) }.trimmingCharacters(in: .whitespaces)
         let parts = name.split(whereSeparator: { " .,_-".contains($0) })
         if parts.count >= 2, let first = parts.first?.first, let last = parts.last?.first { return "\(first)\(last)".uppercased() }
         if let only = parts.first, !name.contains("@") { return String(only.prefix(2)).uppercased() }

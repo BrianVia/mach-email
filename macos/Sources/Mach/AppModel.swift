@@ -38,6 +38,11 @@ struct ReaderState {
     var messages: [Message]
     var selectedMessage: Int
     var bodyFetchError: String?
+    var viewer: ImageViewerState?
+    var unsubscribe: UnsubscribeConfirm?
+    /// Message ids whose blocked remote images the user chose to show.
+    var shownRemoteImages: Set<String> = []
+    var inviteReplies: [String: InviteReply] = [:]
 
     var currentMessage: Message? { messages.indices.contains(selectedMessage) ? messages[selectedMessage] : nil }
 }
@@ -74,6 +79,8 @@ enum Route {
 struct Notice: Equatable {
     var text: String
     var isError = false
+    /// A saved file; clicking the notice reveals it in Finder.
+    var path: String?
 }
 
 /// Single source of UI state. Keys, menus, the debug server, and notification
@@ -105,6 +112,10 @@ final class AppModel {
         didSet { UserDefaults.standard.set(split.rawValue, forKey: "mach.inboxSplit") }
     }
     var labels: [MailLabel] = []
+    /// Lowercased sender addresses whose remote images always load, like the Tauri app's `mach.remoteImageAllow`.
+    var remoteImageAllow = Set(UserDefaults.standard.stringArray(forKey: "mach.remoteImageAllow") ?? []) {
+        didSet { UserDefaults.standard.set(remoteImageAllow.sorted(), forKey: "mach.remoteImageAllow") }
+    }
     var status: AccountStatus?
     var settings: Settings?
     var outbox = OutboxSummary(pending: 0, failed: 0, lastError: nil)
@@ -238,6 +249,7 @@ final class AppModel {
 
     /// Returns false when nothing is bound, so the event reaches the responder chain.
     func handleKey(_ chord: String) -> Bool {
+        if let handled = handleReaderKey(chord) { return handled }
         let sequence = chordBuffer.isEmpty ? chord : "\(chordBuffer) \(chord)"
         switch engine.resolveKey(mode: route.mode, chord: sequence, context: keyContext) {
         case .action(let action):
@@ -291,6 +303,9 @@ final class AppModel {
                 }
             case "load_older": try await loadOlder()
             case "refresh": try await syncNow()
+            case "unsubscribe": if let id = fields.messageId { try await beginUnsubscribe(messageId: id) }
+            case "respond_to_invite":
+                if let id = fields.messageId, let response = fields.response { await respondToInvite(messageId: id, response: response) }
             case let kind where Self.removingActions.contains(kind): try await remove(action)
             case let kind where Self.engineActions.contains(kind): try await mutate(action)
             default:

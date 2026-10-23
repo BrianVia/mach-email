@@ -35,6 +35,12 @@ enum EmailHTML {
             """
     }
 
+    /// `<img>` tags with an http(s) or protocol-relative source, counted the
+    /// way ui/src/lib/html.ts counts the images it blocks.
+    static func remoteImageCount(_ html: String) -> Int {
+        html.matches(of: /(?i)<img\b[^>]*?\ssrc\s*=\s*["']?\s*(https?:)?\/\//).count
+    }
+
     static func linkified(_ text: String) -> AttributedString {
         var attributed = AttributedString(text)
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return attributed }
@@ -53,11 +59,13 @@ enum EmailHTML {
 /// so the reader's ScrollView does the scrolling.
 struct EmailWebView: View {
     let html: String
+    /// Blocks every http(s) subresource (images, CSS, fonts) with a content rule list.
+    var blockRemote = false
     let engine: Engine
     @State private var height: CGFloat = 40
 
     var body: some View {
-        WebViewRepresentable(html: html, engine: engine, height: $height)
+        WebViewRepresentable(html: html, blockRemote: blockRemote, engine: engine, height: $height)
             .frame(height: height)
             .clipShape(RoundedRectangle(cornerRadius: 6))
     }
@@ -65,6 +73,7 @@ struct EmailWebView: View {
 
 private struct WebViewRepresentable: NSViewRepresentable {
     let html: String
+    let blockRemote: Bool
     let engine: Engine
     @Binding var height: CGFloat
 
@@ -79,26 +88,36 @@ private struct WebViewRepresentable: NSViewRepresentable {
         view.onWidthChange = { [weak coordinator = context.coordinator, weak view] in
             if let view { coordinator?.measure(view) }
         }
-        context.coordinator.load(html, in: view)
+        context.coordinator.load(html, blockRemote: blockRemote, in: view)
         return view
     }
 
     func updateNSView(_ view: FittingWebView, context: Context) {
         context.coordinator.height = $height
-        context.coordinator.load(html, in: view)
+        context.coordinator.load(html, blockRemote: blockRemote, in: view)
     }
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         var height: Binding<CGFloat>
-        private var loaded: String?
+        private var loaded: (html: String, blockRemote: Bool)?
 
         init(height: Binding<CGFloat>) { self.height = height }
 
-        func load(_ html: String, in view: WKWebView) {
-            guard html != loaded else { return }
-            loaded = html
-            view.loadHTMLString(html, baseURL: nil)
+        func load(_ html: String, blockRemote: Bool, in view: WKWebView) {
+            guard loaded?.html != html || loaded?.blockRemote != blockRemote else { return }
+            loaded = (html, blockRemote)
+            Task {
+                let rules = view.configuration.userContentController
+                rules.removeAllContentRuleLists()
+                if blockRemote {
+                    // Fail closed: without the blocker the page would fetch what the user blocked.
+                    guard let blocker = await RemoteContentBlocker.rules() else { return }
+                    rules.add(blocker)
+                }
+                guard loaded?.html == html, loaded?.blockRemote == blockRemote else { return }
+                view.loadHTMLString(html, baseURL: nil)
+            }
         }
 
         func measure(_ view: WKWebView) {
@@ -120,6 +139,23 @@ private struct WebViewRepresentable: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             measure(webView)
         }
+    }
+}
+
+@MainActor
+private enum RemoteContentBlocker {
+    private static var compiled: WKContentRuleList?
+
+    static func rules() async -> WKContentRuleList? {
+        if let compiled { return compiled }
+        let json = #"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}}]"#
+        do {
+            compiled = try await WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: "mach.block-remote-content", encodedContentRuleList: json)
+        } catch {
+            NSLog("mach: remote content rule list failed to compile: \(error)")
+        }
+        return compiled
     }
 }
 

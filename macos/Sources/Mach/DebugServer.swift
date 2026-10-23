@@ -150,6 +150,7 @@ final class DebugServer {
                     "selected_message": reader.selectedMessage,
                     "html_messages": reader.messages.filter { !($0.bodyHtml ?? "").isEmpty }.count,
                     "fetched_full": reader.messages.allSatisfy(\.fetchedFull),
+                    "reader": model.debugReaderState,
                 ] as [String: Any]
             } ?? NSNull(),
             "thread_count": visible.count,
@@ -200,7 +201,7 @@ final class DebugServer {
         "inbox_split_important", "inbox_split_other", "inbox_split_updates", "inbox_split_newsletters",
         "star", "unstar", "mark_read", "mark_unread", "archive", "trash", "mute", "show_activity",
         "retry_outbox", "account", "appearance",
-    ]
+    ] + AppModel.debugReaderActions
 
     private func action(_ body: Data) async -> Response {
         guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
@@ -220,6 +221,9 @@ final class DebugServer {
             return .json(await state())
         case "retry_outbox":
             await model.retryFailedChanges()
+            return .json(await state())
+        case let name where AppModel.debugReaderActions.contains(name):
+            if let error = await model.debugReaderAction(name, object) { return .error(400, error) }
             return .json(await state())
         case "unstar": object["starred"] = false
         case "star": object["starred"] = object["starred"] ?? true
@@ -261,6 +265,7 @@ final class DebugServer {
     /// WKWebView draws out of process, so `cacheDisplay` leaves it blank;
     /// each visible web view's own snapshot is drawn over its frame.
     private func snapshot() async -> Response {
+        let window = window.map { $0.sheetParent ?? $0 }
         // The frame view (contentView's superview) includes the title bar and toolbar.
         guard let view = window?.contentView?.superview ?? window?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             return .error(404, "no window")
@@ -280,6 +285,17 @@ final class DebugServer {
                 image.draw(in: frame)
                 NSGraphicsContext.restoreGraphicsState()
             }
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        // Alerts are sheets, separate windows the frame view does not draw.
+        if let window, let sheet = window.attachedSheet, let sheetView = sheet.contentView?.superview,
+            let sheetRep = sheetView.bitmapImageRepForCachingDisplay(in: sheetView.bounds),
+            let context = NSGraphicsContext(bitmapImageRep: rep)
+        {
+            sheetView.cacheDisplay(in: sheetView.bounds, to: sheetRep)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            sheetRep.draw(in: sheet.frame.offsetBy(dx: -window.frame.minX, dy: -window.frame.minY))
             NSGraphicsContext.restoreGraphicsState()
         }
         guard let png = rep.representation(using: .png, properties: [:]) else { return .error(500, "png encoding failed") }

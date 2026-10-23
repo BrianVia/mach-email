@@ -55,10 +55,39 @@ struct Message: Codable, Sendable, Identifiable, Hashable {
     var internalDate: Date
     var bodyPlain: String?
     var bodyHtml: String?
+    var calendar: CalendarInvite?
     var headers: MessageHeaders?
+    var labelIds: [String]?
     var fetchedFull: Bool
     var inlineImages: [InlineImageRef]
     var attachments: [AttachmentRef]
+}
+
+struct CalendarInvite: Codable, Sendable, Hashable {
+    var summary: String
+    var startsAt: Date
+    var endsAt: Date
+    var location: String?
+    var organizer: String
+    /// needs_action, accepted, declined, or tentative.
+    var myStatus: String?
+}
+
+/// One `List-Unsubscribe` method, as the engine's `unsubscribe` action reports it.
+enum UnsubscribeTarget: Decodable, Sendable, Hashable {
+    case https(url: String, oneClick: Bool)
+    case mailto(to: String, subject: String)
+
+    private enum Key: String, CodingKey { case kind, url, oneClick, to, subject }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        if try container.decode(String.self, forKey: .kind) == "mailto" {
+            self = .mailto(to: try container.decode(String.self, forKey: .to), subject: try container.decode(String.self, forKey: .subject))
+        } else {
+            self = .https(url: try container.decode(String.self, forKey: .url), oneClick: try container.decode(Bool.self, forKey: .oneClick))
+        }
+    }
 }
 
 struct ThreadDetail: Codable, Sendable {
@@ -165,6 +194,8 @@ struct KeyAction: Sendable {
         var threadIds: [String]?
         var starred: Bool?
         var read: Bool?
+        var messageId: String?
+        var response: String?
     }
 
     let json: Data

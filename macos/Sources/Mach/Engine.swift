@@ -87,6 +87,24 @@ final class Engine: Sendable {
         return try Bridge.decode(String.self, json)
     }
 
+    func unsubscribeTargets(messageId: String) async throws -> [UnsubscribeTarget] {
+        struct Outcome: Decodable {
+            struct Payload: Decodable { var targets: [UnsubscribeTarget] }
+            var data: Payload?
+        }
+        let action = try KeyAction(["kind": "unsubscribe", "message_id": messageId])
+        let json = try await core.dispatchAction(actionJson: String(decoding: action.json, as: UTF8.self))
+        return try Bridge.decode(Outcome.self, json).data?.targets ?? []
+    }
+
+    func unsubscribePost(url: String) async throws {
+        _ = try await core.unsubscribePost(url: url)
+    }
+
+    func unsubscribeMailto(account: String, to: String, subject: String) async throws {
+        _ = try await core.unsubscribeMailto(accountId: account, to: to, subject: subject)
+    }
+
     func resolveKey(mode: KeyMode, chord: String, context: KeyContext) -> KeyResolution {
         let contextJson = (try? JSONEncoder().encode(context)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
         let json = core.resolveKey(mode: mode.rawValue, chordSequence: chord, contextJson: contextJson)

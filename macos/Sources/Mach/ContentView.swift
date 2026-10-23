@@ -16,6 +16,9 @@ struct ContentView: View {
         .navigationTitle(model.title)
         .navigationSubtitle(model.subtitle)
         .toolbar { HeaderToolbar(model: model) }
+        .overlay {
+            if let viewer = model.reader?.viewer { ImageViewerView(model: model, viewer: viewer) }
+        }
         .overlay(alignment: .bottom) { Banner(model: model) }
         .frame(minWidth: 960, minHeight: 600)
     }
@@ -118,12 +121,13 @@ private struct Banner: View {
                 .background(.regularMaterial, in: Capsule())
             }
             if let notice = model.notice {
-                Label(notice.text, systemImage: notice.isError ? "exclamationmark.triangle.fill" : "info.circle")
+                Label(notice.text, systemImage: notice.isError ? "exclamationmark.triangle.fill" : notice.path != nil ? "folder" : "info.circle")
                     .foregroundStyle(notice.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
                     .lineLimit(2)
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .background(.regularMaterial, in: Capsule())
-                    .onTapGesture { model.show(nil) }
+                    .onTapGesture { model.activateNotice() }
+                    .help(notice.path == nil ? "" : "Show in Finder")
             }
         }
         .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
