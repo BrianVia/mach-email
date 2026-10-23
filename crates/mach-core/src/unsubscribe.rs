@@ -11,9 +11,11 @@ pub enum UnsubscribeTarget {
     Mailto { to: String, subject: String },
 }
 
+/// Best first: an RFC 8058 one-click POST needs nothing from the user, a
+/// mailto sends from their account, and a plain https page needs a browser.
 pub fn unsubscribe_targets(headers: &MessageHeaders) -> Vec<UnsubscribeTarget> {
     let one_click = headers.list_unsubscribe_post.as_deref() == Some("List-Unsubscribe=One-Click");
-    headers
+    let mut targets: Vec<_> = headers
         .list_unsubscribe
         .as_deref()
         .into_iter()
@@ -38,7 +40,17 @@ pub fn unsubscribe_targets(headers: &MessageHeaders) -> Vec<UnsubscribeTarget> {
                 _ => None,
             }
         })
-        .collect()
+        .collect();
+    targets.sort_by_key(|target| match target {
+        UnsubscribeTarget::Https {
+            one_click: true, ..
+        } => 0,
+        UnsubscribeTarget::Mailto { .. } => 1,
+        UnsubscribeTarget::Https {
+            one_click: false, ..
+        } => 2,
+    });
+    targets
 }
 
 #[cfg(test)]
@@ -87,6 +99,40 @@ mod tests {
             ))
             .len(),
             2
+        );
+    }
+
+    #[test]
+    fn orders_one_click_then_mailto_then_page() {
+        let mailto = UnsubscribeTarget::Mailto {
+            to: "leave@example.com".into(),
+            subject: String::new(),
+        };
+        assert_eq!(
+            unsubscribe_targets(&headers(
+                "<mailto:leave@example.com>, <https://example.com/u>",
+                Some("List-Unsubscribe=One-Click"),
+            )),
+            [
+                UnsubscribeTarget::Https {
+                    url: "https://example.com/u".into(),
+                    one_click: true,
+                },
+                mailto.clone(),
+            ]
+        );
+        assert_eq!(
+            unsubscribe_targets(&headers(
+                "<https://example.com/u>, <mailto:leave@example.com>",
+                None
+            )),
+            [
+                mailto,
+                UnsubscribeTarget::Https {
+                    url: "https://example.com/u".into(),
+                    one_click: false,
+                },
+            ]
         );
     }
 
