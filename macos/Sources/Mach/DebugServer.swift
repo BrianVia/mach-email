@@ -54,7 +54,7 @@ final class DebugServer {
         let thread_id: String
     }
 
-    private let model: AppModel
+    let model: AppModel
     private let listener: NWListener
 
     init?(port: UInt16, model: AppModel) {
@@ -170,6 +170,7 @@ final class DebugServer {
             "composer": model.composerDebugState,
             "scheduled": model.scheduledDebugState,
             "chord_buffer": model.chordBuffer,
+            "system": systemState(),
             "window_title": window?.title ?? NSNull(),
             "appearance": NSApp.effectiveAppearance.name.rawValue,
             "app_active": NSApp.isActive,
@@ -206,7 +207,7 @@ final class DebugServer {
         "star", "unstar", "mark_read", "mark_unread", "archive", "trash", "mute", "show_activity",
         "retry_outbox", "account", "appearance",
         "compose_new", "reply", "reply_all", "forward", "save_draft", "compose_fields", "attach", "close_composer", "discard_draft",
-    ] + AppModel.debugReaderActions
+    ] + AppModel.debugReaderActions + systemActionNames
 
     private func action(_ body: Data) async -> Response {
         guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
@@ -216,6 +217,8 @@ final class DebugServer {
         }
         let context = model.keyContext
         switch name {
+        case let name where Self.systemActionNames.contains(name):
+            return .json(await systemAction(name, object))
         case "appearance":
             let value = object["value"] as? String
             NSApp.appearance = value == "dark" ? NSAppearance(named: .darkAqua) : value == "light" ? NSAppearance(named: .aqua) : nil

@@ -34,6 +34,12 @@ final class Engine: Sendable {
     func accountStatus() throws -> AccountStatus { try Bridge.decode(AccountStatus.self, core.accountStatus()) }
     func settings() throws -> Settings { try Bridge.decode(Settings.self, core.settings()) }
 
+    /// Opens Google sign-in in the browser and returns the signed-in address.
+    /// The engine gives up after three minutes without a redirect.
+    func addAccount(loginHint: String?) async throws -> String {
+        try Bridge.decode(String.self, await core.addAccount(loginHint: loginHint))
+    }
+
     func listLabels() async throws -> [MailLabel] {
         try Bridge.decode(Out<[MailLabel]>.self, await core.listLabels()).get()
     }

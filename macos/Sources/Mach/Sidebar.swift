@@ -14,6 +14,7 @@ struct Sidebar: View {
             Section("Mailboxes") {
                 ForEach(AppModel.systemLabels, id: \.id) { label in
                     Label(label.name, systemImage: label.symbol)
+                        .badge(label.id == "INBOX" ? model.inboxUnreadCount : 0)
                         .tag(Item.label(label.id))
                 }
             }
@@ -31,6 +32,8 @@ struct Sidebar: View {
             }
         }
         .listStyle(.sidebar)
+        .onChange(of: model.list.threads, initial: true) { Task { await model.recountInbox() } }
+        .onChange(of: model.lastMailSyncedAt) { Task { await model.recountInbox() } }
     }
 
     private var selection: Binding<Item?> {

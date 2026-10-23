@@ -25,9 +25,14 @@ SSH, where the login keychain is locked.
 
 ## Debug server
 
-The app listens on `127.0.0.1:$MACH_DEBUG_PORT` (default 7366). `open` does not
-pass environment variables, so use `launchctl setenv MACH_DEBUG_PORT 7400`
-before launching to change the port.
+The server starts only when `MACH_DEBUG_PORT` is set (debug builds default to
+7366), and it binds `127.0.0.1` only, so a normal launch of a release build opens
+no port. `open` does not pass environment variables, so either run the binary
+directly or `launchctl setenv MACH_DEBUG_PORT 7400` before `open`.
+
+```sh
+MACH_DEBUG_PORT=7366 ~/Applications/Mach-dev/Mach.app/Contents/MacOS/Mach
+```
 
 ```sh
 curl 127.0.0.1:7366/health
@@ -40,6 +45,13 @@ curl -X POST 127.0.0.1:7366/action -d '{"name":"account","account":null}'     # 
 curl -X POST 127.0.0.1:7366/action -d '{"name":"appearance","value":"dark"}'  # light, dark, or system
 curl -o mach.png 127.0.0.1:7366/snapshot                    # PNG of the app's own window, no screen-recording permission
 curl -X POST 127.0.0.1:7366/notify -d '{"title":"Ada","body":"Hi","thread_id":"inbox-2"}'
+curl -X POST 127.0.0.1:7366/action -d '{"name":"simulate_mail_synced","count":4}'  # new-mail path with the newest inbox rows; replies with the decision
+curl -X POST 127.0.0.1:7366/action -d '{"name":"fake_reauth","email":"someone@example.com"}'  # in-memory banner; omit email to clear
+curl -X POST 127.0.0.1:7366/action -d '{"name":"notifications_hint","reset":true}'
+curl -X POST 127.0.0.1:7366/action -d '{"name":"about","png":"/tmp/about.png"}'  # opens the About panel and saves its PNG; {"close":true} closes it
+curl -X POST 127.0.0.1:7366/action -d '{"name":"window","frame":[100,100,1200,800],"sidebar":240}'
+curl -X POST 127.0.0.1:7366/action -d '{"name":"notification_click","thread_id":"…","split":"updates","account":"…"}'  # what a banner click runs
+curl -X POST 127.0.0.1:7366/action -d '{"name":"quit"}'                      # NSApp.terminate, so window state is saved
 ```
 
 Reader hooks (`DebugServer+Reader.swift`) act on the open thread; `message`
@@ -60,6 +72,8 @@ resolved by the engine). Key names are `enter`, `esc`, `tab`, `space`,
 `backspace`, `delete`, arrows, or any single character; `{"key":"r","cmd":true}`
 is `ctrl+r`. Unknown action names return 400 with the list of known ones.
 
+`/state.system` reports the status pill's `connection`, `inbox_unread`, the
+notifications hint, `needs_reauth`, and the saved window frame and sidebar width.
 `/state` reports `notifications.authorization` (macOS's answer) and
 `notifications.request` (`awaiting_user`, `allowed`, or `refused`, from the
 app's own `requestAuthorization` call). Clicking a notification sets

@@ -127,6 +127,7 @@ final class AppModel {
     var lastMailSyncedAt: Date?
     /// nil while the macOS permission prompt is unanswered.
     var notificationsAllowed: Bool?
+    var system = SystemState()
     private var noticeGeneration = 0
 
     init(engine: Engine) {
@@ -217,6 +218,7 @@ final class AppModel {
                 engine.log("info", "mail-synced \(payload.account) new=\(payload.newThreads.count)")
                 if let next = try? await engine.listLabels() { labels = next }
                 await refreshList()
+                await notifyNewMail(payload.newThreads)
             case .syncStatus(let payload):
                 syncOkByAccount[payload.account] = payload.ok
                 if !payload.ok, let next = try? engine.accountStatus() { status = next }
@@ -313,6 +315,7 @@ final class AppModel {
             case "respond_to_invite":
                 if let id = fields.messageId, let response = fields.response { await respondToInvite(messageId: id, response: response) }
             case "compose_new", "reply", "forward", "save_draft", "send_draft": try await runCompose(action)
+            case "add_account": await addAccount(loginHint: nil)
             case let kind where Self.removingActions.contains(kind): try await remove(action)
             case let kind where Self.engineActions.contains(kind): try await mutate(action)
             default:
