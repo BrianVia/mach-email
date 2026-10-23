@@ -475,20 +475,21 @@ final class AppModel {
     }
 
     func loadOlder() async throws {
-        guard !loadingOlder else { return }
         guard let oldest = list.threads.last?.lastMessageAt else { return show("No older mail") }
-        loadingOlder = true
-        defer { loadingOlder = false }
-        let label = list.label
         // Gmail can take minutes here, so the notice stays up until it answers.
         show(nil)
         notice = Notice(text: "Loading older mail…")
+        guard !loadingOlder else { return }
+        loadingOlder = true
+        defer { loadingOlder = false }
+        let label = list.label
         let stats = try await engine.loadOlder(label: label, before: oldest)
         let limit = list.limit + 200
         let threads = try await engine.listThreads(label: label, limit: limit)
-        guard list.label == label else { return }
-        list.threads = threads
-        list.limit = limit
+        if list.label == label {
+            list.threads = threads
+            list.limit = limit
+        }
         show(stats.fetched == 0 ? "No older mail" : "Loaded \(stats.fetched) older threads")
     }
 
