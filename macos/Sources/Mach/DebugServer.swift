@@ -272,7 +272,10 @@ final class DebugServer {
         }
         view.cacheDisplay(in: view.bounds, to: rep)
         var overlays: [(NSImage, NSRect, NSRect)] = []
-        for webView in Self.webViews(in: view) where !webView.visibleRect.isEmpty {
+        // A web view under a SwiftUI overlay (the image viewer) loses the hit test and stays hidden.
+        for webView in Self.webViews(in: view) where !webView.visibleRect.isEmpty
+            && view.hitTest(webView.convert(NSPoint(x: webView.visibleRect.midX, y: webView.visibleRect.midY), to: view))?.isDescendant(of: webView) == true
+        {
             guard let image = try? await webView.takeSnapshot(configuration: nil) else { continue }
             overlays.append((image, webView.convert(webView.bounds, to: view), webView.convert(webView.visibleRect, to: view)))
         }
