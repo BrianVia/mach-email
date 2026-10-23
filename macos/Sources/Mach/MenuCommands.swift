@@ -34,20 +34,22 @@ struct MenuCommands: Commands {
             }
             Divider()
         }
+        // No ⇧⌘-letter equivalents: AppKit matched ⌘R to a ⇧⌘R item while a
+        // text field had focus, so ⌘R in the search field ran Reply All.
         CommandMenu("Message") {
             Button("Reply") { perform("reply", ["all": false]) }
-            Button("Reply All") { perform("reply", ["all": true]) }.keyboardShortcut("r", modifiers: [.command, .shift])
-            Button("Forward") { perform("forward") }.keyboardShortcut("f", modifiers: [.command, .shift])
+            Button("Reply All") { perform("reply", ["all": true]) }
+            Button("Forward") { perform("forward") }
             Divider()
             Button("Archive") { perform("archive") }.keyboardShortcut("a", modifiers: [.command, .control])
             // No ⌘⌫: menu equivalents beat the focused field, where it deletes a line.
             Button("Move to Trash") { perform("trash") }
             Button("Mute Thread") { perform("mute") }
             Divider()
-            Button("Star") { perform("star", ["starred": true]) }.keyboardShortcut("l", modifiers: [.command, .shift])
+            Button("Star") { perform("star", ["starred": true]) }
             Button("Unstar") { perform("star", ["starred": false]) }
             Button("Mark as Read") { perform("mark_read", ["read": true]) }
-            Button("Mark as Unread") { perform("mark_read", ["read": false]) }.keyboardShortcut("u", modifiers: [.command, .shift])
+            Button("Mark as Unread") { perform("mark_read", ["read": false]) }
         }
         CommandMenu("Mailbox") {
             Button("Sync Now") { perform("refresh") }.keyboardShortcut("r")
