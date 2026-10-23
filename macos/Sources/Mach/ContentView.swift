@@ -9,6 +9,7 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
         } content: {
             ThreadList(model: model)
+                .safeAreaInset(edge: .top, spacing: 0) { SystemBanners(model: model) }
                 .navigationSplitViewColumnWidth(min: 320, ideal: 400)
         } detail: {
             detail
@@ -64,7 +65,7 @@ private struct HeaderToolbar: ToolbarContent {
                         .help("Show all accounts")
                 }
             }
-            StatusPill(online: model.online)
+            StatusPill(connection: model.connection)
             if model.outbox.failed > 0 {
                 Button {
                     Task { await model.retryFailedChanges() }
@@ -84,15 +85,39 @@ private struct HeaderToolbar: ToolbarContent {
 }
 
 private struct StatusPill: View {
-    let online: Bool
+    let connection: Connection
 
     var body: some View {
         HStack(spacing: 5) {
-            Circle().fill(online ? Color.green : Color.secondary).frame(width: 7, height: 7)
-            Text(online ? "Live" : "Offline").font(.callout)
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(title).font(.callout)
         }
         .padding(.horizontal, 8)
-        .help(online ? "Every account synced on its last attempt" : "Waiting for every account to sync")
+        .help(help)
+    }
+
+    private var color: Color {
+        switch connection {
+        case .live: .green
+        case .connecting: .yellow
+        case .offline: .secondary
+        }
+    }
+
+    private var title: String {
+        switch connection {
+        case .live: "Live"
+        case .connecting: "Connecting…"
+        case .offline: "Offline"
+        }
+    }
+
+    private var help: String {
+        switch connection {
+        case .live: "Every account synced on its last attempt"
+        case .connecting: "Waiting for the first sync of every account"
+        case .offline: "An account failed to sync or needs you to sign in again"
+        }
     }
 }
 
