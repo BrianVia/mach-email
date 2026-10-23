@@ -171,7 +171,7 @@ final class DebugServer {
                     "query": palette.query,
                     "count": commands.count,
                     "selected": palette.selectedCommand?.title ?? NSNull(),
-                    "commands": commands.prefix(40).map { ["title": $0.title, "chord": $0.chord ?? NSNull()] },
+                    "commands": commands.prefix(40).map { ["title": $0.title, "chord": $0.chord ?? ""] },
                 ] as [String: Any]
             } ?? NSNull(),
             "search": model.search.map { search in
