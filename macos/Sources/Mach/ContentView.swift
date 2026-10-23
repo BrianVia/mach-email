@@ -21,7 +21,7 @@ struct ContentView: View {
         } detail: {
             detail
         }
-        .navigationTitle(model.title)
+        .navigationTitle(model.title + (AppDelegate.debugPort.map { " — Test Copy :\($0)" } ?? ""))
         .navigationSubtitle(model.subtitle)
         .toolbar { HeaderToolbar(model: model) }
         .overlay {
@@ -66,6 +66,17 @@ private struct HeaderToolbar: ToolbarContent {
     @Bindable var model: AppModel
 
     var body: some ToolbarContent {
+        if let port = AppDelegate.debugPort {
+            ToolbarItem(placement: .navigation) {
+                Text("TEST COPY \(port)")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.orange, in: Capsule())
+                    .help("A development copy started with MACH_DEBUG_PORT=\(port), not your everyday Mach")
+            }
+        }
         ToolbarItemGroup(placement: .primaryAction) {
             if model.accounts.count > 1 {
                 Menu {
