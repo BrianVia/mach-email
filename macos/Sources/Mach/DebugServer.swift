@@ -39,10 +39,11 @@ final class DebugServer {
                 length = parsed
             }
             guard length <= maxRequestBytes else { return .malformed(413, "request too large") }
-            guard buffer.count - headerEnd.upperBound >= length else { return .incomplete }
+            // Every index comes from the buffer itself, and a body still in flight waits for the next read.
             let start = headerEnd.upperBound
+            guard buffer.endIndex - start >= length else { return .incomplete }
             return .request(Request(
-                method: String(requestLine[0]), path: String(requestLine[1]), headers: headers, body: buffer[start..<start + length]))
+                method: String(requestLine[0]), path: String(requestLine[1]), headers: headers, body: Data(buffer[start..<start + length])))
         }
     }
 
