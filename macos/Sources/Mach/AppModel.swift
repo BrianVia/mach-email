@@ -80,7 +80,7 @@ struct Notice: Equatable {
 /// clicks all funnel into `handleKey(_:)` or `run(_:)`.
 @Observable @MainActor
 final class AppModel {
-    static let initialListLimit = 1000
+    nonisolated static let initialListLimit = 1000
     static let systemLabels: [(id: String, name: String, symbol: String)] = [
         ("INBOX", "Inbox", "tray"),
         ("STARRED", "Starred", "star"),
@@ -179,10 +179,6 @@ final class AppModel {
             }
         }
         return byName.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
-
-    func systemUnread(_ id: String) -> Int {
-        labels.filter { $0.id == id }.compactMap(\.unreadCount).reduce(0, +)
     }
 
     // MARK: Loading

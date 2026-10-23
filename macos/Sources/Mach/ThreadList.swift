@@ -103,7 +103,7 @@ private struct ThreadRow: View {
                 Text(thread.subject.isEmpty ? "(no subject)" : thread.subject)
                     .fontWeight(thread.unread ? .medium : .regular)
                     .lineLimit(1)
-                Text(thread.snippet)
+                Text(thread.snippet.htmlUnescaped)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -154,5 +154,19 @@ enum RelativeDate {
             return date.formatted(.dateTime.month(.abbreviated).day())
         }
         return date.formatted(.dateTime.month(.abbreviated).day().year())
+    }
+}
+
+extension String {
+    /// Gmail snippets arrive HTML-escaped ("it&#39;s").
+    var htmlUnescaped: String {
+        guard contains("&") else { return self }
+        let named = ["amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": " "]
+        return replacing(/&(#x?[0-9a-fA-F]+|[a-z]+);/) { match in
+            let entity = String(match.1)
+            if let text = named[entity] { return text }
+            let number = entity.hasPrefix("#x") ? UInt32(entity.dropFirst(2), radix: 16) : entity.hasPrefix("#") ? UInt32(entity.dropFirst()) : nil
+            return number.flatMap(Unicode.Scalar.init).map { String(Character($0)) } ?? String(match.0)
+        }
     }
 }

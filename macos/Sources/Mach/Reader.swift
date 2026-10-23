@@ -97,7 +97,7 @@ private struct MessageCard: View {
                     Text("to \(message.to.isEmpty ? "—" : message.to.joined(separator: ", "))")
                         .font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 } else {
-                    Text(message.bodyPlain.map { String($0.prefix(200)) } ?? message.snippet)
+                    Text(message.bodyPlain.map { String($0.prefix(200)) } ?? message.snippet.htmlUnescaped)
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
@@ -112,7 +112,7 @@ private struct MessageCard: View {
         if let html = message.bodyHtml, !html.isEmpty {
             EmailWebView(html: EmailHTML.document(for: message), engine: model.engine)
         } else {
-            Text(EmailHTML.linkified(message.bodyPlain ?? message.snippet))
+            Text(EmailHTML.linkified(message.bodyPlain ?? message.snippet.htmlUnescaped))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

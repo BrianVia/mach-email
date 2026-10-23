@@ -13,14 +13,15 @@ struct Sidebar: View {
         List(selection: selection) {
             Section("Mailboxes") {
                 ForEach(AppModel.systemLabels, id: \.id) { label in
-                    row(label.name, symbol: label.symbol, unread: label.id == "INBOX" ? model.systemUnread(label.id) : 0)
+                    Label(label.name, systemImage: label.symbol)
                         .tag(Item.label(label.id))
                 }
             }
             if !model.userLabels.isEmpty {
                 Section("Labels", isExpanded: $labelsExpanded) {
                     ForEach(model.userLabels) { label in
-                        row(label.name, symbol: "tag", unread: label.unreadCount ?? 0)
+                        Label(label.name, systemImage: "tag")
+                            .badge(label.unreadCount ?? 0)
                             .tag(Item.label(label.id))
                     }
                 }
@@ -30,11 +31,6 @@ struct Sidebar: View {
             }
         }
         .listStyle(.sidebar)
-    }
-
-    private func row(_ name: String, symbol: String, unread: Int) -> some View {
-        Label(name, systemImage: symbol)
-            .badge(unread)
     }
 
     private var selection: Binding<Item?> {
