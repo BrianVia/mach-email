@@ -66,7 +66,7 @@ struct ThreadList: View {
     }
 }
 
-private struct ThreadRow: View {
+struct ThreadRow: View {
     let thread: ThreadSummary
     let accountLabel: String?
 

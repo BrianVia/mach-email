@@ -46,9 +46,10 @@ struct ReaderState {
 enum Route {
     case list
     case thread(ReaderState)
-    // Owned by later agents; nothing routes to the first three yet.
-    case composer, search, palette
-    case activity, scheduled
+    // Owned by later agents; nothing routes to composer yet.
+    case composer, search
+    case activity(ActivityState)
+    case scheduled
 
     var name: String {
         switch self {
@@ -56,7 +57,6 @@ enum Route {
         case .thread: "thread"
         case .composer: "composer"
         case .search: "search"
-        case .palette: "palette"
         case .activity: "activity"
         case .scheduled: "scheduled"
         }
@@ -99,7 +99,18 @@ final class AppModel {
     private static let removingActions: Set<String> = ["archive", "trash", "mute"]
 
     let engine: Engine
-    var route: Route = .list
+    var route: Route = .list {
+        // A search lives while its results or a thread opened from them is on screen.
+        didSet {
+            switch route {
+            case .search, .thread: break
+            default: search = nil
+            }
+        }
+    }
+    var search: SearchState?
+    /// The command palette floats over whatever route is showing.
+    var palette: PaletteState?
     var list = ListState()
     var split: Split = Split(rawValue: UserDefaults.standard.string(forKey: "mach.inboxSplit") ?? "") ?? .important {
         didSet { UserDefaults.standard.set(split.rawValue, forKey: "mach.inboxSplit") }
@@ -148,6 +159,7 @@ final class AppModel {
         switch route {
         case .thread(let reader): reader.thread.subject.isEmpty ? "(no subject)" : reader.thread.subject
         case .activity: "Activity"
+        case .search: "Search"
         case .scheduled: "Scheduled"
         default: labelName(list.label)
         }
@@ -268,6 +280,10 @@ final class AppModel {
         if let reader {
             return KeyContext(selection: [reader.thread.id], currentThread: reader.thread.id, currentMessage: reader.currentMessage?.id)
         }
+        if case .search = route {
+            let selected = search?.selectedThread?.id
+            return KeyContext(selection: selected.map { [$0] } ?? [], currentThread: selected)
+        }
         let selected = visibleThreads.first { $0.id == list.selection }?.id
         return KeyContext(selection: selected.map { [$0] } ?? [], currentThread: selected)
     }
@@ -284,7 +300,10 @@ final class AppModel {
             case "open_thread": if let id = fields.id { try await openThread(id) }
             case "back_to_list": backToList()
             case "open_label": if let label = fields.labelId { try await openLabel(label) }
-            case "show_activity": route = .activity
+            case "show_activity": try await openActivity()
+            case "undo_activity": if let id = fields.outboxId { try await undoActivity(id) }
+            case "search": openSearch()
+            case "add_account": await addAccount()
             case "inbox_split_important", "inbox_split_other", "inbox_split_updates", "inbox_split_newsletters":
                 if list.label == "INBOX", let next = Split(rawValue: String(action.kind.dropFirst("inbox_split_".count))) {
                     selectSplit(next)
@@ -374,6 +393,10 @@ final class AppModel {
 
     func backToList() {
         if case .list = route { return }
+        if search != nil, case .thread = route {
+            route = .search
+            return
+        }
         route = .list
         Task { await refreshList() }
     }

@@ -8,8 +8,10 @@ struct ContentView: View {
             Sidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
         } content: {
-            ThreadList(model: model)
-                .navigationSplitViewColumnWidth(min: 320, ideal: 400)
+            Group {
+                if let search = model.search { SearchView(model: model, state: search) } else { ThreadList(model: model) }
+            }
+            .navigationSplitViewColumnWidth(min: 320, ideal: 400)
         } detail: {
             detail
         }
@@ -17,6 +19,14 @@ struct ContentView: View {
         .navigationSubtitle(model.subtitle)
         .toolbar { HeaderToolbar(model: model) }
         .overlay(alignment: .bottom) { Banner(model: model) }
+        .overlay(alignment: .top) {
+            if let palette = model.palette {
+                Color.black.opacity(0.08)
+                    .ignoresSafeArea()
+                    .onTapGesture { model.palette = nil }
+                    .overlay(alignment: .top) { PaletteView(model: model, state: palette).padding(.top, 72) }
+            }
+        }
         .frame(minWidth: 960, minHeight: 600)
     }
 
@@ -24,8 +34,8 @@ struct ContentView: View {
         switch model.route {
         case .thread(let reader):
             ReaderView(model: model, state: reader)
-        case .activity:
-            ContentUnavailableView("Activity", systemImage: "clock.arrow.circlepath", description: Text("Recent changes will appear here."))
+        case .activity(let state):
+            ActivityView(model: model, state: state)
         case .scheduled:
             ContentUnavailableView("Scheduled", systemImage: "clock", description: Text("Messages scheduled to send will appear here."))
         default:

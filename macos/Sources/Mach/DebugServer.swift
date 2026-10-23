@@ -165,6 +165,45 @@ final class DebugServer {
             "last_mail_synced_at": model.lastMailSyncedAt.map { $0.formatted(.iso8601) } ?? NSNull(),
             "notice": model.notice?.text ?? NSNull(),
             "chord_buffer": model.chordBuffer,
+            "palette": model.palette.map { palette in
+                let commands = palette.filtered
+                return [
+                    "query": palette.query,
+                    "count": commands.count,
+                    "selected": palette.selectedCommand?.title ?? NSNull(),
+                    "commands": commands.prefix(40).map { ["title": $0.title, "chord": $0.chord ?? NSNull()] },
+                ] as [String: Any]
+            } ?? NSNull(),
+            "search": model.search.map { search in
+                [
+                    "query": search.query,
+                    "answered": search.answered,
+                    "count": search.results.count,
+                    "selected": search.selected,
+                    "results": search.results.prefix(8).map { ["id": $0.id, "subject": $0.subject] },
+                ] as [String: Any]
+            } ?? NSNull(),
+            "activity": { () -> Any in
+                guard case .activity(let activity) = model.route else { return NSNull() }
+                return [
+                    "count": activity.entries.count,
+                    "selected": activity.selected,
+                    "entries": activity.entries.prefix(10).map {
+                        ["id": $0.id, "kind": $0.kind, "summary": $0.summary, "state": $0.state, "undone": $0.undone, "undoable": $0.undoable]
+                    },
+                ] as [String: Any]
+            }(),
+            "menu": (NSApp.mainMenu?.items ?? []).map { top in
+                [
+                    "title": top.title,
+                    "items": (top.submenu?.items ?? []).filter { !$0.isSeparatorItem }.map { item in
+                        let modifiers: [(NSEvent.ModifierFlags, String)] = [(.control, "⌃"), (.option, "⌥"), (.shift, "⇧"), (.command, "⌘")]
+                        let key = item.keyEquivalent.isEmpty
+                            ? "" : modifiers.filter { item.keyEquivalentModifierMask.contains($0.0) }.map(\.1).joined() + item.keyEquivalent.uppercased()
+                        return ["title": item.title, "key": key, "enabled": item.isEnabled]
+                    },
+                ] as [String: Any]
+            },
             "window_title": window?.title ?? NSNull(),
             "appearance": NSApp.effectiveAppearance.name.rawValue,
             "app_active": NSApp.isActive,
@@ -199,7 +238,7 @@ final class DebugServer {
         "select_next", "select_prev", "open_thread", "back_to_list", "open_label", "load_older", "refresh",
         "inbox_split_important", "inbox_split_other", "inbox_split_updates", "inbox_split_newsletters",
         "star", "unstar", "mark_read", "mark_unread", "archive", "trash", "mute", "show_activity",
-        "retry_outbox", "account", "appearance",
+        "retry_outbox", "account", "appearance", "search", "palette", "undo_activity", "menu",
     ]
 
     private func action(_ body: Data) async -> Response {
@@ -220,6 +259,22 @@ final class DebugServer {
             return .json(await state())
         case "retry_outbox":
             await model.retryFailedChanges()
+            return .json(await state())
+        case "palette":
+            model.togglePalette()
+            return .json(await state())
+        case "menu":
+            // Performs the real NSMenuItem, e.g. {"path": ["Mailbox", "Sync Now"]}.
+            guard let path = object["path"] as? [String], path.count == 2,
+                let menu = NSApp.mainMenu?.items.first(where: { $0.title == path[0] })?.submenu,
+                let index = menu.items.firstIndex(where: { $0.title == path[1] })
+            else {
+                return .error(400, #"expected {"path": ["Menu", "Item"]} naming an existing menu item"#)
+            }
+            menu.update()
+            guard menu.items[index].isEnabled else { return .error(409, "menu item \(path) is disabled") }
+            menu.performActionForItem(at: index)
+            try? await Task.sleep(for: .milliseconds(100))
             return .json(await state())
         case "unstar": object["starred"] = false
         case "star": object["starred"] = object["starred"] ?? true
