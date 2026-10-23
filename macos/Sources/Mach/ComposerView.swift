@@ -33,12 +33,12 @@ struct ComposerSheet: View {
         .defaultFocus($focus, composer.to.isEmpty ? .to : nil)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
-            case .success(let urls): Task { await model.attach(urls, to: composer) }
+            case .success(let urls): model.attach(urls, to: composer)
             case .failure(let error): model.show(error)
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            Task { await model.attach(urls.filter(\.isFileURL), to: composer) }
+            model.attach(urls.filter(\.isFileURL), to: composer)
             return true
         } isTargeted: { dropTargeted = $0 }
         .overlay {

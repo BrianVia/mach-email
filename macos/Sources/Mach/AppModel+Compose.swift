@@ -83,6 +83,8 @@ final class ComposerModel: Identifiable {
     var snippetSelection = 0
     /// Sent, scheduled, or discarded: leaving it must not save it again.
     @ObservationIgnored var finished = false
+    /// Attachments still being copied; saves wait for them.
+    @ObservationIgnored var staging: Task<Void, Never>?
     /// Set by the body editor so snippet insertion goes through the text
     /// system, which keeps undo and places the cursor.
     @ObservationIgnored weak var bodyView: NSTextView?
@@ -212,6 +214,7 @@ extension AppModel {
 
     @discardableResult
     func saveDraft(_ composer: ComposerModel) async throws -> Draft {
+        await composer.staging?.value
         let draft = try await engine.dispatchDraft(KeyAction(["kind": "save_draft", "draft_id": composer.draft.id, "patch": composer.patch]))
         composer.draft = draft
         await refreshOutbox()
@@ -234,15 +237,13 @@ extension AppModel {
     func autosave(_ composer: ComposerModel) {
         guard !composer.finished else { return }
         let previous = draftSaves
-        pendingDraftSaves += 1
+        unsavedComposers.append(composer)
         draftSaves = Task {
             await previous?.value
             do { try await saveDraft(composer) } catch { show(error) }
-            pendingDraftSaves -= 1
+            unsavedComposers.removeAll { $0 === composer }
         }
     }
-
-    var hasUnsavedDraft: Bool { composer != nil || pendingDraftSaves > 0 }
 
     /// AppKit refuses to quit while the composer sheet is up, so quitting
     /// closes it first; the route change autosaves, and
@@ -260,15 +261,25 @@ extension AppModel {
         }
     }
 
-    /// Quit: saves the open composer and waits for every autosave.
-    func saveDraftsBeforeQuit() async {
-        if let composer { autosave(composer) }
-        await draftSaves?.value
+    /// Quit: saves the open composer and every pending autosave off the main
+    /// thread, blocking for at most `seconds`. Main-actor work cannot run
+    /// while AppKit waits on the quit, so this does not go through `saveDraft`.
+    func saveDraftsForQuit(within seconds: Double) {
+        let composers = (unsavedComposers + [composer].compactMap { $0 }).filter { !$0.finished }
+        let saves = composers.compactMap { try? KeyAction(["kind": "save_draft", "draft_id": $0.draft.id, "patch": $0.patch]) }
+        guard !saves.isEmpty else { return }
+        engine.log("info", "quit saves \(saves.count) draft(s)")
+        let done = DispatchSemaphore(value: 0)
+        Task.detached { [engine] in
+            for save in saves { _ = try? await engine.dispatchDraft(save) }
+            done.signal()
+        }
+        if done.wait(timeout: .now() + seconds) == .timedOut { engine.log("warn", "quit before the drafts finished saving") }
     }
 
     private func leave(_ composer: ComposerModel, finished: Bool = false) {
         guard self.composer === composer else { return }
-        composer.finished = finished
+        composer.finished = composer.finished || finished
         route = composer.background
         Task {
             switch route {
@@ -304,7 +315,13 @@ extension AppModel {
     func sendLater(_ composer: ComposerModel, at date: Date) async {
         do {
             let draft = try await saveDraft(composer)
-            _ = try await engine.dispatch(KeyAction(["kind": "send_later", "draft_id": draft.id, "at": date.formatted(.iso8601)]))
+            composer.finished = true
+            do {
+                _ = try await engine.dispatch(KeyAction(["kind": "send_later", "draft_id": draft.id, "at": date.formatted(.iso8601)]))
+            } catch {
+                composer.finished = false
+                throw error
+            }
             leave(composer, finished: true)
             show("Scheduled for \(date.formatted(date: .abbreviated, time: .shortened))")
         } catch {
@@ -313,6 +330,7 @@ extension AppModel {
     }
 
     func discard(_ composer: ComposerModel) async {
+        composer.finished = true
         do {
             _ = try await engine.dispatch(KeyAction(["kind": "discard_draft", "draft_id": composer.draft.id]))
             leave(composer, finished: true)
@@ -320,18 +338,24 @@ extension AppModel {
             _ = try? await engine.flushOutbox()
             await refreshOutbox()
         } catch {
+            composer.finished = false
             show(error)
         }
     }
 
-    func attach(_ urls: [URL], to composer: ComposerModel) async {
-        for url in urls {
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            do {
-                composer.attachments.append(try await engine.stageAttachment(file: url))
-            } catch {
-                show("Couldn't attach \(url.lastPathComponent): \(error.localizedDescription)", isError: true)
+    /// Copies the files off the main thread; a save or send waits for them.
+    func attach(_ urls: [URL], to composer: ComposerModel) {
+        let previous = composer.staging
+        composer.staging = Task {
+            await previous?.value
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    composer.attachments.append(try await engine.stageAttachment(file: url))
+                } catch {
+                    show("Couldn't attach \(url.lastPathComponent): \(error.localizedDescription)", isError: true)
+                }
             }
         }
     }
@@ -443,7 +467,8 @@ extension AppModel {
             }
         case "attach":
             guard let path = object["path"] as? String else { throw EngineFailure(message: "attach needs path") }
-            await attach([URL(fileURLWithPath: path)], to: composer)
+            attach([URL(fileURLWithPath: path)], to: composer)
+            await composer.staging?.value
         case "close_composer": escapeComposer()
         case "discard_draft": await discard(composer)
         default: throw EngineFailure(message: "unknown composer action \(name)")

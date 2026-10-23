@@ -151,7 +151,9 @@ final class AppModel {
     /// newer one started drops its result.
     @ObservationIgnored var navigation = 0
     @ObservationIgnored var draftSaves: Task<Void, Never>?
-    @ObservationIgnored var pendingDraftSaves = 0
+    /// Composers that left the screen and are not saved yet.
+    @ObservationIgnored var unsavedComposers: [ComposerModel] = []
+    @ObservationIgnored private var loading: Task<Void, Never>?
     @ObservationIgnored private var loadingOlder = false
 
     init(engine: Engine) {
@@ -226,6 +228,13 @@ final class AppModel {
     }
 
     // MARK: Loading
+
+    /// A notification click can arrive before launch finishes loading, so
+    /// every caller shares one load.
+    func loadOnce() async {
+        if loading == nil { loading = Task { await load() } }
+        await loading?.value
+    }
 
     func load() async {
         do {
@@ -419,8 +428,9 @@ final class AppModel {
         }
         guard cached.messages.contains(where: { !$0.fetchedFull }) else { return }
         let full = try await engine.openThread(id, fetch: true)
+        // apply keeps a message a sync added meanwhile and the selected message.
+        apply(full, to: id)
         guard var state = reader, state.thread.id == id else { return }
-        state.messages = full.messages
         state.bodyFetchError = full.bodyFetchError
         reader = state
         if let error = full.bodyFetchError { show("Couldn't fetch the full message, showing a preview (\(error))", isError: true) }

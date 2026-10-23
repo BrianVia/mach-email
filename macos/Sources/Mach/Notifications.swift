@@ -85,6 +85,7 @@ extension AppModel {
     /// the inbox it arrived in, so Esc lands on its row.
     func openFromNotification(_ userInfo: [String: String]) async {
         guard let threadId = userInfo["thread_id"] else { return }
+        await loadOnce()
         NSApp.activate()
         if let window = NSApp.windows.first(where: \.canBecomeMain) {
             if window.isMiniaturized { window.deminiaturize(nil) }
