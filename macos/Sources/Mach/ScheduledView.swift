@@ -5,21 +5,23 @@ struct ScheduledView: View {
     let state: ScheduledState
 
     var body: some View {
-        if state.sends.isEmpty {
-            ContentUnavailableView("Nothing Scheduled", systemImage: "clock", description: Text("Messages you schedule with Send Later appear here."))
-        } else {
-            List(selection: Binding(get: { state.selected?.id }, set: { model.scheduled?.selection = $0 })) {
-                ForEach(state.sends) { send in
-                    ScheduledRow(send: send, accountLabel: model.accounts.count > 1 ? model.accountLabel(send.accountId) : nil)
-                        .tag(send.id)
-                        .contextMenu {
-                            Button("Open Draft") { run { try await model.openScheduledDraft(send) } }
-                            Button("Cancel Send", role: .destructive) { run { try await model.cancelScheduled(send) } }
-                        }
-                }
+        List(selection: Binding(get: { state.selected?.id }, set: { model.scheduled?.selection = $0 })) {
+            ForEach(state.sends) { send in
+                ScheduledRow(send: send, accountLabel: model.accounts.count > 1 ? model.accountLabel(send.accountId) : nil)
+                    .tag(send.id)
+                    .contextMenu {
+                        Button("Open Draft") { run { try await model.openScheduledDraft(send) } }
+                        Button("Cancel Send", role: .destructive) { run { try await model.cancelScheduled(send) } }
+                    }
             }
-            .contextMenu(forSelectionType: String.self, menu: { _ in }) { ids in
-                if let send = state.sends.first(where: { ids.contains($0.id) }) { run { try await model.openScheduledDraft(send) } }
+        }
+        .contextMenu(forSelectionType: String.self, menu: { _ in }) { ids in
+            if let send = state.sends.first(where: { ids.contains($0.id) }) { run { try await model.openScheduledDraft(send) } }
+        }
+        .overlay {
+            if state.sends.isEmpty {
+                ContentUnavailableView("Nothing Scheduled", systemImage: "clock",
+                    description: Text("Messages you schedule with Send Later appear here."))
             }
         }
     }
@@ -79,8 +81,7 @@ struct ScheduledDetail: View {
             }
             .formStyle(.grouped)
         } else {
-            ContentUnavailableView("Nothing Scheduled", systemImage: "clock",
-                description: Text("Messages you schedule with Send Later appear here."))
+            ContentUnavailableView("No Send Selected", systemImage: "clock")
         }
     }
 
