@@ -419,10 +419,11 @@ extension AppModel {
             if let value = object["bcc"] as? String { composer.bcc = value }
             if let value = object["subject"] as? String { composer.subject = value }
             if let value = object["body"] as? String { composer.body = value }
-            // Moves the body's caret, as a click would, to test snippet insertion.
-            if let caret = object["caret"] as? Int, let view = composer.bodyView {
-                view.window?.makeFirstResponder(view)
-                view.setSelectedRange(NSRange(location: caret, length: 0))
+            // Typing, caret moves, and Return in the body, through the text system.
+            if let view = composer.bodyView {
+                if let text = object["type"] as? String { view.insertText(text, replacementRange: view.selectedRange()) }
+                if let caret = object["caret"] as? Int { view.setSelectedRange(NSRange(location: caret, length: 0)) }
+                if object["return"] as? Bool == true { view.doCommand(by: #selector(NSResponder.insertNewline(_:))) }
             }
         case "attach":
             guard let path = object["path"] as? String else { throw EngineFailure(message: "attach needs path") }
