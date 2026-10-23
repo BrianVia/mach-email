@@ -79,7 +79,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if let consumed = model.handleRouteKey(chord) { return consumed ? nil : event }
             return Self.shouldIntercept(event) && model.handleKey(chord) ? nil : event
         }
-        if let port = Self.debugPort { debugServer = DebugServer(port: port, model: model) }
+        if let port = Self.debugPort {
+            debugServer = DebugServer(port: port, model: model)
+            // Agents' copies must never pass for the owner's own app.
+            NSApp.dockTile.badgeLabel = "TEST"
+        }
         Task { await model.listen() }
         Task {
             await model.load()
@@ -100,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     /// Off unless MACH_DEBUG_PORT is set, in every build.
-    private static var debugPort: UInt16? {
+    static var debugPort: UInt16? {
         ProcessInfo.processInfo.environment["MACH_DEBUG_PORT"].flatMap { UInt16($0) }
     }
 

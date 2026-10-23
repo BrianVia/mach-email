@@ -127,6 +127,7 @@ struct NotificationsHint: View {
 
 struct SettingsView: View {
     @AppStorage(NotificationPreferences.enabledKey) private var notifications = true
+    @ScaledMetric private var width = 420.0
 
     var body: some View {
         Form {
@@ -134,7 +135,7 @@ struct SettingsView: View {
             Button("Notification Settings…") { NSWorkspace.shared.open(NotificationPreferences.settingsURL) }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
+        .frame(width: width)
         .fixedSize()
     }
 }

@@ -23,7 +23,8 @@ struct PaletteState {
     var query = ""
     var selected = 0
 
-    /// Prefix matches first, then word starts, substrings, and in-order
+    /// Prefix matches first, then word starts, label path segments ("arc"
+    /// ranks Archive above "Go to Receipts/Archive"), substrings, and in-order
     /// letters ("mru" finds "Mark read, unread"); ties keep keymap order.
     var filtered: [PaletteCommand] {
         let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -39,13 +40,14 @@ struct PaletteState {
         return visible.isEmpty ? nil : visible[min(selected, visible.count - 1)]
     }
 
-    private static func rank(_ title: String, _ needle: String) -> Int? {
+    static func rank(_ title: String, _ needle: String) -> Int? {
         if title.hasPrefix(needle) { return 0 }
         if title.contains(" " + needle) { return 1 }
-        if title.contains(needle) { return 2 }
+        if title.contains("/" + needle) { return 2 }
+        if title.contains(needle) { return 3 }
         var rest = Substring(needle)
         for character in title where character == rest.first { rest = rest.dropFirst() }
-        return rest.isEmpty ? 3 : nil
+        return rest.isEmpty ? 4 : nil
     }
 }
 
@@ -75,6 +77,21 @@ extension AppModel {
         }
     }
 
+    /// "Reply All" for `reply shift+r`, "Archive" for `archive e`.
+    func actionTitle(name: String, chord: String) -> String {
+        Self.chordTitles["\(name) \(chord)"] ?? Self.paletteTitles[name] ?? name.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    /// The label a `g` chord opens ("Inbox" for `g i`), or nil when the chord
+    /// does something else.
+    func destination(of chord: String, mode: KeyMode) -> String? {
+        guard case .action(let action) = engine.resolveKey(mode: mode, chord: chord, context: keyContext),
+            action.kind == "open_label", let label = action.fields.labelId
+        else { return nil }
+        let name = labelName(label)
+        return name == label ? label.capitalized : name
+    }
+
     /// What the Tauri palette lists: every binding in the current mode (the
     /// shortest chord wins per title), then the commands that have no key.
     func paletteCommands() -> [PaletteCommand] {
@@ -97,15 +114,9 @@ extension AppModel {
             .sorted { (Self.paletteGroup($0.element.name), $0.offset) < (Self.paletteGroup($1.element.name), $1.offset) }
             .map(\.element)
         for binding in bindings where !["select_next", "select_prev", "quit"].contains(binding.name) {
-            var title = Self.chordTitles["\(binding.name) \(binding.chord)"] ?? Self.paletteTitles[binding.name]
-            if binding.name == "open_label",
-                case .action(let action) = engine.resolveKey(mode: mode, chord: binding.chord, context: keyContext),
-                let label = action.fields.labelId
-            {
-                title = "Go to \(labelName(label) == label ? label.capitalized : labelName(label))"
-            }
-            add(PaletteCommand(title: title ?? binding.name.replacingOccurrences(of: "_", with: " ").capitalized,
-                chord: binding.chord, perform: .chord(binding.chord)))
+            let title = (binding.name == "open_label" ? destination(of: binding.chord, mode: mode) : nil).map { "Go to \($0)" }
+                ?? actionTitle(name: binding.name, chord: binding.chord)
+            add(PaletteCommand(title: title, chord: binding.chord, perform: .chord(binding.chord)))
         }
         for label in userLabels {
             add(PaletteCommand(title: "Go to \(label.name)", perform: .openLabel(label.id)))
@@ -189,6 +200,7 @@ struct PaletteView: View {
     @Bindable var model: AppModel
     let state: PaletteState
     @FocusState private var fieldFocused: Bool
+    @ScaledMetric private var width = 560.0
 
     var body: some View {
         let commands = state.filtered
@@ -228,7 +240,7 @@ struct PaletteView: View {
                 }
             }
         }
-        .frame(width: 560)
+        .frame(width: width)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator))
         .shadow(color: .black.opacity(0.25), radius: 24, y: 10)
@@ -252,17 +264,8 @@ private struct PaletteRow: View {
             Text(command.title)
             Spacer(minLength: 16)
             if let chord = command.chord {
-                HStack(spacing: 3) {
-                    ForEach(Array(KeyCaps.of(chord).enumerated()), id: \.offset) { _, cap in
-                        Text(cap)
-                            .font(.system(.caption, design: .rounded).weight(.medium))
-                            .frame(minWidth: 18)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
-                    }
-                }
-                .foregroundStyle(selected ? AnyShapeStyle(.white.opacity(0.9)) : AnyShapeStyle(.secondary))
+                KeyCapsView(chord: chord)
+                    .foregroundStyle(selected ? AnyShapeStyle(.white.opacity(0.9)) : AnyShapeStyle(.secondary))
             }
         }
         .padding(.horizontal, 10)
@@ -286,6 +289,24 @@ enum KeyCaps {
             let modifiers = modifierOrder.filter(parts.dropLast().contains).map { symbols[$0]! }
             let key = parts.last ?? ""
             return (modifiers + [symbols[key] ?? key.uppercased()]).joined()
+        }
+    }
+}
+
+/// A chord drawn as key caps, shared by the palette and the chord hint.
+struct KeyCapsView: View {
+    let chord: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(Array(KeyCaps.of(chord).enumerated()), id: \.offset) { _, cap in
+                Text(cap)
+                    .font(.system(.caption, design: .rounded).weight(.medium))
+                    .frame(minWidth: 18)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+            }
         }
     }
 }

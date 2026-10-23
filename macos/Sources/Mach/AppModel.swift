@@ -199,8 +199,11 @@ final class AppModel {
         }
         if let search { return "\(search.results.count.formatted()) results" }
         if case .activity(let activity) = route { return "\(activity.entries.count) recent changes" }
-        let count = visibleThreads.count.formatted()
-        return "\(count) threads" + (list.account.map { " · only \(accountLabel($0))" } ?? "")
+        // The same rows the split tab counts, so "6 unread" here matches "Important 6".
+        let visible = visibleThreads
+        let unread = visible.reduce(0) { $0 + ($1.unread ? 1 : 0) }
+        return "\(visible.count.formatted()) conversations" + (unread > 0 ? " · \(unread.formatted()) unread" : "")
+            + (list.account.map { " · only \(accountLabel($0))" } ?? "")
     }
 
     func labelName(_ id: String) -> String {
