@@ -68,7 +68,7 @@ private struct HeaderToolbar: ToolbarContent {
     var body: some ToolbarContent {
         if let port = AppDelegate.debugPort {
             ToolbarItem(placement: .navigation) {
-                Text("TEST COPY \(port)")
+                Text(verbatim: "TEST COPY \(port)")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8)
@@ -179,7 +179,7 @@ private struct ChordHint: View {
         let items = model.continuations.map { (next: $0.next, title: title($0)) }
         let columns = min(items.count, 4)
         VStack(alignment: .leading, spacing: 10) {
-            KeyCapsView(chord: model.chordBuffer).font(.headline).foregroundStyle(.secondary)
+            KeyCapsView(chord: model.chordBuffer).foregroundStyle(.secondary)
             Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 6) {
                 ForEach(Array(stride(from: 0, to: items.count, by: max(columns, 1))), id: \.self) { start in
                     GridRow {
