@@ -117,6 +117,7 @@ enum Sender {
     static func name(_ raw: String) -> String {
         if let match = raw.firstMatch(of: /^\s*"?([^"<]+?)"?\s*<.+>$/) { return String(match.1).trimmingCharacters(in: .whitespaces) }
         if let match = raw.firstMatch(of: /^[\w.+-]+@([\w.-]+)$/) { return String(match.1) }
+        if let match = raw.firstMatch(of: /^\s*<([^>]+)>\s*$/) { return String(match.1) }
         return raw
     }
 

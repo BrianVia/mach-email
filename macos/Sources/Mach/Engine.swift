@@ -128,6 +128,14 @@ final class Engine: Sendable {
     }
 }
 
+extension EngineError {
+    var errorDescription: String? {
+        switch self {
+        case .Failed(let message): message
+        }
+    }
+}
+
 /// Keymap sections in config/default-keymap.toml.
 enum KeyMode: String, Sendable {
     case normal, reading, composing

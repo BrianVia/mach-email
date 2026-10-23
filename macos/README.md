@@ -42,6 +42,19 @@ curl -o mach.png 127.0.0.1:7366/snapshot                    # PNG of the app's o
 curl -X POST 127.0.0.1:7366/notify -d '{"title":"Ada","body":"Hi","thread_id":"inbox-2"}'
 ```
 
+Reader hooks (`DebugServer+Reader.swift`) act on the open thread; `message`
+and `index` default to the selected message and its first matching attachment.
+`/state` reports them under `opened_thread.reader`.
+
+```sh
+curl -X POST 127.0.0.1:7366/action -d '{"name":"open_image","index":0}'          # then /key l, h, esc, or cmd+s
+curl -X POST 127.0.0.1:7366/action -d '{"name":"save_attachment","index":0}'     # first non-image attachment
+curl -X POST 127.0.0.1:7366/action -d '{"name":"block_remote_images","value":true}'  # in memory, not settings.toml
+curl -X POST 127.0.0.1:7366/action -d '{"name":"unsubscribe"}'                   # opens the confirm alert only
+curl -X POST 127.0.0.1:7366/action -d '{"name":"unsubscribe_inject","url":"http://127.0.0.1:7366/noop"}'
+curl -X POST 127.0.0.1:7366/action -d '{"name":"unsubscribe_confirm"}'           # refuses anything but an injected loopback URL
+```
+
 Keys go through the same keymap path as the keyboard (`config/default-keymap.toml`
 resolved by the engine). Key names are `enter`, `esc`, `tab`, `space`,
 `backspace`, `delete`, arrows, or any single character; `{"key":"r","cmd":true}`

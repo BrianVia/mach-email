@@ -71,7 +71,7 @@ struct ReaderView: View {
         switch target {
         case .https(let url, true): "Mach sends the sender's one-click unsubscribe request to \(URL(string: url)?.host ?? url)."
         case .https(let url, false): "Opens the sender's unsubscribe page (\(URL(string: url)?.host ?? url)) in your browser."
-        case .mailto(let to, _): "Mach sends an unsubscribe email to \(to)."
+        case .mailto(let to, _): "Mach sends an unsubscribe email from your account to \(to.split(separator: "@").last.map { "an address at \($0)" } ?? to)."
         }
     }
 }
@@ -180,18 +180,20 @@ private struct RemoteImagesBar: View {
     var body: some View {
         let email = Sender.email(message.from).lowercased()
         HStack(spacing: 6) {
-            Image(systemName: "photo.badge.exclamationmark")
-            Text("\(count) remote \(count == 1 ? "image" : "images") blocked")
-            Text("·")
+            Group {
+                Image(systemName: "photo.badge.exclamationmark")
+                Text("\(count) remote \(count == 1 ? "image" : "images") blocked")
+            }
+            .foregroundStyle(.secondary)
             Button("Show Images") { model.showRemoteImages(messageId: message.id) }
             if !email.isEmpty {
-                Text("·")
+                Text("·").foregroundStyle(.tertiary)
                 Button("Always Show from \(email)") { model.alwaysShowRemoteImages(from: email) }
             }
         }
         .buttonStyle(.link)
         .font(.callout)
-        .foregroundStyle(.secondary)
+        .lineLimit(1)
     }
 }
 
