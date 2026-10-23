@@ -47,7 +47,7 @@ final class DebugServer {
         }
     }
 
-    private static let maxRequestBytes = 1 << 20
+    private nonisolated static let maxRequestBytes = 1 << 20
 
     private struct Response {
         var status = 200
