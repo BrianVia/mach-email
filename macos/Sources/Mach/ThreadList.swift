@@ -12,6 +12,9 @@ struct ThreadList: View {
                     ThreadRow(thread: thread, accountLabel: multipleAccounts ? model.accountLabel(thread.accountId) : nil)
                         .tag(thread.id)
                         .id(thread.id)
+                        .contentShape(Rectangle())
+                        // A click opens the thread; j/k and arrow keys only move the selection.
+                        .simultaneousGesture(TapGesture().onEnded { open(thread.id) })
                 }
                 if !threads.isEmpty && model.list.threads.count >= model.list.limit {
                     Button("Load Older") { Task { do { try await model.loadOlder() } catch { model.show(error) } } }
@@ -51,17 +54,14 @@ struct ThreadList: View {
         .background(.bar)
     }
 
-    /// Clicking a row while a thread is open opens the clicked thread, like Mail.
     private var selection: Binding<String?> {
-        Binding {
-            model.list.selection
-        } set: { id in
-            guard let id, id != model.list.selection else { return }
-            if model.reader != nil { open(id) } else { model.list.selection = id }
+        Binding { model.list.selection } set: { id in
+            if let id { model.list.selection = id }
         }
     }
 
     private func open(_ id: String) {
+        guard model.reader?.thread.id != id else { return }
         Task { do { try await model.openThread(id) } catch { model.show(error) } }
     }
 }

@@ -64,6 +64,8 @@ struct SearchView: View {
                     ThreadRow(thread: thread, accountLabel: multipleAccounts ? model.accountLabel(thread.accountId) : nil)
                         .tag(thread.id)
                         .id(thread.id)
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(TapGesture().onEnded { open(thread.id) })
                 }
             }
             .contextMenu(forSelectionType: String.self, menu: { _ in }) { ids in
@@ -129,11 +131,11 @@ struct SearchView: View {
         } set: { id in
             guard let index = state.results.firstIndex(where: { $0.id == id }) else { return }
             model.search?.selected = index
-            if model.reader != nil { open(state.results[index].id) }
         }
     }
 
     private func open(_ id: String) {
+        guard model.reader?.thread.id != id else { return }
         Task { do { try await model.openThread(id) } catch { model.show(error) } }
     }
 }
