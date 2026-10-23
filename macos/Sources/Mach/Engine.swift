@@ -98,11 +98,15 @@ final class Engine: Sendable {
     }
 
     func unsubscribePost(url: String) async throws {
-        _ = try await core.unsubscribePost(url: url)
+        do { _ = try await core.unsubscribePost(url: url) } catch EngineError.Failed(let message) { throw EngineFailure(message: message) }
     }
 
     func unsubscribeMailto(account: String, to: String, subject: String) async throws {
-        _ = try await core.unsubscribeMailto(accountId: account, to: to, subject: subject)
+        do {
+            _ = try await core.unsubscribeMailto(accountId: account, to: to, subject: subject)
+        } catch EngineError.Failed(let message) {
+            throw EngineFailure(message: message)
+        }
     }
 
     func resolveKey(mode: KeyMode, chord: String, context: KeyContext) -> KeyResolution {
@@ -125,14 +129,6 @@ final class Engine: Sendable {
 
     func log(_ level: String, _ message: String) {
         _ = try? core.frontendLog(level: level, message: message)
-    }
-}
-
-extension EngineError {
-    var errorDescription: String? {
-        switch self {
-        case .Failed(let message): message
-        }
     }
 }
 

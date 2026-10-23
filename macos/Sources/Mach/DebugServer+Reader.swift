@@ -5,7 +5,7 @@ import Foundation
 extension AppModel {
     static let debugReaderActions = [
         "select_message", "open_image", "save_attachment", "activate_notice", "copy_markdown",
-        "block_remote_images", "show_images", "unsubscribe", "unsubscribe_cancel",
+        "block_remote_images", "show_images", "always_show_sender", "unsubscribe", "unsubscribe_cancel",
         // Replaces the confirm's target so the confirm path can run against a URL
         // that never reaches a real sender.
         "unsubscribe_inject", "unsubscribe_confirm",
@@ -40,6 +40,7 @@ extension AppModel {
             try? await Task.sleep(for: .milliseconds(500))
         case "copy_markdown": copyThreadAsMarkdown()
         case "show_images": showRemoteImages(messageId: message.id)
+        case "always_show_sender": alwaysShowRemoteImages(from: Sender.email(message.from))
         case "unsubscribe":
             do { try await beginUnsubscribe(messageId: message.id) } catch { return String(describing: error) }
         case "unsubscribe_cancel": cancelUnsubscribe()
