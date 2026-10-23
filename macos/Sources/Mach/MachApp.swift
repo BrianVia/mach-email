@@ -27,7 +27,7 @@ struct MachApp: App {
                 .keyboardShortcut("n")
             }
         }
-        Settings { SettingsView() }
+        SwiftUI.Settings { SettingsView() }
     }
 }
 
